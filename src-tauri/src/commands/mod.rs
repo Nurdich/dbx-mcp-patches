@@ -1,3 +1,4 @@
+pub mod agent_runtime;
 pub mod ai;
 pub mod connection;
 #[allow(dead_code, unused_imports)]

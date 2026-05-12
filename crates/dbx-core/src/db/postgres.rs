@@ -281,7 +281,12 @@ pub async fn get_columns(pool: &PgPool, schema: &str, table: &str) -> Result<Vec
 }
 
 pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, String> {
+    execute_query_with_row_limit(pool, sql, crate::query::MAX_ROWS).await
+}
+
+pub async fn execute_query_with_row_limit(pool: &PgPool, sql: &str, row_limit: usize) -> Result<QueryResult, String> {
     let start = Instant::now();
+    let row_limit = row_limit.max(1);
 
     if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
         let mut stream = sqlx::query(sql).persistent(false).fetch(pool);
@@ -301,7 +306,7 @@ pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, Stri
                     .map(|i| pg_value_to_json(&row, i, column_types.get(i).map(String::as_str).unwrap_or("")))
                     .collect(),
             );
-            if result_rows.len() > crate::query::MAX_ROWS {
+            if result_rows.len() > row_limit {
                 break;
             }
         }
@@ -311,9 +316,9 @@ pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, Stri
             columns = desc.columns().iter().map(|c| c.name().to_string()).collect();
         }
 
-        let truncated = result_rows.len() > crate::query::MAX_ROWS;
+        let truncated = result_rows.len() > row_limit;
         if truncated {
-            result_rows.truncate(crate::query::MAX_ROWS);
+            result_rows.truncate(row_limit);
         }
 
         Ok(QueryResult {
@@ -337,11 +342,21 @@ pub async fn execute_query(pool: &PgPool, sql: &str) -> Result<QueryResult, Stri
 }
 
 pub async fn execute_query_with_schema(pool: &PgPool, schema: &str, sql: &str) -> Result<QueryResult, String> {
+    execute_query_with_schema_and_row_limit(pool, schema, sql, crate::query::MAX_ROWS).await
+}
+
+pub async fn execute_query_with_schema_and_row_limit(
+    pool: &PgPool,
+    schema: &str,
+    sql: &str,
+    row_limit: usize,
+) -> Result<QueryResult, String> {
     let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
     let set_path = format!("SET search_path TO \"{}\", public", schema);
     sqlx::query(&set_path).execute(&mut *conn).await.map_err(|e| e.to_string())?;
 
     let start = Instant::now();
+    let row_limit = row_limit.max(1);
 
     if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "EXPLAIN", "WITH", "TABLE"]) {
         let mut stream = sqlx::query(sql).persistent(false).fetch(&mut *conn);
@@ -361,7 +376,7 @@ pub async fn execute_query_with_schema(pool: &PgPool, schema: &str, sql: &str) -
                     .map(|i| pg_value_to_json(&row, i, column_types.get(i).map(String::as_str).unwrap_or("")))
                     .collect(),
             );
-            if result_rows.len() > crate::query::MAX_ROWS {
+            if result_rows.len() > row_limit {
                 break;
             }
         }
@@ -372,9 +387,9 @@ pub async fn execute_query_with_schema(pool: &PgPool, schema: &str, sql: &str) -
             columns = desc.columns().iter().map(|c| c.name().to_string()).collect();
         }
 
-        let truncated = result_rows.len() > crate::query::MAX_ROWS;
+        let truncated = result_rows.len() > row_limit;
         if truncated {
-            result_rows.truncate(crate::query::MAX_ROWS);
+            result_rows.truncate(row_limit);
         }
 
         Ok(QueryResult {
@@ -444,6 +459,21 @@ pub async fn list_indexes(pool: &PgPool, schema: &str, table: &str) -> Result<Ve
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    fn postgres_limit_aware_execute_query_api_compiles(pool: &PgPool, sql: &str) {
+        let _ = execute_query_with_row_limit(pool, sql, 7);
+    }
+
+    #[allow(dead_code)]
+    fn postgres_schema_limit_aware_execute_query_api_compiles(pool: &PgPool, schema: &str, sql: &str) {
+        let _ = execute_query_with_schema_and_row_limit(pool, schema, sql, 7);
+    }
 }
 
 pub async fn list_foreign_keys(pool: &PgPool, schema: &str, table: &str) -> Result<Vec<ForeignKeyInfo>, String> {

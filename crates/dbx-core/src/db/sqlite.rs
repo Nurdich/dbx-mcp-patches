@@ -162,7 +162,16 @@ pub async fn list_triggers(pool: &SqlitePool, _schema: &str, table: &str) -> Res
 }
 
 pub async fn execute_query(pool: &SqlitePool, sql: &str) -> Result<QueryResult, String> {
+    execute_query_with_row_limit(pool, sql, crate::query::MAX_ROWS).await
+}
+
+pub async fn execute_query_with_row_limit(
+    pool: &SqlitePool,
+    sql: &str,
+    row_limit: usize,
+) -> Result<QueryResult, String> {
     let start = Instant::now();
+    let row_limit = row_limit.max(1);
 
     if starts_with_executable_sql_keyword(sql, &["SELECT", "PRAGMA", "EXPLAIN", "WITH"]) {
         let desc = pool.describe(sql).await.map_err(|e| e.to_string())?;
@@ -191,14 +200,14 @@ pub async fn execute_query(pool: &SqlitePool, sql: &str) -> Result<QueryResult, 
                     })
                     .collect(),
             );
-            if result_rows.len() > crate::query::MAX_ROWS {
+            if result_rows.len() > row_limit {
                 break;
             }
         }
 
-        let truncated = result_rows.len() > crate::query::MAX_ROWS;
+        let truncated = result_rows.len() > row_limit;
         if truncated {
-            result_rows.truncate(crate::query::MAX_ROWS);
+            result_rows.truncate(row_limit);
         }
 
         Ok(QueryResult {

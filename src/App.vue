@@ -15,6 +15,7 @@ import UpdateDialog from "@/components/layout/UpdateDialog.vue";
 import LoginPage from "@/components/auth/LoginPage.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
+import { useAgentRuntimeStore } from "@/stores/agentRuntimeStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useToast } from "@/composables/useToast";
@@ -37,6 +38,7 @@ import { isCloseTabShortcut, isExecuteSqlShortcut } from "@/lib/keyboardShortcut
 import { isPreviewTab } from "@/lib/tabPresentation";
 import { SQL_FILE_UNSUPPORTED_TYPES } from "@/lib/databaseCapabilities";
 import { classifyAiSqlExecution } from "@/lib/aiSqlExecutionPolicy";
+import { restoreStartupAgentRuntime } from "@/lib/appStartup";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,6 +48,7 @@ import type { HistoryEntry } from "@/lib/tauri";
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
+const agentRuntimeStore = useAgentRuntimeStore();
 const settingsStore = useSettingsStore();
 const savedSqlStore = useSavedSqlStore();
 const { message: toastMessage, visible: toastVisible, toast } = useToast();
@@ -158,6 +161,7 @@ watch(
   () => queryStore.activeTabId,
   () => {
     selectedSql.value = "";
+    agentRuntimeStore.setSelectedSql("");
     activeOutputView.value = "result";
   },
 );
@@ -445,15 +449,14 @@ function onLoginSuccess() {
 }
 
 function initApp() {
-  savedSqlStore
-    .initFromStorage()
-    .then(() => connectionStore.initFromDisk())
-    .then(() => {
-      reconnectRestoredTabs();
-    })
-    .catch((e: any) => {
-      toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
-    });
+  restoreStartupAgentRuntime({
+    initSavedSql: () => savedSqlStore.initFromStorage(),
+    initConnections: () => connectionStore.initFromDisk(),
+    reconnectRestoredTabs,
+    scheduleSync: () => agentRuntimeStore.scheduleSync(),
+  }).catch((e: any) => {
+    toast(t("connection.loadFailed", { message: e?.message || String(e) }), 5000);
+  });
   settingsStore.initAiConfig();
 }
 
@@ -614,7 +617,12 @@ onUnmounted(() => {
                       if (queryStore.activeTabId) queryStore.updateSql(queryStore.activeTabId, v);
                     }
                   "
-                  @editor-selection-change="(v: string) => (selectedSql = v)"
+                  @editor-selection-change="
+                    (v: string) => {
+                      selectedSql = v;
+                      agentRuntimeStore.setSelectedSql(v);
+                    }
+                  "
                   @editor-cursor-change="(p: number) => (cursorPos = p)"
                   @format-error="toast(t('toolbar.formatSqlFailed'))"
                   @reload="

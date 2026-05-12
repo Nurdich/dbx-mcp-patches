@@ -10,22 +10,31 @@ import { analyzeEditableQuery, allPrimaryKeysPresent } from "@/lib/sqlAnalysis";
 import { restoreOpenTabsState, serializeOpenTabs } from "@/lib/openTabsPersistence";
 import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useAgentRuntimeStore } from "@/stores/agentRuntimeStore";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import type { SavedSqlFile } from "@/types/database";
 
 const STORAGE_KEY = "dbx-open-tabs";
 const ACTIVE_TAB_KEY = "dbx-active-tab";
 
+function browserStorage(): Storage | undefined {
+  return globalThis.localStorage;
+}
+
 function saveTabs(tabs: QueryTab[], activeTabId: string | null) {
+  const storage = browserStorage();
+  if (!storage) return;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(serializeOpenTabs(tabs)));
-    localStorage.setItem(ACTIVE_TAB_KEY, activeTabId || "");
+    storage.setItem(STORAGE_KEY, JSON.stringify(serializeOpenTabs(tabs)));
+    storage.setItem(ACTIVE_TAB_KEY, activeTabId || "");
   } catch {}
 }
 
 function loadSavedTabs(): { tabs: QueryTab[]; activeTabId: string | null } {
+  const storage = browserStorage();
+  if (!storage) return { tabs: [], activeTabId: null };
   try {
-    return restoreOpenTabsState(localStorage.getItem(STORAGE_KEY), localStorage.getItem(ACTIVE_TAB_KEY), {
+    return restoreOpenTabsState(storage.getItem(STORAGE_KEY), storage.getItem(ACTIVE_TAB_KEY), {
       queryOnly: isTauriRuntime(),
     });
   } catch {
@@ -72,11 +81,18 @@ export const useQueryStore = defineStore("query", () => {
     return tabs.value.find((t) => t.connectionId === connectionId && t.database === database && t.title === title);
   }
 
+  function scheduleAgentRuntimeSync() {
+    useAgentRuntimeStore().scheduleSync();
+  }
+
+  watch(activeTabId, () => scheduleAgentRuntimeSync());
+
   function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query") {
     if (title) {
       const existing = findTabByTitle(connectionId, database, title);
       if (existing) {
         activeTabId.value = existing.id;
+        scheduleAgentRuntimeSync();
         return existing.id;
       }
     }
@@ -95,6 +111,7 @@ export const useQueryStore = defineStore("query", () => {
     };
     tabs.value.push(tab);
     activeTabId.value = id;
+    scheduleAgentRuntimeSync();
     return id;
   }
 
@@ -145,6 +162,7 @@ export const useQueryStore = defineStore("query", () => {
     if (activeTabId.value === id) {
       activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null;
     }
+    scheduleAgentRuntimeSync();
   }
 
   function closeOtherTabs(id: string) {
@@ -153,6 +171,7 @@ export const useQueryStore = defineStore("query", () => {
     const next = closeOtherTabsState(tabs.value, activeTabId.value, id);
     tabs.value = next.tabs;
     activeTabId.value = next.activeTabId;
+    scheduleAgentRuntimeSync();
   }
 
   function closeAllTabs() {
@@ -161,6 +180,7 @@ export const useQueryStore = defineStore("query", () => {
     const next = closeAllTabsState(tabs.value, activeTabId.value);
     tabs.value = next.tabs;
     activeTabId.value = next.activeTabId;
+    scheduleAgentRuntimeSync();
   }
 
   function updateSql(id: string, sql: string) {
@@ -169,6 +189,7 @@ export const useQueryStore = defineStore("query", () => {
       tab.sql = sql;
       tab.resultSortedSql = undefined;
       tab.resultBaseSql = undefined;
+      scheduleAgentRuntimeSync();
     }
   }
 
@@ -183,6 +204,7 @@ export const useQueryStore = defineStore("query", () => {
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
       activeTabId.value = existing.id;
+      scheduleAgentRuntimeSync();
       return existing.id;
     }
 
@@ -202,6 +224,7 @@ export const useQueryStore = defineStore("query", () => {
     };
     tabs.value.push(tab);
     activeTabId.value = id;
+    scheduleAgentRuntimeSync();
     return id;
   }
 
@@ -224,6 +247,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    scheduleAgentRuntimeSync();
   }
 
   function updateSchema(id: string, schema: string | undefined) {
@@ -231,6 +255,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || tab.schema === schema) return;
     tab.schema = schema;
     if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema };
+    scheduleAgentRuntimeSync();
   }
 
   function updateConnection(id: string, connectionId: string, database = "") {
@@ -245,6 +270,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+    scheduleAgentRuntimeSync();
   }
 
   function setTableMeta(id: string, meta: NonNullable<QueryTab["tableMeta"]>) {
@@ -410,6 +436,7 @@ export const useQueryStore = defineStore("query", () => {
         console.info("[DBX][executeTabSql:metadata:start]", { traceId, elapsed: elapsed() });
         await analyzeQueryMetadata(current, current.resultBaseSql);
         console.info("[DBX][executeTabSql:metadata:done]", { traceId, elapsed: elapsed() });
+        scheduleAgentRuntimeSync();
       } else {
         console.warn("[DBX][executeTabSql:stale-result]", {
           traceId,
@@ -428,6 +455,7 @@ export const useQueryStore = defineStore("query", () => {
         if (current.mode !== "data") current.tableMeta = undefined;
         current.resultBaseSql = options?.resultBaseSql ?? sql;
         current.resultSortedSql = options?.resultSortedSql;
+        scheduleAgentRuntimeSync();
       }
     } finally {
       const current = tabs.value.find((t) => t.id === id);
@@ -538,6 +566,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab?.results || index < 0 || index >= tab.results.length) return;
     tab.activeResultIndex = index;
     tab.result = tab.results[index];
+    scheduleAgentRuntimeSync();
   }
 
   function trimResultCache() {

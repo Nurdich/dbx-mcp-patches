@@ -12,7 +12,16 @@ pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
 
 pub fn duckdb_execute(con: &duckdb::Connection, sql: &str) -> Result<db::QueryResult, String> {
+    duckdb_execute_with_row_limit(con, sql, MAX_ROWS)
+}
+
+pub fn duckdb_execute_with_row_limit(
+    con: &duckdb::Connection,
+    sql: &str,
+    row_limit: usize,
+) -> Result<db::QueryResult, String> {
     let start = std::time::Instant::now();
+    let row_limit = row_limit.max(1);
 
     if starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "PRAGMA"]) {
         let mut stmt = con.prepare(sql).map_err(|e| e.to_string())?;
@@ -25,9 +34,6 @@ pub fn duckdb_execute(con: &duckdb::Connection, sql: &str) -> Result<db::QueryRe
 
         let mut result_rows = Vec::new();
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            if result_rows.len() >= MAX_ROWS {
-                break;
-            }
             let vals: Vec<serde_json::Value> = (0..col_count)
                 .map(|i| {
                     row.get::<_, String>(i)
@@ -45,9 +51,15 @@ pub fn duckdb_execute(con: &duckdb::Connection, sql: &str) -> Result<db::QueryRe
                 })
                 .collect();
             result_rows.push(vals);
+            if result_rows.len() > row_limit {
+                break;
+            }
         }
 
-        let truncated = result_rows.len() >= MAX_ROWS;
+        let truncated = result_rows.len() > row_limit;
+        if truncated {
+            result_rows.truncate(row_limit);
+        }
         Ok(db::QueryResult {
             columns,
             rows: result_rows,
@@ -67,9 +79,14 @@ pub fn duckdb_execute(con: &duckdb::Connection, sql: &str) -> Result<db::QueryRe
     }
 }
 
-pub fn truncate_result(mut result: db::QueryResult) -> db::QueryResult {
-    if result.rows.len() > MAX_ROWS {
-        result.rows.truncate(MAX_ROWS);
+pub fn truncate_result(result: db::QueryResult) -> db::QueryResult {
+    truncate_result_with_row_limit(result, MAX_ROWS)
+}
+
+pub fn truncate_result_with_row_limit(mut result: db::QueryResult, row_limit: usize) -> db::QueryResult {
+    let row_limit = row_limit.max(1);
+    if result.rows.len() > row_limit {
+        result.rows.truncate(row_limit);
         result.truncated = true;
     }
     result
@@ -142,6 +159,18 @@ pub async fn do_execute(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
 ) -> Result<db::QueryResult, String> {
+    do_execute_with_row_limit(state, pool_key, sql, schema, cancel_token, MAX_ROWS).await
+}
+
+pub async fn do_execute_with_row_limit(
+    state: &AppState,
+    pool_key: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    row_limit: usize,
+) -> Result<db::QueryResult, String> {
+    let row_limit = row_limit.max(1);
     let connections = state.connections.read().await;
     let pool = connections.get(pool_key).ok_or("Connection not found")?;
 
@@ -153,7 +182,7 @@ pub async fn do_execute(
             wait_for_query(cancel_token, async move {
                 let task = tokio::task::spawn_blocking(move || {
                     let con = con.lock().map_err(|e| e.to_string())?;
-                    duckdb_execute(&con, &sql)
+                    duckdb_execute_with_row_limit(&con, &sql, row_limit)
                 });
                 task.await.map_err(|e| e.to_string())?
             })
@@ -163,22 +192,26 @@ pub async fn do_execute(
             let p = p.clone();
             let bare = *mode == crate::connection::MysqlMode::Bare;
             drop(connections);
-            wait_for_query(cancel_token, db::mysql::execute_query(&p, sql, bare)).await
+            wait_for_query(cancel_token, db::mysql::execute_query_with_row_limit(&p, sql, bare, row_limit)).await
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
             let schema = schema.map(|s| s.to_string());
             drop(connections);
             if let Some(schema) = schema {
-                wait_for_query(cancel_token, db::postgres::execute_query_with_schema(&p, &schema, sql)).await
+                wait_for_query(
+                    cancel_token,
+                    db::postgres::execute_query_with_schema_and_row_limit(&p, &schema, sql, row_limit),
+                )
+                .await
             } else {
-                wait_for_query(cancel_token, db::postgres::execute_query(&p, sql)).await
+                wait_for_query(cancel_token, db::postgres::execute_query_with_row_limit(&p, sql, row_limit)).await
             }
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
             drop(connections);
-            wait_for_query(cancel_token, db::sqlite::execute_query(&p, sql)).await
+            wait_for_query(cancel_token, db::sqlite::execute_query_with_row_limit(&p, sql, row_limit)).await
         }
         PoolKind::ClickHouse(client) => {
             let client = client.clone();
@@ -186,7 +219,7 @@ pub async fn do_execute(
             drop(connections);
             wait_for_query(cancel_token, db::clickhouse_driver::execute_query(&client, &database, sql))
                 .await
-                .map(truncate_result)
+                .map(|result| truncate_result_with_row_limit(result, row_limit))
         }
         PoolKind::SqlServer(client) => {
             let client = client.clone();
@@ -199,7 +232,9 @@ pub async fn do_execute(
                 },
                 None => client.lock().await,
             };
-            wait_for_query(cancel_token, db::sqlserver::execute_query(&mut client, sql)).await.map(truncate_result)
+            wait_for_query(cancel_token, db::sqlserver::execute_query(&mut client, sql))
+                .await
+                .map(|result| truncate_result_with_row_limit(result, row_limit))
         }
         PoolKind::Oracle(pool) => {
             let client = pool.client();
@@ -218,9 +253,11 @@ pub async fn do_execute(
             if let Some(schema) = schema {
                 wait_for_query(cancel_token, db::oracle_driver::execute_query_with_schema(&*client, &schema, sql))
                     .await
-                    .map(truncate_result)
+                    .map(|result| truncate_result_with_row_limit(result, row_limit))
             } else {
-                wait_for_query(cancel_token, db::oracle_driver::execute_query(&*client, sql)).await.map(truncate_result)
+                wait_for_query(cancel_token, db::oracle_driver::execute_query(&*client, sql))
+                    .await
+                    .map(|result| truncate_result_with_row_limit(result, row_limit))
             }
         }
         PoolKind::Elasticsearch(client) => {
@@ -229,7 +266,7 @@ pub async fn do_execute(
             drop(connections);
             wait_for_query(cancel_token, db::elasticsearch_driver::execute_rest_query(&client, &sql))
                 .await
-                .map(truncate_result)
+                .map(|result| truncate_result_with_row_limit(result, row_limit))
         }
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
         PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
@@ -250,7 +287,7 @@ pub async fn do_execute(
                 task.await.map_err(|e| e.to_string())?
             })
             .await
-            .map(truncate_result)
+            .map(|result| truncate_result_with_row_limit(result, row_limit))
         }
         PoolKind::Gaussdb(client) => {
             let client = client.clone();
@@ -261,7 +298,7 @@ pub async fn do_execute(
                 db::gaussdb_driver::execute_query(&mut client, &sql).await
             })
             .await
-            .map(truncate_result)
+            .map(|result| truncate_result_with_row_limit(result, row_limit))
         }
         PoolKind::ExternalTabular(ext_pool) => {
             if !starts_with_executable_sql_keyword(sql, &["SELECT", "WITH", "SHOW", "DESCRIBE", "EXPLAIN", "PRAGMA"]) {
@@ -273,7 +310,7 @@ pub async fn do_execute(
             wait_for_query(cancel_token, async move {
                 let task = tokio::task::spawn_blocking(move || {
                     let con = con.lock().map_err(|e| e.to_string())?;
-                    duckdb_execute(&con, &sql)
+                    duckdb_execute_with_row_limit(&con, &sql, row_limit)
                 });
                 task.await.map_err(|e| e.to_string())?
             })
@@ -294,7 +331,7 @@ pub async fn do_execute(
                 session.invoke::<db::QueryResult>("executeQuery", params).await
             })
             .await
-            .map(truncate_result)
+            .map(|result| truncate_result_with_row_limit(result, row_limit))
         }
     }
 }
@@ -307,6 +344,19 @@ pub async fn execute_sql_statement(
     schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
 ) -> Result<db::QueryResult, String> {
+    execute_sql_statement_with_row_limit(state, connection_id, database, sql, schema, cancel_token, MAX_ROWS).await
+}
+
+pub async fn execute_sql_statement_with_row_limit(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    sql: &str,
+    schema: Option<&str>,
+    cancel_token: Option<CancellationToken>,
+    row_limit: usize,
+) -> Result<db::QueryResult, String> {
+    let row_limit = row_limit.max(1);
     let pool_key = if database.is_empty() {
         connection_id.to_string()
     } else {
@@ -317,16 +367,18 @@ pub async fn execute_sql_statement(
         return Err(canceled_error());
     }
 
-    let result = do_execute(state, &pool_key, sql, schema, cancel_token.clone()).await;
+    let result = do_execute_with_row_limit(state, &pool_key, sql, schema, cancel_token.clone(), row_limit).await;
 
-    match &result {
+    let result = match &result {
         Err(e) if is_connection_error(e) && !is_canceled(&cancel_token) => {
             let db_opt = if database.is_empty() { None } else { Some(database) };
             let new_key = state.reconnect_pool(connection_id, db_opt).await?;
-            do_execute(state, &new_key, sql, schema, cancel_token).await
+            do_execute_with_row_limit(state, &new_key, sql, schema, cancel_token, row_limit).await
         }
         _ => result,
-    }
+    };
+
+    result.map(|result| truncate_result_with_row_limit(result, row_limit))
 }
 
 pub async fn execute_multi_core(
@@ -746,6 +798,54 @@ async fn exec_tx_none_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::AppState;
+    use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use crate::storage::Storage;
+
+    fn query_result_with_rows(row_count: usize, truncated: bool) -> db::QueryResult {
+        db::QueryResult {
+            columns: vec!["id".to_string()],
+            rows: (1..=row_count).map(|id| vec![serde_json::Value::Number(id.into())]).collect(),
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated,
+        }
+    }
+
+    #[test]
+    fn truncate_result_with_row_limit_truncates_rows_and_marks_result() {
+        let result = truncate_result_with_row_limit(query_result_with_rows(5, false), 3);
+
+        assert_eq!(result.rows.len(), 3);
+        assert!(result.truncated);
+        assert_eq!(result.rows[0][0], serde_json::Value::Number(1.into()));
+        assert_eq!(result.rows[2][0], serde_json::Value::Number(3.into()));
+    }
+
+    #[test]
+    fn truncate_result_with_row_limit_keeps_untruncated_result_when_within_limit() {
+        let result = truncate_result_with_row_limit(query_result_with_rows(3, false), 3);
+
+        assert_eq!(result.rows.len(), 3);
+        assert!(!result.truncated);
+    }
+
+    #[test]
+    fn truncate_result_with_row_limit_treats_zero_limit_as_one() {
+        let result = truncate_result_with_row_limit(query_result_with_rows(2, false), 0);
+
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.truncated);
+    }
+
+    #[test]
+    fn mysql_and_postgres_pool_branches_call_limit_aware_drivers() {
+        let source = include_str!("query.rs");
+
+        assert!(source.contains("db::mysql::execute_query_with_row_limit(&p, sql, bare, row_limit)"));
+        assert!(source.contains("db::postgres::execute_query_with_schema_and_row_limit(&p, &schema, sql, row_limit)"));
+        assert!(source.contains("db::postgres::execute_query_with_row_limit(&p, sql, row_limit)"));
+    }
 
     #[tokio::test]
     async fn wait_for_query_returns_cancelled_when_token_is_cancelled() {
@@ -815,5 +915,88 @@ mod tests {
         assert!(!is_connection_error("ORA-00942: table or view does not exist"));
         assert!(!is_connection_error("syntax error at position 5"));
         assert!(!is_connection_error("os error 13"));
+    }
+
+    fn sqlite_config(path: &std::path::Path) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "sqlite-id".to_string(),
+            name: "local-sqlite".to_string(),
+            db_type: DatabaseType::Sqlite,
+            driver_profile: None,
+            driver_label: None,
+            url_params: None,
+            host: path.display().to_string(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            color: None,
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 22,
+            ssh_user: String::new(),
+            ssh_password: String::new(),
+            ssh_key_path: String::new(),
+            ssh_key_passphrase: String::new(),
+            ssh_expose_lan: false,
+            ssh_connect_timeout_secs: crate::models::connection::default_ssh_connect_timeout_secs(),
+            proxy_enabled: false,
+            proxy_type: crate::models::connection::ProxyType::Socks5,
+            proxy_host: String::new(),
+            proxy_port: 1080,
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            ssl: false,
+            sysdba: false,
+            connection_string: None,
+            external_config: None,
+            jdbc_driver_class: None,
+            jdbc_driver_paths: Vec::new(),
+        }
+    }
+
+    async fn sqlite_state_with_rows(row_count: usize) -> (AppState, std::path::PathBuf, std::path::PathBuf) {
+        let unique = uuid::Uuid::new_v4();
+        let data_path = std::env::temp_dir().join(format!("dbx-query-data-{unique}.sqlite"));
+        let storage_path = std::env::temp_dir().join(format!("dbx-query-storage-{unique}.sqlite"));
+        std::fs::File::create(&data_path).unwrap();
+        let pool = db::sqlite::connect_path(&data_path.display().to_string()).await.unwrap();
+        db::sqlite::execute_query(&pool, "CREATE TABLE numbers (id INTEGER PRIMARY KEY)").await.unwrap();
+        for id in 1..=row_count {
+            sqlx::query("INSERT INTO numbers (id) VALUES (?)").bind(id as i64).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+
+        let storage = Storage::open(&storage_path).await.unwrap();
+        let state = AppState::new(storage);
+        let config = sqlite_config(&data_path);
+        state.configs.write().await.insert(config.id.clone(), config);
+        let pool = db::sqlite::connect_path(&data_path.display().to_string()).await.unwrap();
+        state.connections.write().await.insert("sqlite-id".to_string(), PoolKind::Sqlite(pool));
+        (state, data_path, storage_path)
+    }
+
+    #[tokio::test]
+    async fn execute_sql_statement_with_row_limit_caps_sqlite_rows() {
+        let (state, data_path, storage_path) = sqlite_state_with_rows(200).await;
+
+        let result = execute_sql_statement_with_row_limit(
+            &state,
+            "sqlite-id",
+            "",
+            "SELECT id FROM numbers ORDER BY id",
+            None,
+            None,
+            7,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.rows.len() <= 7);
+        assert_eq!(result.rows.len(), 7);
+        assert!(result.truncated);
+
+        let _ = std::fs::remove_file(data_path);
+        let _ = std::fs::remove_file(storage_path);
     }
 }

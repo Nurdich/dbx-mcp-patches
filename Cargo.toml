@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src-tauri", "crates/dbx-core", "src-web"]
+members = ["src-tauri", "crates/dbx-core", "crates/dbx-cli", "src-web"]
 
 [profile.release]
 panic = "abort"

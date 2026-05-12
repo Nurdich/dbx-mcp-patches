@@ -1644,6 +1644,7 @@ dependencies = [
  "dbx-core",
  "duckdb",
  "futures",
+ "libc",
  "log",
  "mongodb",
  "percent-encoding",
@@ -1671,6 +1672,21 @@ dependencies = [
  "tokio-util",
  "uuid",
  "zip 4.6.1",
+]
+
+[[package]]
+name = "dbx-cli"
+version = "0.5.2"
+dependencies = [
+ "chrono",
+ "dbx-core",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
