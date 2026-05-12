@@ -1,0 +1,197 @@
+---
+title: Changelog
+description: Track DBX release notes by version, mirrored from GitHub Releases.
+---
+
+This page mirrors the user-facing release notes from GitHub Releases. It keeps feature, improvement, and fix entries in the docs site; download tables and installer details remain on each GitHub Release page.
+
+## v0.5.4
+
+[GitHub Release](https://github.com/t8y2/dbx/releases/tag/v0.5.4)
+
+### Added
+
+- **JDBC SSH tunnels and proxy support** — JDBC connections can use SSH tunnels and proxies, with host:port values parsed and rewritten from JDBC URLs.
+- **Grouped object browser and context menus** — Database objects are grouped by type and expose context-menu actions.
+- **Redis batch operations and command runner** — Redis adds batch key operations and a command executor.
+- **Database proxy support** — Database connections and AI settings now support proxy configuration.
+- **Data grid LIKE / NOT LIKE filters** — Grid context menus add LIKE, NOT LIKE, greater-than, and less-than filters.
+- **Database object source editing** — View and edit source for database objects such as procedures, functions, and views.
+- **Dynamic Connection URL placeholders** — The connection dialog shows URL examples that match the selected database type (contributed by @Abeautifulsnow).
+- **AI Thinking toggle** — AI settings can hide thinking output from local models such as Ollama or vLLM to save tokens (contributed by @rarnu).
+- **PostgreSQL type support** — Adds support for integer arrays and float4 (contributed by @xKrah).
+- **Spanish localization** — Adds Spanish UI text and refactors language switching into a dropdown (contributed by @Max29xD).
+
+### Improved
+
+- **Settings page** — Moves AI model settings into global settings and improves the settings layout (contributed by @rarnu).
+- **Full cell values** — Details, copy, and export flows no longer truncate cell values to 256 characters (contributed by @Abeautifulsnow).
+- **Virtual scrolling** — Reduces blank flashing during fast grid scrolling.
+- **Data grid toolbar** — Refines the grid toolbar layout.
+- **Redis browser i18n** — Adds localization support to the Redis key browser (contributed by @xKrah).
+- **Settings links** — Improves link presentation in the settings dialog.
+
+### Fixed
+
+- Fixes Oracle RAC/SCAN redirects (closes #209).
+- Fixes Oracle table loading and editing.
+- Simplifies Oracle selector behavior and supports schema switching (closes #205).
+- Fixes Oracle connection error detection on non-English Windows systems (closes #208).
+- Speeds up Oracle schema diff and adds comment synchronization (closes #198).
+- Fixes sidebar lag with 100+ databases (closes #201).
+- Fixes sidebar search missing tables hidden by the object browser.
+- Fixes stale child caches when refreshing expanded sidebar nodes.
+- Preserves WHERE filters across tab switches (closes #210).
+- Keeps data grid page size after saving data.
+- Makes Enter prefer autocomplete suggestions when available (closes #202).
+- Fixes SQL Server object source saving.
+- Fixes a build failure caused by single quotes (contributed by @xKrah).
+- Fixes object browser items requiring double-click to open.
+- Fixes virtual tree detection for non-empty trees.
+
+## v0.5.3
+
+[GitHub Release](https://github.com/t8y2/dbx/releases/tag/v0.5.3)
+
+### Added
+
+- **AI SQL smart execution** — The AI assistant can execute SQL with built-in statement safety checks.
+- **MongoDB table view** — MongoDB collections can be viewed and edited in a grid.
+- **DBeaver import** — Import database connection configs from DBeaver.
+- **Navicat import** — Import database connections from Navicat NCX files.
+- **Procedure and function browsing** — The object browser can show procedures and functions.
+- **Virtual object browser** — A unified browser for database objects.
+- **Database activity history** — Track and review database operation history.
+- **External table data source foundation** — Adds the shared architecture for future CSV, XLSX, and online sheet sources (contributed by @BlueSkyXN).
+- **Data grid loading indicator** — Adds a loading mask and elapsed-time display for query execution.
+
+### Improved
+
+- Editor features, DataGrid internals, and sidebar interactions.
+- XLSX export from the table context menu.
+- Full-stack performance and safety hardening.
+- Faster initial Oracle table loading.
+- Optional DuckDB bundling to reduce build size.
+
+### Fixed
+
+- Sidebar tree state display.
+- GitHub link clickability in Settings > About.
+- Unexpected disconnection of prefixed web connection pools.
+- Web connection config cache synchronization.
+- Oracle schema cache refresh and incomplete table lists.
+- Oracle NCHAR decoding.
+- Sidebar search result collapsing.
+
+## v0.5.2
+
+[GitHub Release](https://github.com/t8y2/dbx/releases/tag/v0.5.2)
+
+### Added
+
+- Optional JDBC plugin support for connecting to more database types through JDBC drivers.
+- Saved SQL library for reusable SQL snippets.
+- DataGrip-style column filters in the data grid.
+- Data comparison and table structure synchronization.
+- Connection URL creation and XLSX export.
+- Custom connection colors for distinguishing environments.
+- Clipboard shortcuts in the data grid.
+- Layout preference settings.
+- SSH tunnel timeout configuration.
+
+### Improved
+
+- Panels, tabs, and general application layout.
+
+### Fixed
+
+- Redis key table column alignment.
+- Connection state synchronization when expanding cached trees.
+- Connection dialog error messages.
+- Result-query detection after SQL comments.
+- Column filter popup interactions.
+- Unsaved query tab persistence.
+- Hidden system database objects in the sidebar.
+- Web file picker inconsistencies.
+
+## v0.5.1
+
+[GitHub Release](https://github.com/t8y2/dbx/releases/tag/v0.5.1)
+
+### Added
+
+- About tab in Settings.
+- Cached database object lists in the sidebar.
+- Create new connections from group context menus.
+- Tab indentation in the SQL editor.
+- Windows portable ZIP builds.
+
+### Improved
+
+- Streaming query results with row limits for large result sets.
+- Faster sidebar search filtering.
+- More capable grid context menus.
+- Better toolbar state retention for data editing filters and refresh (contributed by @rarnu).
+- Toggleable AI conversation history.
+
+### Fixed
+
+- SQL Server data editing issues.
+- Restart after app updates.
+- Grid scroll position after pagination.
+- MySQL transaction editing through raw SQL.
+- Sidebar expanded state after refresh.
+- Repeated title-bar double-click state toggles (#179).
+- Default database filtering in the database tree (#175).
+- Tab text overlapping scroll arrows.
+- Table and SQL file dialog layouts.
+- Transaction status placement.
+- Duplicate or lost WHERE / ORDER BY state.
+- Default database handling consistency.
+
+## v0.5.0
+
+[GitHub Release](https://github.com/t8y2/dbx/releases/tag/v0.5.0)
+
+### Added
+
+- Fully rebuilt Redis browser with a Navicat-style table view, value editing, pagination, and full keyspace scanning (contributed by @Bacon2994).
+- Custom window title bar with integrated window controls.
+- Dedicated WHERE and ORDER BY inputs for data-grid filtering and sorting (#165).
+- In-result filtering for loaded query data (contributed by @rarnu).
+- Editable cell details panel with explicit NULL support.
+- Auto-fit column widths based on headers and data.
+- Copy selected rows as INSERT statements (#166).
+- Create and drop databases and schemas from the sidebar.
+- SQL Server CROSS APPLY / OUTER APPLY completion (#168).
+- OceanBase Oracle mode detection (#155).
+- Middle-click tab close (#162).
+- Sort hint icons on column hover.
+- Window position and size persistence.
+- MCP connection management with `dbx_add_connection` and `dbx_remove_connection`.
+
+### Improved
+
+- DataGrid toolbar and dataset interactions (contributed by @rarnu).
+- JSON / JSONB rendering performance for large data sets.
+- Combined data-grid information and transaction toolbar row.
+- Navicat-style tab presentation.
+
+### Fixed
+
+- Tab context-menu actions such as close all, close others, and close right.
+- Query result headers and full sorting (contributed by @Bacon2994).
+- MCP config_json compatibility with Rust `ConnectionConfig`.
+- Tailwind styles missing under tmpfs (#167).
+- Data-grid overscroll causing header and data misalignment (#156).
+- GaussDB schema-list filtering (#154).
+- Sidebar database filtering when a connection specifies a database (#160).
+- Oracle 11g compatibility and sidebar behavior.
+- MySQL fallback type mapping to avoid all-NULL columns (#40).
+- AI execution receiving stale SQL state (#153).
+- JSONB display in edit mode and the details panel (#152).
+- MongoDB replica-set connections through SSH tunnels (#151).
+- Redis backslash strings being misclassified as binary data (contributed by @Bacon2994).
+- Toast notifications hidden behind dialogs.
+- Text selection in the DDL panel.
+- Browser-native context menu conflicts and adds a sidebar refresh button (#159).

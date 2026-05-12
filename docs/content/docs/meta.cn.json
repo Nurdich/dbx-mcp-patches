@@ -3,6 +3,7 @@
   "pages": [
     "---介绍---",
     "what-is-dbx",
+    "changelog",
     "getting-started",
     "databases",
     "---核心功能---",

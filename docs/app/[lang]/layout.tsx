@@ -12,9 +12,9 @@ export default async function LangLayout({
   const { lang } = await params;
 
   return (
-    <html lang={lang} suppressHydrationWarning>
+    <html lang={lang} className="dark" suppressHydrationWarning>
       <body className="flex min-h-screen flex-col">
-        <RootProvider i18n={i18nUI.provider(lang)}>
+        <RootProvider i18n={i18nUI.provider(lang)} theme={{ enabled: false }}>
           {children}
         </RootProvider>
       </body>

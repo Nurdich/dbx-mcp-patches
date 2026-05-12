@@ -2,6 +2,7 @@ pub mod ai;
 pub mod connection;
 #[allow(dead_code, unused_imports)]
 mod connection_secrets;
+pub mod database_export;
 pub mod history;
 pub mod mcp_bridge;
 pub mod mongo_cmd;

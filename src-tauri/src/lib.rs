@@ -141,6 +141,8 @@ pub fn run() {
             commands::update::check_for_updates,
             commands::transfer::start_transfer,
             commands::transfer::cancel_transfer,
+            commands::database_export::export_database_sql,
+            commands::database_export::cancel_database_export,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

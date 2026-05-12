@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod connection;
 pub mod connection_secrets;
+pub mod database_export;
 pub mod db;
 pub mod external;
 pub mod history;

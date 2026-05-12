@@ -152,6 +152,10 @@ async fn main() {
         .route("/transfer/start", post(routes::transfer::start_transfer))
         .route("/transfer/progress/{transferId}", get(routes::transfer::transfer_progress))
         .route("/transfer/cancel", post(routes::transfer::cancel_transfer))
+        // Database export
+        .route("/export/database", post(routes::database_export::start_database_export))
+        .route("/export/database/progress/{exportId}", get(routes::database_export::database_export_progress))
+        .route("/export/database/cancel", post(routes::database_export::cancel_database_export))
         // SQL file
         .route("/sql-file/preview", post(routes::sql_file::preview_sql_file))
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
