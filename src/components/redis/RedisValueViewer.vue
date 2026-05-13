@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from "vue";
+import { computed, ref, onBeforeUnmount, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
-import { Copy, Eye, Trash2, Save, RefreshCw, Plus, Loader2 } from "lucide-vue-next";
+import { Copy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil } from "lucide-vue-next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import * as api from "@/lib/api";
 import type { RedisValue } from "@/lib/api";
-import { formatRedisMemberDetail } from "@/lib/redisValuePresentation";
+import {
+  canEditRedisMemberDetail,
+  clampRedisMemberDetailSheetWidth,
+  formatRedisMemberDetail,
+  getRedisMemberSelectionKey,
+  highlightRedisJsonDetail,
+} from "@/lib/redisValuePresentation";
 
 const { t } = useI18n();
 
@@ -38,7 +44,20 @@ const collectionItems = ref<any[]>([]);
 const scanCursor = ref<number | undefined>(undefined);
 const selectedMemberTitle = ref("");
 const selectedMemberRaw = ref<unknown>("");
+const selectedMemberKey = ref("");
+const selectedMemberContext = ref<RedisMemberContext | null>(null);
+const isEditingMember = ref(false);
+const savingMember = ref(false);
+const memberEditValue = ref("");
+const memberDetailSheetWidth = ref(420);
+const isResizingMemberSheet = ref(false);
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value));
+const selectedMemberJsonHtml = computed(() =>
+  selectedMemberDetail.value.format === "json" ? highlightRedisJsonDetail(selectedMemberDetail.value.text) : "",
+);
+const selectedMemberCanEdit = computed(
+  () => selectedMemberContext.value != null && canEditRedisMemberDetail(selectedMemberContext.value.kind),
+);
 
 type PendingDelete =
   | { kind: "key" }
@@ -48,6 +67,16 @@ type PendingDelete =
   | { kind: "zset"; member: string };
 
 const pendingDelete = ref<PendingDelete | null>(null);
+
+let memberSheetResizeStartX = 0;
+let memberSheetResizeStartWidth = 0;
+
+type RedisMemberContext =
+  | { kind: "list"; index: number }
+  | { kind: "set"; member: string }
+  | { kind: "hash"; field: string }
+  | { kind: "zset"; member: string; score: number }
+  | { kind: "stream"; field: string };
 
 const deleteDetails = computed(() => {
   const pending = pendingDelete.value;
@@ -65,15 +94,22 @@ const deleteDetails = computed(() => {
 const isBinaryStringValue = computed(() => data.value?.key_type === "string" && data.value?.value_is_binary);
 const hasMore = computed(() => scanCursor.value != null && scanCursor.value > 0);
 
-async function load() {
+async function load(options: { selectDefaultMember?: boolean } = {}) {
+  const shouldSelectDefaultMember = options.selectDefaultMember ?? true;
   loading.value = true;
   try {
     data.value = await api.redisGetValue(props.connectionId, props.db, props.keyRaw);
     scanCursor.value = data.value.scan_cursor ?? undefined;
     if (data.value.key_type === "string") {
       editValue.value = String(data.value.value);
+      clearSelectedMember();
     } else if (["list", "set", "zset", "hash"].includes(data.value.key_type)) {
       collectionItems.value = Array.isArray(data.value.value) ? [...data.value.value] : [];
+      if (shouldSelectDefaultMember) selectDefaultMember(data.value);
+    } else if (data.value.key_type === "stream") {
+      if (shouldSelectDefaultMember) selectDefaultMember(data.value);
+    } else {
+      clearSelectedMember();
     }
   } finally {
     loading.value = false;
@@ -127,20 +163,168 @@ function copyValue() {
   if (!data.value) return;
   const text = typeof data.value.value === "string" ? data.value.value : JSON.stringify(data.value.value, null, 2);
   navigator.clipboard.writeText(text);
+  toast(t("redis.copied"), 2000);
 }
 
 function copyText(text: string) {
   navigator.clipboard.writeText(text);
+  toast(t("redis.copied"), 2000);
 }
 
 function copyMember(value: unknown) {
   copyText(formatRedisMemberDetail(value).text);
 }
 
-function viewMember(title: string, value: unknown) {
+function selectMember(title: string, value: unknown, context: RedisMemberContext) {
   selectedMemberTitle.value = title;
   selectedMemberRaw.value = value;
+  selectedMemberKey.value = getRedisMemberSelectionKey(title, value);
+  selectedMemberContext.value = context;
+  isEditingMember.value = false;
+  memberEditValue.value = formatRedisMemberDetail(value).text;
+}
+
+function clearSelectedMember() {
+  selectedMemberTitle.value = "";
+  selectedMemberRaw.value = "";
+  selectedMemberKey.value = "";
+  selectedMemberContext.value = null;
+  isEditingMember.value = false;
+  memberEditValue.value = "";
+}
+
+function isSelectedMember(title: string, value: unknown) {
+  return selectedMemberKey.value === getRedisMemberSelectionKey(title, value);
+}
+
+function viewMember(title: string, value: unknown, context: RedisMemberContext) {
+  selectMember(title, value, context);
   showMemberDetail.value = true;
+}
+
+function handleMemberDetailOpenChange(open: boolean) {
+  showMemberDetail.value = open;
+  if (!open) isEditingMember.value = false;
+}
+
+function finishMemberDetailClose() {
+  isEditingMember.value = false;
+}
+
+function stopResizeMemberSheet() {
+  isResizingMemberSheet.value = false;
+  window.removeEventListener("pointermove", resizeMemberSheet);
+  window.removeEventListener("pointerup", stopResizeMemberSheet);
+}
+
+function resizeMemberSheet(event: PointerEvent) {
+  if (!isResizingMemberSheet.value) return;
+  const delta = memberSheetResizeStartX - event.clientX;
+  memberDetailSheetWidth.value = clampRedisMemberDetailSheetWidth(
+    memberSheetResizeStartWidth + delta,
+    window.innerWidth,
+  );
+}
+
+function startResizeMemberSheet(event: PointerEvent) {
+  isResizingMemberSheet.value = true;
+  memberSheetResizeStartX = event.clientX;
+  memberSheetResizeStartWidth = memberDetailSheetWidth.value;
+  window.addEventListener("pointermove", resizeMemberSheet);
+  window.addEventListener("pointerup", stopResizeMemberSheet);
+}
+
+function startEditMember() {
+  memberEditValue.value = selectedMemberDetail.value.text;
+  isEditingMember.value = true;
+}
+
+function cancelEditMember() {
+  memberEditValue.value = selectedMemberDetail.value.text;
+  isEditingMember.value = false;
+}
+
+async function saveMemberEdit() {
+  const context = selectedMemberContext.value;
+  if (!context || !selectedMemberCanEdit.value) return;
+  const title = selectedMemberTitle.value;
+  let nextContext: RedisMemberContext = context;
+  savingMember.value = true;
+  try {
+    if (context.kind === "list") {
+      await api.redisListSet(props.connectionId, props.db, props.keyRaw, context.index, memberEditValue.value);
+    } else if (context.kind === "hash") {
+      await api.redisHashSet(props.connectionId, props.db, props.keyRaw, context.field, memberEditValue.value);
+    } else if (context.kind === "set") {
+      await api.redisSetRemove(props.connectionId, props.db, props.keyRaw, context.member);
+      await api.redisSetAdd(props.connectionId, props.db, props.keyRaw, memberEditValue.value);
+      nextContext = { kind: "set", member: memberEditValue.value };
+    } else if (context.kind === "zset") {
+      await api.redisZrem(props.connectionId, props.db, props.keyRaw, context.member);
+      await api.redisZadd(props.connectionId, props.db, props.keyRaw, memberEditValue.value, context.score);
+      nextContext = { kind: "zset", member: memberEditValue.value, score: context.score };
+    }
+    const editedValue = memberEditValue.value;
+    isEditingMember.value = false;
+    await load({ selectDefaultMember: false });
+    selectMember(title, editedValue, nextContext);
+  } finally {
+    savingMember.value = false;
+  }
+}
+
+function selectDefaultMember(redisValue: RedisValue) {
+  if (redisValue.key_type === "list" || redisValue.key_type === "set") {
+    if (collectionItems.value.length === 0) {
+      clearSelectedMember();
+      return;
+    }
+    selectMember(
+      redisValue.key_type === "list" ? "#0" : t("redis.member"),
+      collectionItems.value[0],
+      redisValue.key_type === "list"
+        ? { kind: "list", index: 0 }
+        : { kind: "set", member: String(collectionItems.value[0]) },
+    );
+    return;
+  }
+
+  if (redisValue.key_type === "hash") {
+    const first = collectionItems.value[0];
+    if (!first) {
+      clearSelectedMember();
+      return;
+    }
+    selectMember(String(first.field), first.value, { kind: "hash", field: String(first.field) });
+    return;
+  }
+
+  if (redisValue.key_type === "zset") {
+    const first = collectionItems.value[0];
+    if (!first) {
+      clearSelectedMember();
+      return;
+    }
+    selectMember(String(first.score), first.member, {
+      kind: "zset",
+      member: String(first.member),
+      score: Number(first.score),
+    });
+    return;
+  }
+
+  if (redisValue.key_type === "stream" && Array.isArray(redisValue.value)) {
+    const firstEntry = redisValue.value[0];
+    const firstField = firstEntry?.fields ? Object.entries(firstEntry.fields)[0] : undefined;
+    if (!firstField) {
+      clearSelectedMember();
+      return;
+    }
+    selectMember(String(firstField[0]), firstField[1], { kind: "stream", field: String(firstField[0]) });
+    return;
+  }
+
+  clearSelectedMember();
 }
 
 // TTL
@@ -247,6 +431,7 @@ function formatValue(val: any): string {
 }
 
 onMounted(load);
+onBeforeUnmount(stopResizeMemberSheet);
 </script>
 
 <template>
@@ -341,7 +526,9 @@ onMounted(load);
           <div
             v-for="(item, idx) in collectionItems"
             :key="idx"
-            class="grid grid-cols-[60px_1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group"
+            class="grid grid-cols-[60px_1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group cursor-pointer"
+            :class="{ 'bg-accent/60': isSelectedMember(`#${idx}`, item) }"
+            @click="viewMember(`#${idx}`, item, { kind: 'list', index: Number(idx) })"
           >
             <div class="px-3 py-1.5 text-xs text-muted-foreground border-r">{{ idx }}</div>
             <div class="px-3 py-1.5 truncate">{{ item }}</div>
@@ -351,7 +538,7 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.viewMember')"
-                @click="viewMember(`#${idx}`, item)"
+                @click.stop="viewMember(`#${idx}`, item, { kind: 'list', index: Number(idx) })"
                 ><Eye class="w-3 h-3"
               /></Button>
               <Button
@@ -359,14 +546,14 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.copyMember')"
-                @click="copyMember(item)"
+                @click.stop="copyMember(item)"
                 ><Copy class="w-3 h-3"
               /></Button>
               <Button
                 variant="ghost"
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive"
-                @click="requestListRemove(Number(idx))"
+                @click.stop="requestListRemove(Number(idx))"
                 ><Trash2 class="w-3 h-3"
               /></Button>
             </div>
@@ -400,7 +587,9 @@ onMounted(load);
           <div
             v-for="(item, idx) in collectionItems"
             :key="idx"
-            class="grid grid-cols-[1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group"
+            class="grid grid-cols-[1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group cursor-pointer"
+            :class="{ 'bg-accent/60': isSelectedMember(t('redis.member'), item) }"
+            @click="viewMember(t('redis.member'), item, { kind: 'set', member: String(item) })"
           >
             <div class="px-3 py-1.5 truncate">{{ item }}</div>
             <div class="flex items-center justify-center gap-1">
@@ -409,7 +598,7 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.viewMember')"
-                @click="viewMember(t('redis.member'), item)"
+                @click.stop="viewMember(t('redis.member'), item, { kind: 'set', member: String(item) })"
                 ><Eye class="w-3 h-3"
               /></Button>
               <Button
@@ -417,14 +606,14 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.copyMember')"
-                @click="copyMember(item)"
+                @click.stop="copyMember(item)"
                 ><Copy class="w-3 h-3"
               /></Button>
               <Button
                 variant="ghost"
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive"
-                @click="requestSetRemove(String(item))"
+                @click.stop="requestSetRemove(String(item))"
                 ><Trash2 class="w-3 h-3"
               /></Button>
             </div>
@@ -460,7 +649,9 @@ onMounted(load);
           <div
             v-for="(item, idx) in collectionItems"
             :key="idx"
-            class="grid grid-cols-[minmax(8rem,0.3fr)_1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group"
+            class="grid grid-cols-[minmax(8rem,0.3fr)_1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group cursor-pointer"
+            :class="{ 'bg-accent/60': isSelectedMember(String(item.field), item.value) }"
+            @click="viewMember(String(item.field), item.value, { kind: 'hash', field: String(item.field) })"
           >
             <div class="px-3 py-1.5 text-blue-500 truncate border-r">{{ item.field }}</div>
             <div class="px-3 py-1.5 truncate text-muted-foreground">{{ item.value }}</div>
@@ -470,7 +661,7 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.viewMember')"
-                @click="viewMember(String(item.field), item.value)"
+                @click.stop="viewMember(String(item.field), item.value, { kind: 'hash', field: String(item.field) })"
                 ><Eye class="w-3 h-3"
               /></Button>
               <Button
@@ -478,14 +669,14 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.copyMember')"
-                @click="copyMember(item.value)"
+                @click.stop="copyMember(item.value)"
                 ><Copy class="w-3 h-3"
               /></Button>
               <Button
                 variant="ghost"
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive"
-                @click="requestHashDel(String(item.field))"
+                @click.stop="requestHashDel(String(item.field))"
                 ><Trash2 class="w-3 h-3"
               /></Button>
             </div>
@@ -521,7 +712,15 @@ onMounted(load);
           <div
             v-for="(item, idx) in collectionItems"
             :key="idx"
-            class="grid grid-cols-[100px_1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group"
+            class="grid grid-cols-[100px_1fr_84px] border-b text-sm font-mono hover:bg-accent/50 group cursor-pointer"
+            :class="{ 'bg-accent/60': isSelectedMember(String(item.score), item.member) }"
+            @click="
+              viewMember(String(item.score), item.member, {
+                kind: 'zset',
+                member: String(item.member),
+                score: Number(item.score),
+              })
+            "
           >
             <div class="px-3 py-1.5 text-muted-foreground text-xs border-r">{{ item.score }}</div>
             <div class="px-3 py-1.5 truncate">{{ item.member }}</div>
@@ -531,7 +730,13 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.viewMember')"
-                @click="viewMember(String(item.score), item.member)"
+                @click.stop="
+                  viewMember(String(item.score), item.member, {
+                    kind: 'zset',
+                    member: String(item.member),
+                    score: Number(item.score),
+                  })
+                "
                 ><Eye class="w-3 h-3"
               /></Button>
               <Button
@@ -539,14 +744,14 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.copyMember')"
-                @click="copyMember(item.member)"
+                @click.stop="copyMember(item.member)"
                 ><Copy class="w-3 h-3"
               /></Button>
               <Button
                 variant="ghost"
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100 text-destructive"
-                @click="requestZsetRemove(String(item.member))"
+                @click.stop="requestZsetRemove(String(item.member))"
                 ><Trash2 class="w-3 h-3"
               /></Button>
             </div>
@@ -574,7 +779,9 @@ onMounted(load);
           <div
             v-for="(val, field) in entry.fields"
             :key="String(field)"
-            class="grid grid-cols-[minmax(6rem,0.35fr)_1fr_56px] gap-3 py-0.5 group"
+            class="grid grid-cols-[minmax(6rem,0.35fr)_1fr_56px] gap-3 py-0.5 group cursor-pointer"
+            :class="{ 'bg-accent/60': isSelectedMember(String(field), val) }"
+            @click="viewMember(String(field), val, { kind: 'stream', field: String(field) })"
           >
             <span class="truncate text-blue-500">{{ field }}</span>
             <span class="truncate text-muted-foreground">{{ val }}</span>
@@ -584,7 +791,7 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.viewMember')"
-                @click="viewMember(String(field), val)"
+                @click.stop="viewMember(String(field), val, { kind: 'stream', field: String(field) })"
                 ><Eye class="w-3 h-3"
               /></Button>
               <Button
@@ -592,7 +799,7 @@ onMounted(load);
                 size="icon"
                 class="h-5 w-5 opacity-0 group-hover:opacity-100"
                 :title="t('redis.copyMember')"
-                @click="copyMember(val)"
+                @click.stop="copyMember(val)"
                 ><Copy class="w-3 h-3"
               /></Button>
             </span>
@@ -614,25 +821,114 @@ onMounted(load);
       @confirm="confirmDelete"
     />
 
-    <Dialog v-model:open="showMemberDetail">
-      <DialogContent class="sm:max-w-[760px] max-h-[82vh] overflow-hidden flex flex-col">
-        <DialogHeader>
-          <DialogTitle class="flex items-center gap-2 pr-8">
+    <Sheet :open="showMemberDetail" @update:open="handleMemberDetailOpenChange">
+      <SheetContent
+        side="right"
+        class="gap-0 p-0 sm:max-w-[calc(100vw-2rem)]"
+        :class="{ 'select-none': isResizingMemberSheet }"
+        :style="{ width: `${memberDetailSheetWidth}px`, maxWidth: 'calc(100vw - 2rem)' }"
+        @close-auto-focus="finishMemberDetailClose"
+        @pointer-down-outside.prevent
+        @interact-outside.prevent
+      >
+        <div
+          class="absolute inset-y-0 left-0 z-10 w-2 -translate-x-1 cursor-col-resize border-l border-transparent hover:border-primary/60"
+          @pointerdown.prevent="startResizeMemberSheet"
+        />
+        <SheetHeader class="border-b px-5 py-4 pr-12">
+          <SheetTitle class="flex items-center gap-2">
             <span class="truncate">{{ selectedMemberTitle || t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ selectedMemberDetail.format.toUpperCase() }}</Badge>
-          </DialogTitle>
-        </DialogHeader>
+          </SheetTitle>
+        </SheetHeader>
+        <textarea
+          v-if="isEditingMember"
+          v-model="memberEditValue"
+          class="min-h-0 flex-1 resize-none bg-background p-5 font-mono text-[13px] leading-6 outline-none"
+          spellcheck="false"
+        />
         <pre
-          class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-words"
+          v-else-if="selectedMemberDetail.format === 'json'"
+          class="json-viewer min-h-0 flex-1 overflow-auto bg-background p-5 font-mono text-[13px] leading-6"
+          v-html="selectedMemberJsonHtml"
+        />
+        <pre
+          v-else
+          class="min-h-0 flex-1 overflow-auto bg-background p-5 font-mono text-[13px] leading-6 whitespace-pre-wrap break-words"
           >{{ selectedMemberDetail.text }}</pre
         >
-        <DialogFooter class="shrink-0">
+        <SheetFooter class="shrink-0 border-t px-5 py-3">
+          <template v-if="isEditingMember">
+            <Button variant="ghost" :disabled="savingMember" @click="cancelEditMember">
+              {{ t("grid.discard") }}
+            </Button>
+            <Button :disabled="savingMember" @click="saveMemberEdit">
+              <Loader2 v-if="savingMember" class="h-4 w-4 animate-spin" />
+              <Save v-else class="h-4 w-4" />
+              {{ t("grid.save") }}
+            </Button>
+          </template>
+          <Button v-else-if="selectedMemberCanEdit" variant="outline" @click="startEditMember">
+            <Pencil class="h-4 w-4" />
+            {{ t("redis.editMember") }}
+          </Button>
           <Button variant="outline" @click="copyText(selectedMemberDetail.text)">
             <Copy class="h-4 w-4" />
             {{ t("redis.copyMember") }}
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   </div>
 </template>
+
+<style scoped>
+.json-viewer {
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+:deep(.json-key) {
+  color: #7c3aed;
+  font-weight: 600;
+}
+
+:deep(.json-string) {
+  color: #15803d;
+}
+
+:deep(.json-number) {
+  color: #b45309;
+}
+
+:deep(.json-boolean) {
+  color: #2563eb;
+  font-weight: 600;
+}
+
+:deep(.json-null) {
+  color: #64748b;
+  font-style: italic;
+}
+
+:global(.dark) :deep(.json-key) {
+  color: #c4b5fd;
+}
+
+:global(.dark) :deep(.json-string) {
+  color: #86efac;
+}
+
+:global(.dark) :deep(.json-number) {
+  color: #fbbf24;
+}
+
+:global(.dark) :deep(.json-boolean) {
+  color: #93c5fd;
+}
+
+:global(.dark) :deep(.json-null) {
+  color: #94a3b8;
+}
+</style>

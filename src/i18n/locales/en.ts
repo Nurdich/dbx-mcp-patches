@@ -724,6 +724,7 @@ export default {
     memberDetail: "Member detail",
     viewMember: "View full value",
     copyMember: "Copy member",
+    copied: "Copied",
     editMember: "Edit",
   },
   mongo: {

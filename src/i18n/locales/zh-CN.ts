@@ -710,6 +710,7 @@ export default {
     memberDetail: "成员详情",
     viewMember: "查看完整内容",
     copyMember: "复制成员",
+    copied: "已复制",
     editMember: "编辑",
   },
   mongo: {
