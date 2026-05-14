@@ -133,12 +133,21 @@ pub async fn connect(url: &str) -> Result<PgPool, String> {
     // Validate SSL certificate paths if present in the URL
     validate_postgres_ssl_paths(url)?;
 
+    let tz = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+    let url_owned = url.to_string();
     super::with_connection_timeout("PostgreSQL", async {
         PgPoolOptions::new()
             .max_connections(5)
             .acquire_timeout(super::connection_timeout())
             .idle_timeout(Duration::from_secs(300))
-            .connect(url)
+            .after_connect(move |conn, _meta| {
+                let tz = tz.clone();
+                Box::pin(async move {
+                    conn.execute(sqlx::query(&format!("SET timezone = '{tz}'"))).await?;
+                    Ok(())
+                })
+            })
+            .connect(&url_owned)
             .await
             .map_err(|e| format!("PostgreSQL connection failed: {e}"))
     })
