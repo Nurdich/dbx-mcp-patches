@@ -88,6 +88,7 @@ import {
 } from "@/lib/databaseCapabilities";
 import { sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
 import { formatCsv, formatJson, formatSqlInsert } from "@/lib/exportFormats";
+import { fetchTableDataForExport } from "@/lib/tableDataExport";
 import { buildCreateDatabaseSql, supportsCreateDatabaseCharset } from "@/lib/createDatabaseSql";
 import { buildRenameObjectSql, supportsObjectRename, type RenameableObjectType } from "@/lib/objectRenameSql";
 import { hexToRgba } from "@/lib/color";
@@ -1061,29 +1062,30 @@ async function exportStructure() {
 async function exportData(format: "csv" | "json" | "sql") {
   const node = props.node;
   if (!node.connectionId || !node.database) return;
+  const connectionId = node.connectionId;
+  const database = node.database;
   const config = connectionStore.getConfig(node.connectionId);
   if (!config) return;
 
   try {
-    await connectionStore.ensureConnected(node.connectionId);
+    await connectionStore.ensureConnected(connectionId);
     const qualifiedName =
       isSchemaAware(config.db_type) && node.schema
         ? `${quoteIdent(node.schema)}.${quoteIdent(node.label)}`
         : quoteIdent(node.label);
     const queryColumns =
       config.db_type === "neo4j"
-        ? (await api.getColumns(node.connectionId, node.database, node.schema || node.database, node.label)).map(
+        ? (await api.getColumns(connectionId, database, node.schema || database, node.label)).map(
             (column) => column.name,
           )
         : undefined;
-    const dataSql = buildTableSelectSql({
+    const result = await fetchTableDataForExport({
       databaseType: config.db_type,
       schema: node.schema,
       tableName: node.label,
       columns: queryColumns,
-      limit: 10000,
+      executePage: (sql) => api.executeQuery(connectionId, database, sql),
     });
-    const result = await api.executeQuery(node.connectionId, node.database, dataSql);
 
     let content: string;
     let ext: string;
@@ -1100,7 +1102,7 @@ async function exportData(format: "csv" | "json" | "sql") {
     }
 
     await saveFileContent(content, `${node.label}.${ext}`, ext.toUpperCase(), ext);
-    toast(result.truncated ? t("grid.exported") + " (truncated)" : t("grid.exported"));
+    toast(t("grid.exported"));
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
@@ -1109,25 +1111,26 @@ async function exportData(format: "csv" | "json" | "sql") {
 async function exportDataXlsx() {
   const node = props.node;
   if (!node.connectionId || !node.database) return;
+  const connectionId = node.connectionId;
+  const database = node.database;
   const config = connectionStore.getConfig(node.connectionId);
   if (!config) return;
 
   try {
-    await connectionStore.ensureConnected(node.connectionId);
+    await connectionStore.ensureConnected(connectionId);
     const queryColumns =
       config.db_type === "neo4j"
-        ? (await api.getColumns(node.connectionId, node.database, node.schema || node.database, node.label)).map(
+        ? (await api.getColumns(connectionId, database, node.schema || database, node.label)).map(
             (column) => column.name,
           )
         : undefined;
-    const dataSql = buildTableSelectSql({
+    const result = await fetchTableDataForExport({
       databaseType: config.db_type,
       schema: node.schema,
       tableName: node.label,
       columns: queryColumns,
-      limit: 10000,
+      executePage: (sql) => api.executeQuery(connectionId, database, sql),
     });
-    const result = await api.executeQuery(node.connectionId, node.database, dataSql);
 
     const { buildXlsxWorkbook } = await import("@/lib/xlsxExport");
     const workbook = buildXlsxWorkbook({
@@ -1136,7 +1139,7 @@ async function exportDataXlsx() {
       rows: result.rows,
     });
     await saveBinaryFileContent(workbook, `${node.label}.xlsx`, "Excel", "xlsx");
-    toast(result.truncated ? t("grid.exported") + " (truncated)" : t("grid.exported"));
+    toast(t("grid.exported"));
   } catch (e: any) {
     toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
   }
