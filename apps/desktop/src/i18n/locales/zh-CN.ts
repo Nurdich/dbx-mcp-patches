@@ -1176,6 +1176,10 @@ export default {
     sidebarActivationSingleDescription: "单击即可打开侧边栏中的可操作项目。",
     sidebarActivationDouble: "双击打开",
     sidebarActivationDoubleDescription: "单击只选中高亮，双击打开项目。",
+    sidebarHiddenTablePrefixes: "隐藏表名前缀",
+    sidebarHiddenTablePrefixesDescription:
+      "每行一个前缀，仅影响侧边栏表、视图和集合的显示名称，悬浮提示和实际操作仍使用完整名称。",
+    sidebarHiddenTablePrefixesPlaceholder: "例如：\nODS_\nT8Y2_LONG_",
     apply: "应用",
     reset: "重置",
     resetDefaults: "恢复默认",

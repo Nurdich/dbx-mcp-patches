@@ -107,6 +107,7 @@ import { buildViewDdl } from "@/lib/viewDdl";
 import { hexToRgba } from "@/lib/color";
 import { focusSidebarRenameInput, shouldPreventRenameCloseAutoFocus } from "@/lib/sidebarRenameFocus";
 import { hasTreeNodeDatabaseContext } from "@/lib/treeNodeContext";
+import { sidebarDisplayTableName } from "@/lib/sidebarTableNameDisplay";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/tauriRuntime";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -254,6 +255,17 @@ function displayLabel(node: TreeNode): string {
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
   if (node.label === "tree.defaultDatabase") return t(node.label);
   return isGroupLabel(node) ? t(node.label) : node.label;
+}
+
+function visibleLabel(node: TreeNode): string {
+  if (node.type === "table" || node.type === "view" || node.type === "mongo-collection") {
+    return sidebarDisplayTableName(node.label, settingsStore.editorSettings.sidebarHiddenTablePrefixes);
+  }
+  return displayLabel(node);
+}
+
+function isTooltipDisabled(node: TreeNode): boolean {
+  return !isTruncated.value && visibleLabel(node) === displayLabel(node);
 }
 
 async function toggle() {
@@ -1797,9 +1809,9 @@ const isDragging = computed(() => dragState.active && dragState.draggedId === pr
             @keydown.escape.prevent="isRenamingGroup = false"
             @click.stop
           />
-          <Tooltip v-else :disabled="!isTruncated">
+          <Tooltip v-else :disabled="isTooltipDisabled(node)">
             <TooltipTrigger as-child>
-              <span ref="labelRef" class="min-w-0 flex-1 truncate">{{ displayLabel(node) }}</span>
+              <span ref="labelRef" class="min-w-0 flex-1 truncate">{{ visibleLabel(node) }}</span>
             </TooltipTrigger>
             <TooltipContent side="right" :side-offset="8">{{ displayLabel(node) }}</TooltipContent>
           </Tooltip>

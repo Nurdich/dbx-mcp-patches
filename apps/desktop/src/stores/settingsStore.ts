@@ -9,6 +9,7 @@ import {
 } from "@/lib/columnFormatter";
 import { normalizeShortcutSettings, type ShortcutSettings } from "@/lib/shortcutRegistry";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
+import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
 import type { SidebarActivation } from "@/lib/treeNodeClick";
 
 export type AiProvider =
@@ -170,6 +171,7 @@ export interface EditorSettings {
   mongoViewMode: "document" | "table";
   shortcuts: ShortcutSettings;
   sidebarActivation: SidebarActivation;
+  sidebarHiddenTablePrefixes: string[];
   columnFormatters: Record<string, ColumnFormatterConfig>;
   customColumnFormatters: Record<string, CustomColumnFormatterConfig>;
 }
@@ -209,6 +211,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   mongoViewMode: "document",
   shortcuts: normalizeShortcutSettings(),
   sidebarActivation: "single",
+  sidebarHiddenTablePrefixes: [],
   columnFormatters: {},
   customColumnFormatters: {},
 };
@@ -253,6 +256,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>): Edit
       settings.sidebarActivation === "single" || settings.sidebarActivation === "double"
         ? settings.sidebarActivation
         : DEFAULT_EDITOR_SETTINGS.sidebarActivation,
+    sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
     columnFormatters: normalizeColumnFormatters(settings.columnFormatters),
     customColumnFormatters: normalizeCustomColumnFormatters(settings.customColumnFormatters),
   };
@@ -334,6 +338,9 @@ export const useSettingsStore = defineStore("settings", () => {
     const normalizedPartial = {
       ...partial,
       ...(partial.pageSize !== undefined ? { pageSize: normalizeResultPageSize(partial.pageSize) } : {}),
+      ...(partial.sidebarHiddenTablePrefixes !== undefined
+        ? { sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes) }
+        : {}),
     };
     Object.assign(editorSettings.value, normalizedPartial);
     saveEditorSettings(editorSettings.value);

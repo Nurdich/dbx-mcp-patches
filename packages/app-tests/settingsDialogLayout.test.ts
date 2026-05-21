@@ -46,6 +46,8 @@ test("settings dialog exposes sidebar activation in navigation settings", () => 
   assert.match(source, /value: "navigation"/);
   assert.match(source, /activeSettingsTab === ['"]navigation['"]/);
   assert.match(source, /settings\.sidebarActivation/);
+  assert.match(source, /settings\.sidebarHiddenTablePrefixes/);
+  assert.match(source, /editSidebarHiddenTablePrefixes/);
 });
 
 test("AI settings can browse provider model names while keeping manual input", () => {

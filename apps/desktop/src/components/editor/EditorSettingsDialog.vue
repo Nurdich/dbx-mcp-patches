@@ -32,6 +32,7 @@ import {
   normalizeShortcutSettings,
   type ShortcutActionId,
 } from "@/lib/shortcutRegistry";
+import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 
 const { t } = useI18n();
@@ -57,6 +58,7 @@ const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editRedisScanPageSize = ref(settingsStore.editorSettings.redisScanPageSize);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation);
+const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
 const redisScanPageSizeOptions = [200, 1000, 5000, 10000];
 const systemFonts = ref<string[]>([]);
 const systemFontsLoading = ref(false);
@@ -118,6 +120,7 @@ watch(
       editRedisScanPageSize.value = settingsStore.editorSettings.redisScanPageSize;
       editShortcuts.value = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
       editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
+      editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
       void loadSystemFontOptions();
     }
   },
@@ -141,7 +144,9 @@ function hasChanges(): boolean {
     editAppLayout.value !== settingsStore.editorSettings.appLayout ||
     editRedisScanPageSize.value !== settingsStore.editorSettings.redisScanPageSize ||
     JSON.stringify(editShortcuts.value) !== JSON.stringify(settingsStore.editorSettings.shortcuts) ||
-    editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation
+    editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
+    JSON.stringify(normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value)) !==
+      JSON.stringify(settingsStore.editorSettings.sidebarHiddenTablePrefixes)
   );
 }
 
@@ -157,6 +162,7 @@ function applySettings() {
     redisScanPageSize: editRedisScanPageSize.value,
     shortcuts: editShortcuts.value,
     sidebarActivation: editSidebarActivation.value,
+    sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
   });
   emit("update:open", false);
 }
@@ -171,6 +177,7 @@ function resetDefaults() {
   editRedisScanPageSize.value = DEFAULT_EDITOR_SETTINGS.redisScanPageSize;
   editShortcuts.value = normalizeShortcutSettings(DEFAULT_EDITOR_SETTINGS.shortcuts);
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
+  editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
 }
 
 function onExecuteModeChange(v: any) {
@@ -834,6 +841,18 @@ watch(
                     </div>
                   </Button>
                 </div>
+              </div>
+              <div class="space-y-2">
+                <Label for="sidebar-hidden-table-prefixes">{{ t("settings.sidebarHiddenTablePrefixes") }}</Label>
+                <textarea
+                  id="sidebar-hidden-table-prefixes"
+                  v-model="editSidebarHiddenTablePrefixes"
+                  class="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  :placeholder="t('settings.sidebarHiddenTablePrefixesPlaceholder')"
+                />
+                <p class="text-xs text-muted-foreground">
+                  {{ t("settings.sidebarHiddenTablePrefixesDescription") }}
+                </p>
               </div>
             </section>
 

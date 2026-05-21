@@ -1198,6 +1198,10 @@ export default {
     sidebarActivationSingleDescription: "Open actionable sidebar items with one click.",
     sidebarActivationDouble: "Double click",
     sidebarActivationDoubleDescription: "Single click selects rows; double click opens items.",
+    sidebarHiddenTablePrefixes: "Hidden table name prefixes",
+    sidebarHiddenTablePrefixesDescription:
+      "One prefix per line. Only sidebar table, view, and collection labels are shortened; tooltips and actions still use the full name.",
+    sidebarHiddenTablePrefixesPlaceholder: "Example:\nODS_\nT8Y2_LONG_",
     apply: "Apply",
     reset: "Reset",
     resetDefaults: "Reset Defaults",

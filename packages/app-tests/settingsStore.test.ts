@@ -51,6 +51,15 @@ test("keeps saved sidebar activation", () => {
   assert.equal(normalizeEditorSettings({ sidebarActivation: "invalid" } as any).sidebarActivation, "single");
 });
 
+test("normalizes saved sidebar hidden table prefixes", () => {
+  assert.deepEqual(DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes, []);
+  assert.deepEqual(
+    normalizeEditorSettings({ sidebarHiddenTablePrefixes: [" app_", "app_", "", "ods."] } as any)
+      .sidebarHiddenTablePrefixes,
+    ["app_", "ods."],
+  );
+});
+
 test("defaults column formatters to an empty record", () => {
   assert.deepEqual(DEFAULT_EDITOR_SETTINGS.columnFormatters, {});
   assert.deepEqual(normalizeEditorSettings({}).columnFormatters, {});
