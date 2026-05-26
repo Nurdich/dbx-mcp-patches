@@ -413,7 +413,7 @@ pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
     let stmt = client
         .prepare_cached(
             "SELECT datname FROM pg_database \
-             WHERE datistemplate = false AND datallowconn = true \
+             WHERE datallowconn = true \
              ORDER BY datname",
         )
         .await
