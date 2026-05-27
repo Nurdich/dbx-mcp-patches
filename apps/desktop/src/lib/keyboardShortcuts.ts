@@ -88,6 +88,10 @@ export function isRefreshDataShortcut(event: ShortcutLikeEvent, shortcuts?: Part
   return matchesShortcut(event, actionShortcut("refreshData", shortcuts));
 }
 
+export function isModRShortcut(event: ShortcutLikeEvent): boolean {
+  return matchesShortcut(event, "Mod+R");
+}
+
 export function isToggleTransposeShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("toggleTranspose", shortcuts));
 }

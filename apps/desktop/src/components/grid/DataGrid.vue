@@ -127,6 +127,7 @@ import {
   isCopyCurrentRowShortcut,
   isDeleteCurrentRowShortcut,
   isFocusSearchShortcut,
+  isModRShortcut,
   isToggleTransposeShortcut,
 } from "@/lib/keyboardShortcuts";
 import { dataGridHeaderContentWidth, scrollbarGutterWidth } from "@/lib/dataGridScrollGutter";
@@ -2874,10 +2875,22 @@ function commitGridEdit() {
   nextTick(() => gridRef.value?.focus({ preventScroll: true }));
 }
 
+function openCellDetailSearch(): boolean {
+  return getDetailEditor()?.openSearch() ?? false;
+}
+
 async function onGridKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented) return;
+
   if (isFocusSearchShortcut(event)) {
     event.preventDefault();
     focusSearch();
+    return;
+  }
+  if (isModRShortcut(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    await onToolbarRefresh();
     return;
   }
   if (eventTargetAllowsNativeClipboard(event)) return;
@@ -3564,12 +3577,14 @@ defineExpose({
   toggleColumnVisibility,
   showAllColumns,
   invertColumnVisibility,
+  openCellDetailSearch,
 });
 </script>
 
 <template>
   <div
     ref="gridRef"
+    data-grid-root
     class="h-full flex flex-col overflow-hidden outline-none"
     :style="gridStyle"
     tabindex="0"
@@ -5178,7 +5193,12 @@ defineExpose({
                           @cancel="cancelDetailEdit"
                           @commit="commitDetailEdit"
                         />
-                        <div v-else ref="detailsEditorContainer" class="w-full h-40 rounded border overflow-hidden" />
+                        <div
+                          v-else
+                          ref="detailsEditorContainer"
+                          data-cell-detail-editor-root
+                          class="w-full h-40 rounded border overflow-hidden"
+                        />
                         <div class="flex gap-1 mt-1">
                           <Button size="sm" class="h-6 text-xs" @click="commitDetailEdit">
                             {{ t("dangerDialog.confirm") }}
@@ -5278,6 +5298,7 @@ defineExpose({
                     <div
                       v-else
                       ref="valueEditorContainer"
+                      data-cell-detail-editor-root
                       class="min-h-0 flex-1 w-full rounded border overflow-hidden"
                     />
                   </div>

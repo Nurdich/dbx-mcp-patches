@@ -7,6 +7,8 @@ export type ShortcutActionId =
   | "newQuery"
   | "closeTab"
   | "focusSearch"
+  | "find"
+  | "replace"
   | "refreshData"
   | "toggleTranspose"
   | "cancelSearch";
@@ -70,6 +72,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutFocusSearch",
     scope: "global",
     defaultShortcut: "Mod+F",
+  },
+  {
+    id: "find",
+    labelKey: "settings.shortcutFind",
+    scope: "editor",
+    defaultShortcut: "Mod+F",
+  },
+  {
+    id: "replace",
+    labelKey: "settings.shortcutReplace",
+    scope: "editor",
+    defaultShortcut: "Mod+R",
   },
   {
     id: "refreshData",
