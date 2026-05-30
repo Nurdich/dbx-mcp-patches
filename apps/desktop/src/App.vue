@@ -950,7 +950,9 @@ onUnmounted(() => {
   />
   <div v-show="!setupRequired && (!needsAuth || authenticated)">
     <TooltipProvider :delay-duration="300">
-      <div class="h-screen w-screen flex flex-col bg-background text-foreground overflow-hidden">
+      <div
+        class="h-screen w-screen min-w-[900px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden"
+      >
         <AppToolbar
           :is-dark="isDark"
           :theme-mode="themeMode"
