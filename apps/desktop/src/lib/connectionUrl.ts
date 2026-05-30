@@ -141,6 +141,30 @@ function parseJdbcSqlServerUrl(source: string): ParsedConnectionUrl | null {
 }
 
 function parseJdbcOracleUrl(source: string): ParsedConnectionUrl | null {
+  const descriptorMatch = source.match(/^jdbc:oracle:thin:@\s*\((.+)\)\s*$/i);
+  if (descriptorMatch) {
+    const profile = SCHEME_PROFILES.oracle;
+    const host = oracleDescriptorValue(source, "HOST");
+    const port = oracleDescriptorValue(source, "PORT");
+    const serviceName = oracleDescriptorValue(source, "SERVICE_NAME");
+    const sid = oracleDescriptorValue(source, "SID");
+    if (!host) return null;
+    return {
+      dbType: profile.type,
+      driverProfile: profile.profile,
+      driverLabel: profile.label,
+      host,
+      port: port ? Number(port) : profile.defaultPort,
+      username: "",
+      password: "",
+      database: serviceName || sid || undefined,
+      urlParams: "",
+      ssl: false,
+      connectionString: source,
+      oracleConnectionType: sid && !serviceName ? "sid" : "service_name",
+    };
+  }
+
   const serviceMatch = source.match(/^jdbc:oracle:thin:@\/\/([^:/?#]+)(?::(\d+))?\/([^?]+)(?:\?(.*))?$/i);
   if (serviceMatch) {
     const profile = SCHEME_PROFILES.oracle;
@@ -178,6 +202,11 @@ function parseJdbcOracleUrl(source: string): ParsedConnectionUrl | null {
   }
 
   return null;
+}
+
+function oracleDescriptorValue(source: string, key: string): string | undefined {
+  const match = new RegExp(`\\(${key}\\s*=\\s*([^\\)]+)\\)`, "i").exec(source);
+  return match?.[1]?.trim();
 }
 
 function parseJdbcUCanAccessUrl(source: string): ParsedConnectionUrl | null {

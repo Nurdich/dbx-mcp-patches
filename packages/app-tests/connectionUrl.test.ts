@@ -134,6 +134,20 @@ test("parses Oracle JDBC SID URLs", () => {
   assert.equal(parsed.oracleConnectionType, "sid");
 });
 
+test("parses Oracle JDBC descriptors and keeps the original connection string", () => {
+  const source =
+    "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=oracle.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
+  const parsed = parseConnectionUrl(source);
+
+  assert.equal(parsed.dbType, "oracle");
+  assert.equal(parsed.driverProfile, "oracle");
+  assert.equal(parsed.host, "oracle.example.com");
+  assert.equal(parsed.port, 1521);
+  assert.equal(parsed.database, "orcl");
+  assert.equal(parsed.oracleConnectionType, "service_name");
+  assert.equal(parsed.connectionString, source);
+});
+
 test("keeps MongoDB URLs as connection strings", () => {
   const source = "mongodb+srv://reader:secret@cluster.example.com/app?retryWrites=true";
   const parsed = parseConnectionUrl(source);

@@ -1081,8 +1081,12 @@ mod tests {
         config.db_type = DatabaseType::Oracle;
         config.driver_profile = Some("oracle".to_string());
 
-        assert!(should_retry_oracle_with_10g_driver(&config, "Agent RPC error (-1): ORA-12541: TNS:no listener"));
-        assert!(should_retry_oracle_with_10g_driver(&config, "host xxx port 1521 中没有监听程序"));
+        assert!(should_retry_oracle_with_10g_driver(
+            &config,
+            "Agent RPC error (-1): ORA-28040: No matching authentication protocol"
+        ));
+        assert!(!should_retry_oracle_with_10g_driver(&config, "Agent RPC error (-1): ORA-12541: TNS:no listener"));
+        assert!(!should_retry_oracle_with_10g_driver(&config, "host xxx port 1521 中没有监听程序"));
 
         config.driver_profile = Some("oracle-10g".to_string());
         assert!(!should_retry_oracle_with_10g_driver(&config, "Agent RPC error (-1): ORA-12541: TNS:no listener"));
@@ -1101,17 +1105,22 @@ mod tests {
         config.driver_profile = Some("oracle".to_string());
         config.oracle_connection_type = Some("service_name".to_string());
 
-        let retry = oracle_alternate_connect_config(&config, "Agent RPC error (-1): ORA-12541: TNS:no listener")
-            .expect("listener errors should allow alternate descriptor retry");
+        let retry = oracle_alternate_connect_config(
+            &config,
+            "Agent RPC error (-1): ORA-12514: listener does not currently know of service requested",
+        )
+        .expect("listener errors should allow alternate descriptor retry");
         assert_eq!(retry.driver_profile.as_deref(), Some("oracle"));
         assert_eq!(retry.oracle_connection_type.as_deref(), Some("sid"));
 
         let service_retry = oracle_alternate_connect_config(
             &retry,
-            "Agent RPC error (-1): ORA-12541: host xxx port 1521 中没有监听程序",
+            "Agent RPC error (-1): ORA-12505: listener does not currently know of SID given",
         )
         .expect("SID listener errors should allow service-name retry");
         assert_eq!(service_retry.oracle_connection_type.as_deref(), Some("service_name"));
+
+        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_none());
     }
 
     #[test]
@@ -1123,7 +1132,17 @@ mod tests {
         assert!(oracle_alternate_connect_config(&config, "ORA-01017: invalid username/password").is_none());
 
         config.driver_profile = Some("oracle-10g".to_string());
-        assert!(oracle_alternate_connect_config(&config, "ORA-12541: TNS:no listener").is_none());
+        assert!(oracle_alternate_connect_config(&config, "ORA-12514: listener does not know service").is_none());
+    }
+
+    #[test]
+    fn oracle_alternate_descriptor_retry_skips_custom_connection_strings() {
+        let mut config = mysql_config(Some("ORCL"));
+        config.db_type = DatabaseType::Oracle;
+        config.driver_profile = Some("oracle".to_string());
+        config.connection_string = Some("jdbc:oracle:thin:@//oracle.example.com:1521/ORCL".to_string());
+
+        assert!(oracle_alternate_connect_config(&config, "ORA-12514: listener does not know service").is_none());
     }
 
     #[test]

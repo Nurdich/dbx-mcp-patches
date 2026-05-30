@@ -791,6 +791,11 @@ pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
     if let Some(after) = rest.strip_prefix("oracle:") {
         let at_pos = after.find('@')?;
         let after_at = &after[at_pos + 1..];
+        if after_at.trim_start().starts_with('(') {
+            let host = oracle_descriptor_value(after_at, "HOST")?;
+            let port = oracle_descriptor_value(after_at, "PORT")?;
+            return Some((host, port.parse().ok()?));
+        }
         let after_at = after_at.strip_prefix("//").unwrap_or(after_at);
         let host_port = after_at.split(&['/', ':', '?'][..]).next()?;
         let port_str = after_at.strip_prefix(host_port)?.strip_prefix(':')?.split(&[':', '/', ';', '?'][..]).next()?;
@@ -823,12 +828,45 @@ pub fn parse_jdbc_host_port(url: &str) -> Option<(String, u16)> {
 }
 
 pub fn rewrite_jdbc_url_host(url: &str, new_host: &str, new_port: u16) -> String {
+    let normalized_url = url.to_ascii_uppercase();
+    if normalized_url.starts_with("JDBC:ORACLE:")
+        && normalized_url.contains("(HOST=")
+        && normalized_url.contains("(PORT=")
+    {
+        return rewrite_oracle_descriptor_host(url, new_host, new_port);
+    }
+
     let Some((old_host, old_port)) = parse_jdbc_host_port(url) else {
         return url.to_string();
     };
     let old_authority = format!("{old_host}:{old_port}");
     let new_authority = format!("{new_host}:{new_port}");
     url.replacen(&old_authority, &new_authority, 1)
+}
+
+fn oracle_descriptor_value(descriptor: &str, key: &str) -> Option<String> {
+    let key = format!("({key}=");
+    let start = descriptor.to_ascii_uppercase().find(&key)?;
+    let value_start = start + key.len();
+    let value_end = descriptor[value_start..].find(')')? + value_start;
+    Some(descriptor[value_start..value_end].trim().to_string())
+}
+
+fn rewrite_oracle_descriptor_host(url: &str, new_host: &str, new_port: u16) -> String {
+    let rewritten_host = replace_oracle_descriptor_value(url, "HOST", new_host);
+    replace_oracle_descriptor_value(&rewritten_host, "PORT", &new_port.to_string())
+}
+
+fn replace_oracle_descriptor_value(input: &str, key: &str, value: &str) -> String {
+    let token = format!("({key}=");
+    let Some(start) = input.to_ascii_uppercase().find(&token) else {
+        return input.to_string();
+    };
+    let value_start = start + token.len();
+    let Some(value_end) = input[value_start..].find(')').map(|offset| value_start + offset) else {
+        return input.to_string();
+    };
+    format!("{}{}{}", &input[..value_start], value, &input[value_end..])
 }
 
 fn encode_url_part(value: &str) -> String {
@@ -1511,6 +1549,27 @@ mod tests {
         let (h, p) = super::parse_jdbc_host_port("jdbc:oracle:thin:@//orahost:1521/service").unwrap();
         assert_eq!(h, "orahost");
         assert_eq!(p, 1521);
+    }
+
+    #[test]
+    fn parse_jdbc_host_port_oracle_descriptor() {
+        let (h, p) = super::parse_jdbc_host_port(
+            "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))",
+        )
+        .unwrap();
+        assert_eq!(h, "orahost");
+        assert_eq!(p, 1521);
+    }
+
+    #[test]
+    fn rewrite_jdbc_url_host_oracle_descriptor() {
+        let url =
+            "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=orahost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=orcl)))";
+
+        assert_eq!(
+            super::rewrite_jdbc_url_host(url, "127.0.0.1", 11521),
+            "jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=127.0.0.1)(PORT=11521))(CONNECT_DATA=(SERVICE_NAME=orcl)))"
+        );
     }
 
     #[test]
