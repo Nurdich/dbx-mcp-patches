@@ -50,7 +50,10 @@ test("buildDataGridCellDetail preserves full value metadata", () => {
     comment: "raw event payload",
     value: '{"ok":true,"items":[1,2]}',
     rawValue: '{"ok":true,"items":[1,2]}',
+    rawValuePreview: '{"ok":true,"items":[1,2]}',
     displayValue: 'formatted:{"ok":tr',
+    displayValuePreview: 'formatted:{"ok":tr',
+    isValuePreviewTruncated: false,
     imagePreviewUrl: null,
     length: 25,
     formattedJson: '{\n  "ok": true,\n  "items": [\n    1,\n    2\n  ]\n}',
@@ -70,6 +73,27 @@ test("buildDataGridCellDetail reports image preview URLs", () => {
   });
 
   assert.equal(detail?.imagePreviewUrl, "https://example.com/avatar.png");
+});
+
+test("buildDataGridCellDetail limits rendered previews for huge text values", () => {
+  const hugeJson = `{"body":"${"x".repeat(120_000)}"}`;
+  const detail = buildDataGridCellDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: [hugeJson],
+    columns: ["payload"],
+    columnIndex: 0,
+    typeByColumn: new Map([["payload", "nvarchar(max)"]]),
+    displayValue: (value) => String(value),
+    isEditable: false,
+  });
+
+  assert.ok(detail);
+  assert.equal(detail.rawValue, hugeJson);
+  assert.equal(detail.rawValuePreview.length, 12_000);
+  assert.equal(detail.displayValuePreview.length, 12_000);
+  assert.equal(detail.isValuePreviewTruncated, true);
+  assert.equal(detail.formattedJson, "");
 });
 
 test("buildDataGridRowDetail maps requested column indexes in order", () => {

@@ -2,6 +2,8 @@ import { cellImagePreviewUrl } from "@/lib/cellImageUrl";
 import { displayCellValue, type CellValue } from "@/lib/cellValue";
 import { formatJsonText } from "@/lib/cellDetailPresentation";
 
+export const CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH = 12_000;
+
 export interface DataGridCellDetail {
   rowNumber: number;
   rowId: number;
@@ -11,7 +13,10 @@ export interface DataGridCellDetail {
   comment: string;
   value: CellValue;
   rawValue: string;
+  rawValuePreview: string;
   displayValue: string;
+  displayValuePreview: string;
+  isValuePreviewTruncated: boolean;
   imagePreviewUrl: string | null;
   length: number;
   formattedJson: string;
@@ -78,7 +83,10 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
 
   const value = options.row[options.columnIndex] ?? null;
   const rawValue = displayCellValue(value);
+  const displayValue = options.displayValue(value, options.columnIndex);
   const formattedJson = typeof value === "string" && looksLikeJsonContainer(value) ? (formatJsonText(value) ?? "") : "";
+  const rawValuePreview = previewText(rawValue);
+  const displayValuePreview = previewText(displayValue);
 
   return {
     rowNumber: options.rowIndex + 1,
@@ -89,8 +97,12 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     comment: options.commentByColumn?.get(column) ?? "",
     value,
     rawValue,
-    displayValue: options.displayValue(value, options.columnIndex),
-    imagePreviewUrl: cellImagePreviewUrl(value),
+    rawValuePreview,
+    displayValue,
+    displayValuePreview,
+    isValuePreviewTruncated:
+      rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
+    imagePreviewUrl: rawValue.length <= CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH ? cellImagePreviewUrl(value) : null,
     length: value === null ? 0 : String(value).length,
     formattedJson,
     isEditable: options.isEditable,
@@ -180,4 +192,9 @@ export function dataGridColumnDetailTsv(detail: DataGridColumnDetail): string {
 function looksLikeJsonContainer(text: string): boolean {
   const trimmed = text.trim();
   return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
+function previewText(text: string): string {
+  if (text.length <= CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH) return text;
+  return text.slice(0, CELL_DETAIL_VALUE_PREVIEW_MAX_LENGTH);
 }

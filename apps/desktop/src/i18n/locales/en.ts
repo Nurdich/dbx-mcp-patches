@@ -568,6 +568,7 @@ export default {
     formattedJson: "Formatted JSON",
     formattedValue: "Formatted Value",
     rawValue: "Raw Value",
+    largeValuePreviewHint: "Previewing first {count} characters. Copy still uses the full value.",
     copyValue: "Copy Value",
     downloadBinaryValue: "Download Value",
     downloadSaved: "Saved to {path}",

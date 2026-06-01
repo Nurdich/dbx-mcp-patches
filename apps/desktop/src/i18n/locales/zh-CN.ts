@@ -563,6 +563,7 @@ export default {
     formattedJson: "格式化 JSON",
     formattedValue: "格式化值",
     rawValue: "原始值",
+    largeValuePreviewHint: "仅预览前 {count} 个字符，复制仍会使用完整值。",
     copyValue: "复制值",
     downloadBinaryValue: "下载值",
     downloadSaved: "已保存到 {path}",

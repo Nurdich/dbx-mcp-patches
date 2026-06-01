@@ -20,7 +20,7 @@ import {
 } from "@/lib/editorThemes";
 import { shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
-import { isJsonColumnType } from "@/lib/cellDetailPresentation";
+import { CELL_DETAIL_JSON_FORMAT_MAX_LENGTH, isJsonColumnType } from "@/lib/cellDetailPresentation";
 import {
   clampEditorFontSize,
   createEditorZoomCommitScheduler,
@@ -63,6 +63,7 @@ function looksLikeJsonString(text: string): boolean {
 }
 
 function shouldUseJsonMode(columnType?: string, value?: string): boolean {
+  if (value && value.length > CELL_DETAIL_JSON_FORMAT_MAX_LENGTH) return false;
   if (isJsonColumnType(columnType)) return true;
   if (value && looksLikeJsonString(value)) return true;
   return false;

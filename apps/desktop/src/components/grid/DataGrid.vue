@@ -6296,14 +6296,24 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       class="max-h-56 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre cursor-pointer hover:border-primary/50"
                       :class="{ 'cursor-text': activeCellDetail.isEditable }"
                       @dblclick="startDetailEdit"
-                      >{{ activeCellDetail.displayValue }}</pre
+                      >{{ activeCellDetail.displayValuePreview }}</pre
                     >
+                    <div v-if="activeCellDetail.isValuePreviewTruncated" class="text-[11px] text-muted-foreground">
+                      {{
+                        t("grid.largeValuePreviewHint", {
+                          count: activeCellDetail.displayValuePreview.length,
+                        })
+                      }}
+                    </div>
                   </div>
-                  <div v-if="activeCellDetail.displayValue !== activeCellDetail.rawValue" class="space-y-1">
+                  <div
+                    v-if="activeCellDetail.displayValuePreview !== activeCellDetail.rawValuePreview"
+                    class="space-y-1"
+                  >
                     <div class="text-muted-foreground">{{ t("grid.rawValue") }}</div>
                     <pre
                       class="max-h-40 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
-                      >{{ activeCellDetail.rawValue }}</pre
+                      >{{ activeCellDetail.rawValuePreview }}</pre
                     >
                   </div>
                   <div v-if="activeCellDetail.formattedJson" class="mt-2 space-y-1">
@@ -6634,14 +6644,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
             <pre
               class="max-h-[44vh] overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap break-words"
               :class="{ 'italic text-muted-foreground': dialogCellDetail.value === null }"
-              >{{ dialogCellDetail.rawValue }}</pre
+              >{{ dialogCellDetail.rawValuePreview }}</pre
             >
+            <div v-if="dialogCellDetail.isValuePreviewTruncated" class="text-[11px] text-muted-foreground">
+              {{ t("grid.largeValuePreviewHint", { count: dialogCellDetail.rawValuePreview.length }) }}
+            </div>
           </div>
 
-          <div v-if="dialogCellDetail.displayValue !== dialogCellDetail.rawValue" class="space-y-1">
+          <div v-if="dialogCellDetail.displayValuePreview !== dialogCellDetail.rawValuePreview" class="space-y-1">
             <div class="text-muted-foreground">{{ t("grid.formattedValue") }}</div>
             <pre class="max-h-40 overflow-auto rounded border bg-muted/20 p-3 font-mono text-xs whitespace-pre-wrap">{{
-              dialogCellDetail.displayValue
+              dialogCellDetail.displayValuePreview
             }}</pre>
           </div>
 
@@ -6741,8 +6754,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <pre
                     class="max-h-44 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
                     :class="{ 'italic text-muted-foreground': field.value === null }"
-                    >{{ field.rawValue }}</pre
+                    >{{ field.rawValuePreview }}</pre
                   >
+                  <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">
+                    {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
+                  </div>
                   <div v-if="field.formattedJson" class="mt-2 space-y-1">
                     <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
                     <pre
@@ -6850,8 +6866,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <pre
                     class="max-h-36 overflow-auto rounded border bg-muted/20 p-2 font-mono text-xs whitespace-pre-wrap break-words"
                     :class="{ 'italic text-muted-foreground': field.value === null }"
-                    >{{ field.rawValue }}</pre
+                    >{{ field.rawValuePreview }}</pre
                   >
+                  <div v-if="field.isValuePreviewTruncated" class="mt-1 text-[11px] text-muted-foreground">
+                    {{ t("grid.largeValuePreviewHint", { count: field.rawValuePreview.length }) }}
+                  </div>
                   <div v-if="field.formattedJson" class="mt-2 space-y-1">
                     <div class="text-muted-foreground">{{ t("grid.formattedJson") }}</div>
                     <pre
