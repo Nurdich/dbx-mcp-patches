@@ -123,6 +123,36 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void jdbcUrlAppendsConnectionUrlParams() throws Exception {
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:kingbase8://db.example.com:54321/demo",
+              "url_params": "useUnicode=true&characterEncoding=UTF-8"
+            }
+            """);
+
+        assertEquals(
+            "jdbc:kingbase8://db.example.com:54321/demo?useUnicode=true&characterEncoding=UTF-8",
+            DbxJdbcPlugin.jdbcUrl(connection)
+        );
+    }
+
+    @Test
+    void jdbcUrlAppendsConnectionUrlParamsBeforeFragment() throws Exception {
+        JsonNode connection = MAPPER.readTree("""
+            {
+              "connection_string": "jdbc:example://db/demo?ssl=true#section",
+              "url_params": "?characterEncoding=UTF-8"
+            }
+            """);
+
+        assertEquals(
+            "jdbc:example://db/demo?ssl=true&characterEncoding=UTF-8#section",
+            DbxJdbcPlugin.jdbcUrl(connection)
+        );
+    }
+
+    @Test
     void oracleSysdbaIsMappedToInternalLogonProperty() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("applyOracleProperties", JsonNode.class, Properties.class);
         method.setAccessible(true);

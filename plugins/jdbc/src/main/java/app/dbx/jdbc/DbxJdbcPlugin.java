@@ -197,7 +197,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static Connection openConnection(JsonNode connection) throws SQLException {
-        String url = jdbcUrlWithPasswordKey(optionalText(connection, "connection_string"), optionalText(connection, "password"));
+        String url = jdbcUrl(connection);
         if (url == null) {
             throw new IllegalArgumentException("JDBC URL is required.");
         }
@@ -585,6 +585,7 @@ public final class DbxJdbcPlugin {
 
     private static String connectionKey(JsonNode connection) {
         return optionalText(connection, "connection_string")
+            + "|" + optionalText(connection, "url_params")
             + "|" + optionalText(connection, "username")
             + "|" + optionalText(connection, "password")
             + "|" + connection.path("sysdba").asBoolean(false);
@@ -616,6 +617,11 @@ public final class DbxJdbcPlugin {
         return appendJdbcUrlParam(url, "key", password);
     }
 
+    static String jdbcUrl(JsonNode connection) {
+        String url = appendJdbcUrlParams(optionalText(connection, "connection_string"), optionalText(connection, "url_params"));
+        return jdbcUrlWithPasswordKey(url, optionalText(connection, "password"));
+    }
+
     private static boolean isSqliteUrl(String url) {
         return url.regionMatches(true, 0, "jdbc:sqlite:", 0, 12);
     }
@@ -644,6 +650,25 @@ public final class DbxJdbcPlugin {
         String separator = base.contains("?") ? (base.endsWith("?") || base.endsWith("&") ? "" : "&") : "?";
         String encodedValue = URLEncoder.encode(value, StandardCharsets.UTF_8);
         return base + separator + key + "=" + encodedValue + fragment;
+    }
+
+    static String appendJdbcUrlParams(String url, String urlParams) {
+        if (url == null || urlParams == null || urlParams.isBlank()) {
+            return url;
+        }
+        String params = urlParams.trim();
+        while (params.startsWith("?") || params.startsWith("&")) {
+            params = params.substring(1).trim();
+        }
+        if (params.isEmpty()) {
+            return url;
+        }
+
+        int fragmentStart = url.indexOf('#');
+        String base = fragmentStart < 0 ? url : url.substring(0, fragmentStart);
+        String fragment = fragmentStart < 0 ? "" : url.substring(fragmentStart);
+        String separator = base.contains("?") ? (base.endsWith("?") || base.endsWith("&") ? "" : "&") : "?";
+        return base + separator + params + fragment;
     }
 
     private static String oracleEffectiveSchema(Connection conn, String schema) throws SQLException {
