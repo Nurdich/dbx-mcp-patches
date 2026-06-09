@@ -1229,6 +1229,7 @@ export default {
     indexes: "索引",
     foreignKeys: "外键",
     triggers: "触发器",
+    ddl: "DDL",
     addColumn: "新增字段",
     addIndex: "新增索引",
     columnName: "字段名",

@@ -1199,6 +1199,7 @@ export default {
     indexes: "Indici",
     foreignKeys: "Chiavi Esterne",
     triggers: "Trigger",
+    ddl: "DDL",
     addColumn: "Aggiungi Colonna",
     addIndex: "Aggiungi Indice",
     columnName: "Colonna",

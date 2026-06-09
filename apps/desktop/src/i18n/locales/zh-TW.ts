@@ -1130,6 +1130,7 @@ export default {
     indexes: "索引",
     foreignKeys: "外鍵",
     triggers: "觸發器",
+    ddl: "DDL",
     addColumn: "新增欄位",
     addIndex: "新增索引",
     columnName: "欄位",

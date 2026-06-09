@@ -1066,6 +1066,7 @@ export default {
     indexes: "Índices",
     foreignKeys: "Claves foráneas",
     triggers: "Disparadores",
+    ddl: "DDL",
     addColumn: "Agregar columna",
     addIndex: "Agregar índice",
     columnName: "Columna",

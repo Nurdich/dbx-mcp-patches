@@ -1194,6 +1194,7 @@ export default {
     indexes: "Índices",
     foreignKeys: "Chaves estrangeiras",
     triggers: "Triggers",
+    ddl: "DDL",
     addColumn: "Adicionar coluna",
     addIndex: "Adicionar índice",
     columnName: "Coluna",
