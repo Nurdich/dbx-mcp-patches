@@ -224,6 +224,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   // --- Scroll helpers ---
   let isCancelling = false;
+  let isCommitting = false;
   let cancelScrollRestoreFrame = 0;
   let resetScrollFrame = 0;
   let resetScrollAfterResult = false;
@@ -397,12 +398,14 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function commitEdit() {
-    if (isCancelling) return;
+    if (isCancelling || isCommitting) return;
     if (!editingCell.value) return;
+    isCommitting = true;
     const { rowId, col } = editingCell.value;
     const item = getRowItem(rowId);
     if (!item || item.isDeleted) {
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
 
@@ -413,15 +416,18 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
         newRows.value[item.newIndex][col] = newVal;
       }
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
 
     if (item.sourceIndex === undefined) {
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
     if (!canEditExistingRows.value) {
       editingCell.value = null;
+      isCommitting = false;
       return;
     }
 
@@ -440,6 +446,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     }
     dirtyRows.value = new Map(dirtyRows.value);
     editingCell.value = null;
+    isCommitting = false;
   }
 
   function commitEditFromBlur() {
