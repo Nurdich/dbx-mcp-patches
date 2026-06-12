@@ -425,8 +425,8 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
   <div class="flex flex-col flex-1 min-h-0">
     <!-- Query mode: editor + results -->
     <template v-if="activeTab.mode === 'query'">
-      <Splitpanes horizontal class="flex-1">
-        <Pane :size="resultsPaneOpen ? 40 : 100" :min-size="resultsPaneOpen ? 15 : 100">
+      <Splitpanes horizontal class="query-output-splitpanes flex-1 min-h-0 overflow-hidden">
+        <Pane class="min-h-0" :size="resultsPaneOpen ? 40 : 100" :min-size="resultsPaneOpen ? 15 : 100">
           <div class="h-full flex flex-col relative">
             <QueryEditor
               ref="queryEditorRef"
@@ -461,7 +461,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
             </Button>
           </div>
         </Pane>
-        <Pane v-if="resultsPaneOpen" :size="60" :min-size="20">
+        <Pane v-if="resultsPaneOpen" class="min-h-0" :size="60" :min-size="20">
           <div class="h-full flex flex-col">
             <div v-if="hasQueryOutput" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
               <div class="flex shrink-0 items-center gap-1">
@@ -861,6 +861,15 @@ defineExpose({ focusSearch, refreshData, handleModRTarget });
 </template>
 
 <style scoped>
+.query-output-splitpanes {
+  isolation: isolate;
+}
+
+.query-output-splitpanes :deep(> .splitpanes__splitter) {
+  z-index: 1;
+  flex: 0 0 3px;
+}
+
 .result-tab-scroll::-webkit-scrollbar {
   display: none;
 }
