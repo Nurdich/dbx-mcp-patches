@@ -1033,9 +1033,22 @@ pub async fn do_execute(
             let plugin_timeout = query_timeout;
             drop(connections);
             wait_for_query_opt(cancel_token, query_timeout, async move {
-                let params =
-                    external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
-                session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+                if let Some(session_id) = options.result_session_id.as_deref() {
+                    let params = external_driver_fetch_query_page_params(
+                        config.as_ref(),
+                        session_id,
+                        options.page_size.unwrap_or(MAX_ROWS),
+                    );
+                    session.invoke_with_timeout::<db::QueryResult>("fetchQueryPage", params, plugin_timeout).await
+                } else if options.page_size.is_some() {
+                    let params =
+                        external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
+                    session.invoke_with_timeout::<db::QueryResult>("executeQueryPage", params, plugin_timeout).await
+                } else {
+                    let params =
+                        external_driver_query_params(config.as_ref(), &sql, &database, schema.as_deref(), &options);
+                    session.invoke_with_timeout::<db::QueryResult>("executeQuery", params, plugin_timeout).await
+                }
             })
             .await
             .map(|result| normalize_query_result_for_js(truncate_result_with_max_rows(result, max_rows)))
@@ -1063,7 +1076,22 @@ fn external_driver_query_params(
     if let Some(timeout_secs) = options.timeout_secs {
         params["timeoutSecs"] = serde_json::json!(timeout_secs);
     }
+    if let Some(page_size) = options.page_size {
+        params["pageSize"] = serde_json::json!(page_size);
+    }
     params
+}
+
+fn external_driver_fetch_query_page_params(
+    config: &crate::models::connection::ConnectionConfig,
+    session_id: &str,
+    page_size: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "connection": config,
+        "sessionId": session_id,
+        "pageSize": page_size,
+    })
 }
 
 pub async fn execute_sql_statement(
@@ -1241,6 +1269,16 @@ pub async fn close_query_session(
             drop(connections);
             let mut client = client.lock().await;
             client.close_query_session(session_id).await
+        }
+        PoolKind::ExternalDriver { config, session, .. } => {
+            let config = config.clone();
+            let session = session.clone();
+            drop(connections);
+            let params = external_driver_fetch_query_page_params(config.as_ref(), session_id, 1);
+            session
+                .invoke::<serde_json::Value>("closeQuerySession", params)
+                .await
+                .map(|value| value.get("ok").and_then(|ok| ok.as_bool()).unwrap_or(false))
         }
         _ => Ok(false),
     }

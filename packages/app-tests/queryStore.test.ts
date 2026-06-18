@@ -1320,6 +1320,80 @@ test("query result export fetches every paginated page", async () => {
   }
 });
 
+test("jdbc query pagination uses result sessions without capping max rows to one page", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  let prepareBody: any;
+  let executeBody: any;
+
+  connectionStore.addEphemeralConnection({
+    ...conn("jdbc-1"),
+    db_type: "jdbc",
+    connection_string: "jdbc:Cache://127.0.0.1:1972/USER",
+    jdbc_driver_class: "com.intersys.jdbc.CacheDriver",
+  });
+  const tabId = store.createTab("jdbc-1", "", "Query", "query", "SQLUser");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      prepareBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          sqlToExecute: "SELECT * FROM CT_Loc",
+          pageLimit: 100,
+          pageOffset: 0,
+          useAgentResultSession: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/execute-multi") {
+      executeBody = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify([
+          {
+            columns: ["id"],
+            rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+            affected_rows: 0,
+            execution_time_ms: 1,
+            session_id: "session-1",
+            has_more: true,
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "/api/query/analyze-editability") {
+      return new Response(JSON.stringify({ editable: false, reason: "complex-source" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    await store.executeTabSql(tabId, "SELECT * FROM CT_Loc");
+
+    assert.equal(prepareBody.options.useAgentCursor, true);
+    assert.equal(executeBody.pageSize, 100);
+    assert.equal(executeBody.fetchSize, 100);
+    assert.equal(executeBody.maxRows, undefined);
+    assert.equal(executeBody.clientSessionId, tabId);
+    assert.equal(tab.resultSessionId, "session-1");
+    assert.equal(tab.result?.has_more, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("table data export fetches every filtered page", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

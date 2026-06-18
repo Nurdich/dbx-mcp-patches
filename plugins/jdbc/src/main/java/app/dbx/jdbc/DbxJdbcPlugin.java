@@ -34,12 +34,15 @@ import java.sql.Types;
 import java.time.temporal.TemporalAccessor;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 import java.util.ServiceLoader;
 import java.util.Set;
+import java.util.UUID;
 import java.util.logging.Logger;
 
 public final class DbxJdbcPlugin {
@@ -109,6 +112,7 @@ public final class DbxJdbcPlugin {
     private static String registeredDriverKey = "";
     private static String sharedConnectionKey = "";
     private static Connection sharedConnection;
+    private static final Map<String, QuerySession> QUERY_SESSIONS = new HashMap<>();
 
     record JdbcDriverQuirks(
         boolean skipExecutionContext,
@@ -235,6 +239,21 @@ public final class DbxJdbcPlugin {
                 nonNegativeInt(params, "fetchSize", 0),
                 nonNegativeInt(params, "timeoutSecs", -1)
             );
+            case "executeQueryPage", "execute_query_page" -> executeQueryPage(
+                connection,
+                requireText(params, "sql"),
+                optionalText(params, "database"),
+                optionalText(params, "schema"),
+                positiveInt(params, "pageSize", 100),
+                positiveInt(params, "maxRows", MAX_ROWS),
+                nonNegativeInt(params, "fetchSize", 0),
+                nonNegativeInt(params, "timeoutSecs", -1)
+            );
+            case "fetchQueryPage", "fetch_query_page" -> fetchQueryPage(
+                requireText(params, "sessionId"),
+                positiveInt(params, "pageSize", 100)
+            );
+            case "closeQuerySession", "close_query_session" -> closeQuerySessionResult(requireText(params, "sessionId"));
             case "listDatabases" -> listDatabases(connection);
             case "listSchemas" -> listSchemas(connection, optionalText(params, "database"));
             case "listTables" -> listTables(connection, optionalText(params, "database"), optionalText(params, "schema"));
@@ -273,6 +292,7 @@ public final class DbxJdbcPlugin {
         if (driverKey.equals(registeredDriverKey)) {
             return;
         }
+        closeSharedConnection();
         List<URL> urls = new ArrayList<>();
         JsonNode paths = connection.path("jdbc_driver_paths");
         if (paths.isArray()) {
@@ -363,7 +383,7 @@ public final class DbxJdbcPlugin {
         int maxRows,
         int fetchSize,
         int timeoutSecs
-    ) throws SQLException {
+    ) throws Exception {
         long start = System.nanoTime();
         Connection conn = openConnection(connection);
         applyExecutionContext(connection, conn, database, schema);
@@ -409,6 +429,187 @@ public final class DbxJdbcPlugin {
     }
 
     private record ExecutedStatement(ResultSet resultSet, int updateCount) {
+    }
+
+    private static final class QuerySession {
+        private final String id;
+        private final Statement statement;
+        private final ResultSet resultSet;
+        private final ResultSetMetaData meta;
+        private final ArrayNode columns;
+        private final int maxRows;
+        private final long startNanos;
+        private int rowsReturned;
+        private ArrayNode pendingRow;
+
+        private QuerySession(
+            String id,
+            Statement statement,
+            ResultSet resultSet,
+            ResultSetMetaData meta,
+            ArrayNode columns,
+            int maxRows,
+            long startNanos
+        ) {
+            this.id = id;
+            this.statement = statement;
+            this.resultSet = resultSet;
+            this.meta = meta;
+            this.columns = columns;
+            this.maxRows = Math.max(1, maxRows);
+            this.startNanos = startNanos;
+        }
+    }
+
+    private static JsonNode executeQueryPage(
+        JsonNode connection,
+        String sql,
+        String database,
+        String schema,
+        int pageSize,
+        int maxRows,
+        int fetchSize,
+        int timeoutSecs
+    ) throws Exception {
+        long start = System.nanoTime();
+        Connection conn = openConnection(connection);
+        applyExecutionContext(connection, conn, database, schema);
+        JdbcDriverQuirks quirks = driverQuirks(connection);
+        Statement statement = conn.createStatement();
+        try {
+            applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs, quirks);
+            String trimmedSql = trimStatementSql(sql);
+            ExecutedStatement executed = executeStatementForResult(statement, trimmedSql, quirks);
+            ResultSet rs = executed.resultSet();
+            if (rs == null) {
+                ObjectNode result = MAPPER.createObjectNode();
+                result.set("columns", MAPPER.createArrayNode());
+                result.set("rows", MAPPER.createArrayNode());
+                result.put("affected_rows", Math.max(executed.updateCount(), 0));
+                result.put("execution_time_ms", (System.nanoTime() - start) / 1_000_000);
+                result.put("truncated", false);
+                result.putNull("session_id");
+                result.put("has_more", false);
+                statement.close();
+                return result;
+            }
+
+            ResultSetMetaData meta = rs.getMetaData();
+            ArrayNode columns = MAPPER.createArrayNode();
+            int columnCount = meta.getColumnCount();
+            for (int i = 1; i <= columnCount; i++) {
+                String label = meta.getColumnLabel(i);
+                columns.add(label == null || label.isBlank() ? meta.getColumnName(i) : label);
+            }
+            String sessionId = UUID.randomUUID().toString();
+            QuerySession session = new QuerySession(sessionId, statement, rs, meta, columns, maxRows, start);
+            QUERY_SESSIONS.put(sessionId, session);
+            return readQuerySessionPage(session, pageSize);
+        } catch (Exception error) {
+            try {
+                statement.close();
+            } catch (Exception ignored) {
+            }
+            throw error;
+        }
+    }
+
+    private static JsonNode fetchQueryPage(String sessionId, int pageSize) throws SQLException {
+        QuerySession session = QUERY_SESSIONS.get(sessionId);
+        if (session == null) {
+            throw new IllegalArgumentException("Unknown query session: " + sessionId);
+        }
+        return readQuerySessionPage(session, pageSize);
+    }
+
+    private static JsonNode readQuerySessionPage(QuerySession session, int pageSize) throws SQLException {
+        int effectivePageSize = Math.max(1, pageSize);
+        ArrayNode rows = MAPPER.createArrayNode();
+        boolean truncated = false;
+
+        while (rows.size() < effectivePageSize && session.rowsReturned < session.maxRows) {
+            ArrayNode row;
+            if (session.pendingRow != null) {
+                row = session.pendingRow;
+                session.pendingRow = null;
+            } else {
+                if (!session.resultSet.next()) {
+                    closeQuerySession(session.id);
+                    return queryPageResult(session, rows, false, false);
+                }
+                row = readRow(session.resultSet, session.meta);
+            }
+            rows.add(row);
+            session.rowsReturned++;
+        }
+
+        if (session.rowsReturned >= session.maxRows) {
+            truncated = session.pendingRow != null || session.resultSet.next();
+            closeQuerySession(session.id);
+            return queryPageResult(session, rows, truncated, false);
+        }
+
+        boolean hasMore = session.resultSet.next();
+        if (!hasMore) {
+            closeQuerySession(session.id);
+            return queryPageResult(session, rows, false, false);
+        }
+
+        session.pendingRow = readRow(session.resultSet, session.meta);
+        return queryPageResult(session, rows, false, true);
+    }
+
+    private static ObjectNode queryPageResult(QuerySession session, ArrayNode rows, boolean truncated, boolean hasMore) {
+        ObjectNode result = MAPPER.createObjectNode();
+        result.set("columns", session.columns.deepCopy());
+        result.set("rows", rows);
+        result.put("affected_rows", 0);
+        result.put("execution_time_ms", (System.nanoTime() - session.startNanos) / 1_000_000);
+        result.put("truncated", truncated);
+        if (hasMore) {
+            result.put("session_id", session.id);
+        } else {
+            result.putNull("session_id");
+        }
+        result.put("has_more", hasMore);
+        return result;
+    }
+
+    private static ObjectNode closeQuerySessionResult(String sessionId) {
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("ok", closeQuerySession(sessionId));
+        return result;
+    }
+
+    private static boolean closeQuerySession(String sessionId) {
+        QuerySession session = QUERY_SESSIONS.remove(sessionId);
+        if (session == null) {
+            return false;
+        }
+        try {
+            session.resultSet.close();
+        } catch (Exception ignored) {
+        }
+        try {
+            session.statement.close();
+        } catch (Exception ignored) {
+        }
+        return true;
+    }
+
+    private static void closeAllQuerySessions() {
+        List<String> sessionIds = new ArrayList<>(QUERY_SESSIONS.keySet());
+        for (String sessionId : sessionIds) {
+            closeQuerySession(sessionId);
+        }
+    }
+
+    private static ArrayNode readRow(ResultSet rs, ResultSetMetaData meta) throws SQLException {
+        ArrayNode row = MAPPER.createArrayNode();
+        for (int i = 1; i <= meta.getColumnCount(); i++) {
+            row.add(MAPPER.valueToTree(readValue(rs, meta, i)));
+        }
+        return row;
     }
 
     private static ExecutedStatement executeStatementForResult(
@@ -1194,6 +1395,7 @@ public final class DbxJdbcPlugin {
     }
 
     private static void closeSharedConnection() {
+        closeAllQuerySessions();
         if (sharedConnection != null) {
             try {
                 sharedConnection.close();

@@ -106,6 +106,50 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void executeQueryPageKeepsCursorForNextPages() throws Exception {
+        JsonNode first = request("executeQueryPage", """
+            {
+              "connection": %s,
+              "sql": "SELECT X FROM SYSTEM_RANGE(1, 5)",
+              "pageSize": 2,
+              "maxRows": 10
+            }
+            """.formatted(CONNECTION));
+
+        assertFalse(first.has("error"), first.toString());
+        assertEquals(1, first.path("result").path("rows").path(0).path(0).asInt());
+        assertEquals(2, first.path("result").path("rows").path(1).path(0).asInt());
+        assertEquals(true, first.path("result").path("has_more").asBoolean());
+        String sessionId = first.path("result").path("session_id").asText();
+
+        JsonNode second = request("fetchQueryPage", """
+            {
+              "connection": %s,
+              "sessionId": "%s",
+              "pageSize": 2
+            }
+            """.formatted(CONNECTION, sessionId));
+
+        assertFalse(second.has("error"), second.toString());
+        assertEquals(3, second.path("result").path("rows").path(0).path(0).asInt());
+        assertEquals(4, second.path("result").path("rows").path(1).path(0).asInt());
+        assertEquals(true, second.path("result").path("has_more").asBoolean());
+
+        JsonNode third = request("fetch_query_page", """
+            {
+              "connection": %s,
+              "sessionId": "%s",
+              "pageSize": 2
+            }
+            """.formatted(CONNECTION, second.path("result").path("session_id").asText()));
+
+        assertFalse(third.has("error"), third.toString());
+        assertEquals(5, third.path("result").path("rows").path(0).path(0).asInt());
+        assertEquals(false, third.path("result").path("has_more").asBoolean());
+        assertEquals(true, third.path("result").path("session_id").isNull());
+    }
+
+    @Test
     void readValueFormatsDateColumnsWithoutMidnightTime() throws Exception {
         Method method = DbxJdbcPlugin.class.getDeclaredMethod("readValue", ResultSet.class, ResultSetMetaData.class, int.class);
         method.setAccessible(true);

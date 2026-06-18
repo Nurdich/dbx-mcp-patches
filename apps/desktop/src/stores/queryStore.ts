@@ -1268,7 +1268,7 @@ export const useQueryStore = defineStore("query", () => {
       await connStore.ensureConnected(tab.connectionId);
       const conn = connStore.getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
-      const useAgentCursor = supportsDatabaseFeature(conn?.db_type, "driverManagement");
+      const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const settingsStore = useSettingsStore();
       await previousResultSessionClose;
@@ -1520,7 +1520,6 @@ export const useQueryStore = defineStore("query", () => {
         ...(typeof pageLimit === "number"
           ? useAgentResultSession
             ? {
-                maxRows: pageLimit,
                 fetchSize: pageLimit,
                 pageSize: pageLimit,
                 resultSessionId: options?.pagination?.sessionId,
@@ -1999,7 +1998,7 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
-    const useAgentCursor = supportsDatabaseFeature(conn?.db_type, "driverManagement");
+    const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
     const queryBaseSql = tab.resultBaseSql ?? sql;
     const pageLimit = Math.max(tab.resultPageLimit ?? 0, TABLE_DATA_EXPORT_PAGE_SIZE);
     const rows: QueryResult["rows"] = [];
@@ -2021,7 +2020,6 @@ export const useQueryStore = defineStore("query", () => {
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return tab.result;
         const executionOptions = plan.useAgentResultSession
           ? {
-              maxRows: plan.pageLimit,
               fetchSize: plan.pageLimit,
               pageSize: plan.pageLimit,
               resultSessionId: sessionId,

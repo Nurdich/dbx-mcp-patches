@@ -330,6 +330,10 @@ impl PluginDriverSession {
         let _ = process.child.kill().await;
     }
 
+    pub async fn shutdown(&self) {
+        self.kill().await;
+    }
+
     pub async fn pid(&self) -> Option<u32> {
         let process = self.process.lock().await;
         process.child.id()
@@ -509,7 +513,10 @@ fn resolve_plugin_executable(plugin_dir: &Path, executable: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_decoded_plugin_response, read_plugin_line, InstalledPlugin, PluginManifest};
+    use super::{
+        read_decoded_plugin_response, read_plugin_line, InstalledPlugin, PluginDriverManifest, PluginDriverSession,
+        PluginManifest, PluginRuntimeEnv,
+    };
     use std::path::PathBuf;
     use tokio::io::BufReader;
 
@@ -546,5 +553,60 @@ mod tests {
                 .expect("response should decode after noisy line");
 
         assert_eq!(result["ok"], true);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_kills_plugin_child_process() {
+        let dir = std::env::temp_dir().join(format!("dbx-plugin-shutdown-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+        }
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+
+        let session = PluginDriverSession::start(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
+            .await
+            .expect("session should start");
+        let pid = session.pid().await.expect("child should have a pid");
+
+        session.shutdown().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(!process_exists(pid));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }

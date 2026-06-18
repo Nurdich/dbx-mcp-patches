@@ -1223,6 +1223,11 @@ impl AppState {
         close_removed_pools_in_background(removed);
     }
 
+    pub async fn remove_external_driver_pools(&self, driver_id: &str) {
+        let removed = self.drain_external_driver_pools(driver_id).await;
+        close_removed_pools(removed).await;
+    }
+
     async fn drain_connection_pools(&self, connection_id: &str) -> Vec<(String, PoolKind)> {
         let pool_prefix = format!("{connection_id}:");
         let keys_to_remove: Vec<String> = self
@@ -1245,6 +1250,30 @@ impl AppState {
         // Also drop the MQ admin adapter if this is an MQ connection.
         #[cfg(feature = "mq-admin")]
         self.mq_registry.drop_connection(connection_id).await;
+        removed
+    }
+
+    async fn drain_external_driver_pools(&self, driver_id: &str) -> Vec<(String, PoolKind)> {
+        let keys_to_remove: Vec<String> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter_map(|(key, pool)| match pool {
+                PoolKind::ExternalDriver { driver_id: pool_driver_id, .. } if pool_driver_id == driver_id => {
+                    Some(key.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        self.stop_keepalive_tasks(&keys_to_remove).await;
+        let mut conns = self.connections.write().await;
+        let mut removed = Vec::with_capacity(keys_to_remove.len());
+        for key in keys_to_remove {
+            if let Some(pool) = conns.remove(&key) {
+                removed.push((key, pool));
+            }
+        }
         removed
     }
 
@@ -1429,7 +1458,9 @@ pub async fn close_pool_kind(pool: PoolKind) {
             let _ = client.disconnect().await;
         }
         PoolKind::ExternalTabular(_) => {}
-        PoolKind::ExternalDriver { .. } => {}
+        PoolKind::ExternalDriver { session, .. } => {
+            session.shutdown().await;
+        }
         PoolKind::MessageQueue => {}
     }
 }
