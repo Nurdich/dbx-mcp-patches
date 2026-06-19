@@ -1179,6 +1179,11 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
       onProgress(progress);
       if (progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled") {
         es.close();
+        if (progress.status === "Done") {
+          // Trigger browser download; filename is decided by the server's
+          // Content-Disposition header.
+          downloadDatabaseExportFile(request.exportId);
+        }
         resolve();
       }
     };
@@ -1187,6 +1192,12 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
       reject(new Error("Export SSE connection failed"));
     };
   });
+}
+
+function downloadDatabaseExportFile(exportId: string): void {
+  const a = document.createElement("a");
+  a.href = `/api/export/database/download/${exportId}`;
+  a.click();
 }
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {

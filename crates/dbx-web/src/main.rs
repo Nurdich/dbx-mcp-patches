@@ -372,6 +372,7 @@ async fn main() {
         .route("/export/database", post(routes::database_export::start_database_export))
         .route("/export/database/progress/{exportId}", get(routes::database_export::database_export_progress))
         .route("/export/database/cancel", post(routes::database_export::cancel_database_export))
+        .route("/export/database/download/{exportId}", get(routes::database_export::database_export_download))
         // Table export
         .route("/export/table", post(routes::table_export::start_table_export))
         .route("/export/table/progress/{exportId}", get(routes::table_export::table_export_progress))
