@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::with_connection_timeout;
 use crate::types::IndexInfo;
 use futures::TryStreamExt;
+use percent_encoding::percent_decode_str;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,11 +18,12 @@ pub struct MongoDocumentResult {
 }
 
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
-    let is_multi_host = is_multi_host_mongo_uri(url);
+    let url = normalize_mongo_uri_direct_connection(url);
+    let is_multi_host = is_multi_host_mongo_uri(&url);
     let parse_timeout = if is_multi_host { std::cmp::max(timeout * 2, Duration::from_secs(10)) } else { timeout };
 
     with_connection_timeout("MongoDB", parse_timeout, async {
-        let mut options = ClientOptions::parse(url).await.map_err(|e| format!("MongoDB connection failed: {e}"))?;
+        let mut options = ClientOptions::parse(&url).await.map_err(|e| format!("MongoDB connection failed: {e}"))?;
         options.connect_timeout = Some(timeout);
         options.server_selection_timeout =
             if is_multi_host { Some(std::cmp::max(timeout * 2, Duration::from_secs(10))) } else { Some(timeout) };
@@ -43,6 +45,27 @@ pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Re
     .await
 }
 
+fn normalize_mongo_uri_direct_connection(uri: &str) -> String {
+    if !is_multi_host_mongo_uri(uri) || !mongo_uri_has_direct_connection_true(uri) {
+        return uri.to_string();
+    }
+
+    let (before_fragment, fragment) =
+        uri.split_once('#').map(|(base, fragment)| (base, Some(fragment))).unwrap_or((uri, None));
+    let Some((base, query)) = before_fragment.split_once('?') else {
+        return uri.to_string();
+    };
+    let params =
+        query.split('&').filter(|part| !mongo_url_param_is_direct_connection_true(part)).collect::<Vec<_>>().join("&");
+
+    let mut normalized = if params.is_empty() { base.to_string() } else { format!("{base}?{params}") };
+    if let Some(fragment) = fragment {
+        normalized.push('#');
+        normalized.push_str(fragment);
+    }
+    normalized
+}
+
 fn is_multi_host_mongo_uri(url: &str) -> bool {
     let rest = match url.strip_prefix("mongodb://").or_else(|| url.strip_prefix("mongodb+srv://")) {
         Some(r) => r,
@@ -57,6 +80,22 @@ fn is_multi_host_mongo_uri(url: &str) -> bool {
         None => authority,
     };
     host_section.contains(',')
+}
+
+fn mongo_uri_has_direct_connection_true(uri: &str) -> bool {
+    uri.split_once('?')
+        .map(|(_, query)| {
+            query.split('#').next().unwrap_or("").split('&').any(mongo_url_param_is_direct_connection_true)
+        })
+        .unwrap_or(false)
+}
+
+fn mongo_url_param_is_direct_connection_true(part: &str) -> bool {
+    let Some((key, value)) = part.split_once('=') else {
+        return false;
+    };
+    percent_decode_str(key).decode_utf8_lossy().eq_ignore_ascii_case("directConnection")
+        && percent_decode_str(value).decode_utf8_lossy().eq_ignore_ascii_case("true")
 }
 
 pub async fn test_connection(client: &Client, timeout: Duration, database: Option<&str>) -> Result<(), String> {
@@ -631,6 +670,43 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 mod tests {
     use super::*;
     use mongodb::options::IndexOptions;
+
+    #[test]
+    fn multi_seed_uri_removes_direct_connection_true_before_driver_parse() {
+        let uri =
+            "mongodb://read:pass@host1:27017,host2:27017/admin?directConnection=true&replicaSet=rs0&authSource=admin";
+
+        let normalized = normalize_mongo_uri_direct_connection(uri);
+
+        assert_eq!(normalized, "mongodb://read:pass@host1:27017,host2:27017/admin?replicaSet=rs0&authSource=admin");
+    }
+
+    #[test]
+    fn multi_seed_uri_removes_encoded_direct_connection_true_and_keeps_fragment() {
+        let uri = "mongodb://host1:27017,host2:27017/admin?authSource=admin&direct%43onnection=TRUE#read";
+
+        let normalized = normalize_mongo_uri_direct_connection(uri);
+
+        assert_eq!(normalized, "mongodb://host1:27017,host2:27017/admin?authSource=admin#read");
+    }
+
+    #[test]
+    fn single_seed_uri_keeps_direct_connection_true() {
+        let uri = "mongodb://host1:27017/admin?directConnection=true&authSource=admin";
+
+        let normalized = normalize_mongo_uri_direct_connection(uri);
+
+        assert_eq!(normalized, uri);
+    }
+
+    #[test]
+    fn multi_seed_uri_keeps_direct_connection_false() {
+        let uri = "mongodb://host1:27017,host2:27017/admin?directConnection=false&replicaSet=rs0";
+
+        let normalized = normalize_mongo_uri_direct_connection(uri);
+
+        assert_eq!(normalized, uri);
+    }
 
     #[test]
     fn document_id_filters_try_object_id_then_string_for_hex_ids() {
