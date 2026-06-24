@@ -254,7 +254,7 @@ pub fn build_data_grid_copy_update_statements(options: DataGridCopyUpdateStateme
             .join(" AND ");
         statements.push(data_grid_statement(
             options.database_type,
-            format!("UPDATE {table} SET {sets} WHERE {where_clause}"),
+            data_grid_update_sql(options.database_type, &table, &sets, &where_clause),
         ));
     }
     statements
@@ -418,6 +418,10 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         })
         .map(|column| normalize_column_name(&column.name))
         .collect();
+    if let Some(error) = validate_clickhouse_mutable_updates(options) {
+        return Some(error);
+    }
+
     if not_null_columns.is_empty() {
         return None;
     }
@@ -445,6 +449,42 @@ fn validate_data_grid_save(options: &DataGridSaveStatementOptions) -> Option<Str
         }
     }
 
+    None
+}
+
+fn validate_clickhouse_mutable_updates(options: &DataGridSaveStatementOptions) -> Option<String> {
+    if options.database_type != Some(DatabaseType::ClickHouse) || options.dirty_rows.is_empty() {
+        return None;
+    }
+    let save_columns = effective_columns(options);
+    let column_info = options.table_meta.columns.as_deref().unwrap_or(&[]);
+    let primary_key_set: Vec<String> =
+        options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
+    let has_clickhouse_key_metadata = !primary_key_set.is_empty()
+        || column_info.iter().any(|column| is_clickhouse_partition_key_column(options.database_type, Some(column)));
+    if !has_clickhouse_key_metadata {
+        return None;
+    }
+
+    for (_, changes) in &options.dirty_rows {
+        if changes.is_empty() {
+            continue;
+        }
+        let has_mutable_column = changes.iter().any(|(column_index, _)| {
+            let Some(column) = save_columns.get(*column_index).and_then(|column| column.as_deref()) else {
+                return false;
+            };
+            !is_grid_update_omitted_column(
+                options.database_type,
+                column_info_for(column_info, column),
+                Some(column),
+                &primary_key_set,
+            )
+        });
+        if !has_mutable_column {
+            return Some(clickhouse_no_mutable_columns_error());
+        }
+    }
     None
 }
 
@@ -504,6 +544,8 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
         &options.table_meta.table_name,
     );
     let mut statements = Vec::new();
+    let primary_key_set: Vec<String> =
+        options.table_meta.primary_keys.iter().map(|primary_key| normalize_column_name(primary_key)).collect();
 
     for (row_index, changes) in &options.dirty_rows {
         let Some(row) = options.rows.get(*row_index) else {
@@ -517,6 +559,7 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
                     options.database_type,
                     column_info_for(column_info, column),
                     Some(column),
+                    &primary_key_set,
                 ) {
                     return None;
                 }
@@ -540,7 +583,7 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
         );
         statements.push(data_grid_statement(
             options.database_type,
-            format!("UPDATE {table} SET {sets} WHERE {where_clause}"),
+            data_grid_update_sql(options.database_type, &table, &sets, &where_clause),
         ));
     }
 
@@ -555,8 +598,10 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
             row,
             column_info,
         );
-        statements
-            .push(data_grid_statement(options.database_type, format!("DELETE FROM {table} WHERE {where_clause}")));
+        statements.push(data_grid_statement(
+            options.database_type,
+            data_grid_delete_sql(options.database_type, &table, &where_clause),
+        ));
     }
 
     for row in &options.new_rows {
@@ -600,6 +645,9 @@ fn build_data_grid_save_statements(options: &DataGridSaveStatementOptions) -> Ve
 fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -> Vec<String> {
     if options.database_type == Some(DatabaseType::Neo4j) {
         return build_neo4j_data_grid_rollback_statements(options);
+    }
+    if options.database_type == Some(DatabaseType::ClickHouse) {
+        return Vec::new();
     }
 
     let save_columns = effective_columns(options);
@@ -671,6 +719,7 @@ fn build_data_grid_rollback_statements(options: &DataGridSaveStatementOptions) -
                     options.database_type,
                     column_info_for(column_info, column),
                     Some(column),
+                    &[],
                 ) {
                     return None;
                 }
@@ -1143,6 +1192,22 @@ fn data_grid_statement(database_type: Option<DatabaseType>, sql: String) -> Stri
     }
 }
 
+fn data_grid_update_sql(database_type: Option<DatabaseType>, table: &str, sets: &str, where_clause: &str) -> String {
+    if database_type == Some(DatabaseType::ClickHouse) {
+        format!("ALTER TABLE {table} UPDATE {sets} WHERE {where_clause}")
+    } else {
+        format!("UPDATE {table} SET {sets} WHERE {where_clause}")
+    }
+}
+
+fn data_grid_delete_sql(database_type: Option<DatabaseType>, table: &str, where_clause: &str) -> String {
+    if database_type == Some(DatabaseType::ClickHouse) {
+        format!("ALTER TABLE {table} DELETE WHERE {where_clause}")
+    } else {
+        format!("DELETE FROM {table} WHERE {where_clause}")
+    }
+}
+
 fn uses_mysql_binary_text_predicate(
     database_type: Option<DatabaseType>,
     value: &Value,
@@ -1192,8 +1257,35 @@ fn is_grid_update_omitted_column(
     database_type: Option<DatabaseType>,
     column_info: Option<&DataGridColumnInfo>,
     name: Option<&str>,
+    primary_key_set: &[String],
 ) -> bool {
-    is_oracle_row_id(database_type, name) || is_non_identity_generated_column(column_info)
+    is_oracle_row_id(database_type, name)
+        || is_clickhouse_key_column(database_type, column_info, name, primary_key_set)
+        || is_non_identity_generated_column(column_info)
+}
+
+fn is_clickhouse_key_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    name: Option<&str>,
+    primary_key_set: &[String],
+) -> bool {
+    if database_type != Some(DatabaseType::ClickHouse) {
+        return false;
+    }
+    column_info.is_some_and(|column| column.is_primary_key)
+        || is_clickhouse_partition_key_column(database_type, column_info)
+        || name.is_some_and(|name| primary_key_set.contains(&normalize_column_name(name)))
+}
+
+fn is_clickhouse_partition_key_column(
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> bool {
+    database_type == Some(DatabaseType::ClickHouse)
+        && column_info.and_then(|column| column.extra.as_deref()).is_some_and(|extra| {
+            extra.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_').any(|part| part == "partition_key")
+        })
 }
 
 fn is_postgres_tsvector_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
@@ -1280,6 +1372,10 @@ fn normalize_column_name(name: &str) -> String {
 
 fn null_write_error(column: &str) -> String {
     format!("Column \"{column}\" does not allow NULL.")
+}
+
+fn clickhouse_no_mutable_columns_error() -> String {
+    "ClickHouse primary or partition key columns cannot be updated. Change a non-key column before saving.".to_string()
 }
 
 fn predicate_ident(database_type: Option<DatabaseType>, name: &str) -> String {
@@ -1657,6 +1753,146 @@ mod tests {
                 "INSERT INTO `default`.`people` (`id`, `name`) VALUES (2, 'Grace');",
             ]
         );
+    }
+
+    #[test]
+    fn prepares_clickhouse_mutation_save_statements() {
+        let mut id_column = column("id", "UInt64", false, None);
+        id_column.is_primary_key = true;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            table_meta: DataGridTableMeta {
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_column, column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("Linus"))])],
+            deleted_rows: vec![0],
+            new_rows: vec![vec![json!(2), json!("Grace")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                "ALTER TABLE \"people\" UPDATE \"name\" = 'Linus' WHERE \"id\" = 1;",
+                "ALTER TABLE \"people\" DELETE WHERE \"id\" = 1;",
+                "INSERT INTO \"people\" (\"id\", \"name\") VALUES (2, 'Grace');",
+            ]
+        );
+        assert!(result.rollback_statements.is_empty());
+    }
+
+    #[test]
+    fn rejects_clickhouse_key_only_update() {
+        let mut id_column = column("id", "UInt64", false, None);
+        id_column.is_primary_key = true;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            table_meta: DataGridTableMeta {
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![id_column, column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(0, json!(2))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some(
+                "ClickHouse primary or partition key columns cannot be updated. Change a non-key column before saving."
+                    .to_string()
+            )
+        );
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn omits_clickhouse_partition_key_update_assignments() {
+        let mut event_date_column = column("event_date", "Date", false, Some("partition_key"));
+        event_date_column.is_primary_key = false;
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            table_meta: DataGridTableMeta {
+                schema: Some("default".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "UInt64", false, None),
+                    event_date_column,
+                    column("name", "String", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "event_date".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("2026-06-24"), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("2026-06-25")), (2, json!("Linus"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(result.statements, vec!["ALTER TABLE \"events\" UPDATE \"name\" = 'Linus' WHERE \"id\" = 1;"]);
+    }
+
+    #[test]
+    fn rejects_clickhouse_partition_key_only_update() {
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            table_meta: DataGridTableMeta {
+                schema: Some("default".to_string()),
+                table_name: "events".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![
+                    column("id", "UInt64", false, None),
+                    column("event_date", "Date", false, Some("partition_key")),
+                    column("name", "String", true, None),
+                ]),
+            },
+            columns: vec!["id".to_string(), "event_date".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("2026-06-24"), json!("Ada")]],
+            dirty_rows: vec![(0, vec![(1, json!("2026-06-25"))])],
+            deleted_rows: vec![],
+            new_rows: vec![],
+        });
+
+        assert_eq!(
+            result.validation_error,
+            Some(
+                "ClickHouse primary or partition key columns cannot be updated. Change a non-key column before saving."
+                    .to_string()
+            )
+        );
+        assert!(result.statements.is_empty());
+    }
+
+    #[test]
+    fn builds_clickhouse_copy_update_statements() {
+        let statements = build_data_grid_copy_update_statements(DataGridCopyUpdateStatementOptions {
+            database_type: Some(DatabaseType::ClickHouse),
+            table_meta: DataGridTableMeta {
+                schema: Some("default".to_string()),
+                table_name: "people".to_string(),
+                primary_keys: vec!["id".to_string()],
+                columns: Some(vec![column("id", "UInt64", false, None), column("name", "String", true, None)]),
+            },
+            columns: vec!["id".to_string(), "name".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("Ada")]],
+        });
+
+        assert_eq!(statements, vec!["ALTER TABLE \"people\" UPDATE \"name\" = 'Ada' WHERE \"id\" = 1;"]);
     }
 
     #[test]
