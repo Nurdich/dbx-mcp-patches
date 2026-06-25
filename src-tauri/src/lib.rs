@@ -74,6 +74,7 @@ fn native_window_decorations_override(target_os: &str) -> Option<bool> {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_webkit_rendering_workarounds() -> &'static [(&'static str, &'static str)] {
     &[
         // WebKitGTK's DMABUF renderer can produce a blank AppImage window or
@@ -85,6 +86,7 @@ fn linux_webkit_rendering_workarounds() -> &'static [(&'static str, &'static str
     ]
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_appimage_wayland_backend_override(
     appimage: Option<&std::ffi::OsStr>,
     wayland_display: Option<&std::ffi::OsStr>,
