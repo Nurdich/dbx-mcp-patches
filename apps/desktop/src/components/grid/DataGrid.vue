@@ -367,29 +367,29 @@ function columnIsSorted(column: string, columnIndex: number): boolean {
 function sortMenuItems(column: string, columnIndex: number) {
   return [
     {
-      label: t("grid.sortCurrentPageAscending"),
-      value: "local-asc",
-      icon: ArrowUp,
-      checked: columnIsSorted(column, columnIndex) && sortDir.value === "asc" && sortMode.value === "local",
-    },
-    {
-      label: t("grid.sortCurrentPageDescending"),
-      value: "local-desc",
-      icon: ArrowDown,
-      checked: columnIsSorted(column, columnIndex) && sortDir.value === "desc" && sortMode.value === "local",
-    },
-    {
       label: t("grid.sortDatabaseAscending"),
       value: "database-asc",
       icon: Database,
       checked: columnIsSorted(column, columnIndex) && sortDir.value === "asc" && sortMode.value === "database",
-      separatorBefore: true,
     },
     {
       label: t("grid.sortDatabaseDescending"),
       value: "database-desc",
       icon: Database,
       checked: columnIsSorted(column, columnIndex) && sortDir.value === "desc" && sortMode.value === "database",
+    },
+    {
+      label: t("grid.sortCurrentPageAscending"),
+      value: "local-asc",
+      icon: ArrowUp,
+      checked: columnIsSorted(column, columnIndex) && sortDir.value === "asc" && sortMode.value === "local",
+      separatorBefore: true,
+    },
+    {
+      label: t("grid.sortCurrentPageDescending"),
+      value: "local-desc",
+      icon: ArrowDown,
+      checked: columnIsSorted(column, columnIndex) && sortDir.value === "desc" && sortMode.value === "local",
     },
     {
       label: t("grid.clearSort"),
@@ -6485,11 +6485,11 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
   // 2. Column sort & filter
   if (contextColumn.value) {
     items.push(
-      { label: t("grid.sortCurrentPageAscending"), action: () => applyContextSort("asc", "local"), icon: ArrowUp },
-      { label: t("grid.sortCurrentPageDescending"), action: () => applyContextSort("desc", "local"), icon: ArrowDown },
-      { label: "", separator: true },
       { label: t("grid.sortDatabaseAscending"), action: () => applyContextSort("asc", "database"), icon: Database },
       { label: t("grid.sortDatabaseDescending"), action: () => applyContextSort("desc", "database"), icon: Database },
+      { label: "", separator: true },
+      { label: t("grid.sortCurrentPageAscending"), action: () => applyContextSort("asc", "local"), icon: ArrowUp },
+      { label: t("grid.sortCurrentPageDescending"), action: () => applyContextSort("desc", "local"), icon: ArrowDown },
     );
     if (sortCol.value) {
       items.push({ label: t("grid.clearSort"), action: () => applyContextSort(null, sortMode.value), icon: ArrowUpDown });
