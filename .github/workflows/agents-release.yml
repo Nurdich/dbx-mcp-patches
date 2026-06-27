@@ -115,6 +115,8 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add agents/versions.json
             git commit -m "chore: bump module versions [skip ci]"
+            git fetch origin main --no-tags
+            git rebase origin/main
             git push origin HEAD:main
           fi
 
