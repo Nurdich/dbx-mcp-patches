@@ -198,10 +198,11 @@ impl NacosOpenApiAdmin {
         namespace: &str,
         search: &str,
         group: &str,
+        app_name: &str,
         page_no: u32,
         page_size: u32,
     ) -> Result<Value, String> {
-        let v3_params = vec![
+        let mut v3_params = vec![
             ("search".to_string(), "blur".to_string()),
             ("dataId".to_string(), search.to_string()),
             ("groupName".to_string(), group.to_string()),
@@ -209,10 +210,11 @@ impl NacosOpenApiAdmin {
             ("pageNo".to_string(), page_no.to_string()),
             ("pageSize".to_string(), page_size.to_string()),
         ];
+        push_optional(&mut v3_params, "appName", Some(app_name.to_string()));
         match self.get_json("/v3/console/cs/config/list", v3_params).await {
             Ok(value) => Ok(value),
             Err(v3_err) => {
-                let v1_params = vec![
+                let mut v1_params = vec![
                     ("search".to_string(), "blur".to_string()),
                     ("dataId".to_string(), search.to_string()),
                     ("group".to_string(), group.to_string()),
@@ -220,6 +222,7 @@ impl NacosOpenApiAdmin {
                     ("pageNo".to_string(), page_no.to_string()),
                     ("pageSize".to_string(), page_size.to_string()),
                 ];
+                push_optional(&mut v1_params, "appName", Some(app_name.to_string()));
                 self.get_json("/v1/cs/configs", v1_params).await.map_err(|v1_err| {
                     format!("Failed to list Nacos configs with v3 and v1 APIs. v3: {v3_err}; v1: {v1_err}")
                 })
@@ -285,6 +288,7 @@ impl NacosOpenApiAdmin {
         namespace: String,
         group: Option<String>,
         data_id_filter: Option<String>,
+        app_name_filter: Option<String>,
         page_no: u32,
         page_size: u32,
     ) -> Result<NacosConfigList, String> {
@@ -292,13 +296,15 @@ impl NacosOpenApiAdmin {
             return Ok(NacosConfigList { page_no, page_size, total_count: 0, items: Vec::new() });
         };
         let group = group.unwrap_or_default();
+        let app_name = app_name_filter.unwrap_or_default();
         let scan_page_size = page_size.max(self.cfg.page_size).clamp(100, 500);
         let max_scan_pages = 10;
         let mut matched = Vec::new();
         let mut current_page = 1;
 
         while current_page <= max_scan_pages {
-            let value = self.get_config_list_value(&namespace, "", &group, current_page, scan_page_size).await?;
+            let value =
+                self.get_config_list_value(&namespace, "", &group, &app_name, current_page, scan_page_size).await?;
             let list = parse_config_list(value, namespace.clone(), current_page, scan_page_size);
             matched.extend(list.items.into_iter().filter(|item| item.data_id.to_lowercase().contains(&filter)));
 
@@ -459,12 +465,22 @@ impl NacosAdmin for NacosOpenApiAdmin {
         let search = data_id_filter.clone().unwrap_or_default();
         let group_filter = query.group.clone();
         let group = group_filter.clone().unwrap_or_default();
-        let value = self.get_config_list_value(&namespace, &search, &group, page_no, page_size).await?;
+        let app_name_filter = query.app_name.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+        let app_name = app_name_filter.clone().unwrap_or_default();
+        let value = self.get_config_list_value(&namespace, &search, &group, &app_name, page_no, page_size).await?;
         let parsed =
             self.enrich_missing_config_formats(parse_config_list(value, namespace.clone(), page_no, page_size)).await;
         if data_id_filter.is_some() && parsed.items.is_empty() {
-            let fallback =
-                self.list_configs_by_client_filter(namespace, group_filter, data_id_filter, page_no, page_size).await?;
+            let fallback = self
+                .list_configs_by_client_filter(
+                    namespace,
+                    group_filter,
+                    data_id_filter,
+                    app_name_filter,
+                    page_no,
+                    page_size,
+                )
+                .await?;
             if !fallback.items.is_empty() {
                 return Ok(fallback);
             }
@@ -1395,7 +1411,7 @@ mod tests {
         let parsed = parse_config_list(
             serde_json::json!({
                 "totalCount": 1,
-                "pageItems": [{ "dataId": "app.yaml", "group": "DEFAULT_GROUP", "type": "yaml" }]
+                "pageItems": [{ "dataId": "app.yaml", "group": "DEFAULT_GROUP", "type": "yaml", "appName": "portal" }]
             }),
             "public".to_string(),
             1,
@@ -1404,6 +1420,7 @@ mod tests {
         assert_eq!(parsed.total_count, 1);
         assert_eq!(parsed.items[0].data_id, "app.yaml");
         assert_eq!(parsed.items[0].namespace, "public");
+        assert_eq!(parsed.items[0].app_name.as_deref(), Some("portal"));
         assert_eq!(parsed.items[0].config_type.as_deref(), Some("yaml"));
     }
 
@@ -1451,7 +1468,7 @@ mod tests {
                 "data": {
                     "totalCount": 1,
                     "pageItems": [
-                        { "dataId": "app.json", "groupName": "DEFAULT_GROUP", "namespaceId": "public" }
+                        { "dataId": "app.json", "groupName": "DEFAULT_GROUP", "namespaceId": "public", "appName": "console" }
                     ]
                 }
             }),
@@ -1461,6 +1478,7 @@ mod tests {
         );
         assert_eq!(parsed.total_count, 1);
         assert_eq!(parsed.items[0].group, "DEFAULT_GROUP");
+        assert_eq!(parsed.items[0].app_name.as_deref(), Some("console"));
         assert_eq!(parsed.items[0].config_type.as_deref(), Some("json"));
     }
 
