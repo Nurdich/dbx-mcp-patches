@@ -712,11 +712,7 @@ impl AppState {
                     })
                     .collect();
                 PoolKind::Sqlite(
-                    db::sqlite::connect_path_create_if_missing_with_extensions(
-                        &expand_tilde(&db_config.host),
-                        extensions,
-                    )
-                    .await?,
+                    db::sqlite::connect_path_with_extensions(&expand_tilde(&db_config.host), extensions).await?,
                 )
             }
             DatabaseType::Rqlite => {

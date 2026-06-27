@@ -2561,6 +2561,13 @@ async function createDuckDbFilePath() {
 
   const path = ensureDuckDbFileExtension(selected);
   form.value.host = path;
+
+  try {
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    await writeTextFile(path, "");
+  } catch (e) {
+    console.error("Failed to create DuckDB file:", e);
+  }
 }
 
 function ensureSqliteFileExtension(path: string): string {
@@ -2580,6 +2587,13 @@ async function createSqliteFilePath() {
 
   const path = ensureSqliteFileExtension(selected);
   form.value.host = path;
+
+  try {
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    await writeTextFile(path, "");
+  } catch (e) {
+    console.error("Failed to create SQLite file:", e);
+  }
 }
 
 async function browseJdbcDriverPaths() {
