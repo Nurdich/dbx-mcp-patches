@@ -1,5 +1,5 @@
 use crate::connection::{AppState, PoolKind};
-use crate::db::mongo_driver::{self, MongoDocumentResult};
+use crate::db::mongo_driver::{self, MongoDocumentResult, MongoDropIndexesResult};
 use crate::document_ops::CollectionInfo;
 
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -182,6 +182,25 @@ pub async fn mongo_create_index_core(
             mongo_driver::create_index(client, database, collection, keys_json, options_json).await
         }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support createIndex".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_drop_indexes_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    indexes_json: Option<&str>,
+    single: bool,
+) -> Result<MongoDropIndexesResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::drop_indexes(client, database, collection, indexes_json, single).await
+        }
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support dropIndex/dropIndexes".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }

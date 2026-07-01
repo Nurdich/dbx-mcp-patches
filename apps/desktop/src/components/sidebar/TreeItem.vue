@@ -1528,6 +1528,10 @@ const showDropDatabaseConfirm = ref(false);
 const dropDatabaseLoading = ref(false);
 const showDropMongoCollectionConfirm = ref(false);
 const dropMongoCollectionLoading = ref(false);
+const showDropMongoIndexConfirm = ref(false);
+const dropMongoIndexLoading = ref(false);
+const showDropAllMongoIndexesConfirm = ref(false);
+const dropAllMongoIndexesLoading = ref(false);
 const showFlushRedisDbConfirm = ref(false);
 const showCreateSchemaDialog = ref(false);
 const createSchemaName = ref("");
@@ -1756,6 +1760,7 @@ function canDropTreeNode(node: TreeNode): boolean {
   if (node.type === "view" || node.type === "materialized_view" || node.type === "procedure" || node.type === "function") {
     return !!node.connectionId && !!node.database && !!dropObjectSqlOptionsForNode(node);
   }
+  if (canDropMongoIndexNode(node)) return true;
   return canDropTableChildObjectNode(node);
 }
 
@@ -1770,16 +1775,41 @@ function selectedBatchDropTargets(): TreeNode[] {
   return selected;
 }
 
+function selectedBatchMongoIndexTargets(): TreeNode[] {
+  const targets = selectedBatchDropTargets();
+  return targets.length > 1 && targets.every((node) => canDropMongoIndexNode(node)) ? targets : [];
+}
+
+function selectedBatchIndexTableName(targets: TreeNode[]): string | null {
+  const first = targets[0];
+  if (!first) return null;
+  const table = first.tableName || first.label;
+  return table && targets.every((node) => (node.tableName || node.label) === table) ? table : null;
+}
+
 function batchDropMenuLabel(): string {
-  return t("contextMenu.batchDrop", { count: selectedBatchDropTargets().length });
+  const targets = selectedBatchDropTargets();
+  if (targets.length > 1 && targets.every((node) => node.type === "index")) {
+    return t("contextMenu.batchDropIndexes", { count: targets.length });
+  }
+  return t("contextMenu.batchDrop", { count: targets.length });
 }
 
 function batchDropConfirmTitle(): string {
-  return t("contextMenu.confirmBatchDropTitle", { count: selectedBatchDropTargets().length });
+  const targets = selectedBatchDropTargets();
+  if (targets.length > 1 && targets.every((node) => node.type === "index")) {
+    return t("contextMenu.confirmDropIndexTitle");
+  }
+  return t("contextMenu.confirmBatchDropTitle", { count: targets.length });
 }
 
 function batchDropConfirmMessage(): string {
-  return t("contextMenu.confirmBatchDropMessage", { count: selectedBatchDropTargets().length });
+  const targets = selectedBatchDropTargets();
+  const table = selectedBatchIndexTableName(targets);
+  if (targets.length > 1 && targets.every((node) => node.type === "index") && table) {
+    return t("contextMenu.confirmDropBatchIndexesMessage", { count: targets.length, table });
+  }
+  return t("contextMenu.confirmBatchDropMessage", { count: targets.length });
 }
 
 async function dropSqlForTreeNode(node: TreeNode): Promise<string | null> {
@@ -1792,6 +1822,9 @@ async function dropSqlForTreeNode(node: TreeNode): Promise<string | null> {
   }
   const objectOptions = dropObjectSqlOptionsForNode(node);
   if (objectOptions) return buildDropObjectSql(objectOptions);
+  if (canDropMongoIndexNode(node)) {
+    return `db.getCollection("${(node.tableName || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"')}").dropIndex(${JSON.stringify(mongoIndexNameForNode(node))})`;
+  }
   const childOptions = dropTableChildObjectSqlOptionsForNode(node);
   if (childOptions && canDropTableChildObjectNode(node)) return buildDropTableChildObjectSql(childOptions);
   return null;
@@ -1799,6 +1832,11 @@ async function dropSqlForTreeNode(node: TreeNode): Promise<string | null> {
 
 async function refreshBatchDropPreviewSql() {
   const targets = selectedBatchDropTargets();
+  const mongoIndexTargets = selectedBatchMongoIndexTargets();
+  if (mongoIndexTargets.length) {
+    batchDropPreviewSql.value = mongoIndexTargets.map((target) => mongoIndexDropPreview(target, mongoIndexNameForNode(target))).join("\n");
+    return;
+  }
   const statements: string[] = [];
   for (const target of targets) {
     const sql = await dropSqlForTreeNode(target);
@@ -1830,6 +1868,10 @@ function requestDropSelectedNode(): boolean {
   }
   if (props.node.type === "view" || props.node.type === "procedure" || props.node.type === "function") {
     requestDropObject();
+    return true;
+  }
+  if (canDropMongoIndex.value) {
+    dropMongoIndex();
     return true;
   }
   if (canDropTableChildObject.value) {
@@ -1974,6 +2016,32 @@ async function confirmBatchDrop() {
   const targets = selectedBatchDropTargets();
   if (!targets.length) return;
   try {
+    const mongoIndexTargets = selectedBatchMongoIndexTargets();
+    if (mongoIndexTargets.length) {
+      const grouped = new Map<string, TreeNode[]>();
+      for (const target of mongoIndexTargets) {
+        const key = `${target.connectionId}:${target.database}:${target.tableName || ""}`;
+        const list = grouped.get(key) ?? [];
+        list.push(target);
+        grouped.set(key, list);
+      }
+      let droppedCount = 0;
+      for (const groupTargets of grouped.values()) {
+        const first = groupTargets[0];
+        if (!first?.connectionId || !first.database || !first.tableName) continue;
+        await connectionStore.ensureConnected(first.connectionId);
+        const names = groupTargets.map((target) => mongoIndexNameForNode(target));
+        const result = await api.mongoDropIndexes(first.connectionId, first.database, first.tableName, JSON.stringify(names.length === 1 ? names[0] : names), false);
+        const dropped = new Set(result.dropped_names);
+        droppedCount += result.dropped_names.length;
+        for (const target of groupTargets) {
+          if (dropped.has(mongoIndexNameForNode(target))) connectionStore.removeTreeNode(target.id);
+        }
+      }
+      toast(t("contextMenu.batchDropSuccess", { count: droppedCount }), 3000);
+      showBatchDropConfirm.value = false;
+      return;
+    }
     for (const target of targets) {
       if (!target.connectionId || !target.database) continue;
       await connectionStore.ensureConnected(target.connectionId);
@@ -2040,6 +2108,32 @@ const canDropMongoCollection = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
   return props.node.type === "mongo-collection" && !!props.node.database && config?.driver_profile !== "mongodb-legacy";
 });
+
+function mongoIndexNameForNode(node: TreeNode): string {
+  if (node.type !== "index") return "";
+  return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
+}
+
+function canDropMongoIndexNode(node: TreeNode): boolean {
+  if (node.type !== "index" || !node.connectionId || !node.database || !node.tableName) return false;
+  const config = connectionStore.getConfig(node.connectionId);
+  return config?.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy" && mongoIndexNameForNode(node) !== "_id_";
+}
+
+const canDropMongoIndex = computed(() => canDropMongoIndexNode(props.node));
+
+function mongoIndexDropPreview(node: Pick<TreeNode, "tableName">, indexName: string): string {
+  return `db.getCollection(${JSON.stringify(node.tableName || "")}).dropIndex(${JSON.stringify(indexName)})`;
+}
+
+const canDropAllMongoIndexes = computed(() => {
+  const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
+  return props.node.type === "mongo-collection" && !!props.node.database && config?.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy";
+});
+
+function mongoDropAllIndexesPreview(node: Pick<TreeNode, "label">): string {
+  return `db.getCollection(${JSON.stringify(node.label)}).dropIndexes()`;
+}
 
 const canCreateSchema = computed(() => {
   const config = props.node.connectionId ? connectionStore.getConfig(props.node.connectionId) : undefined;
@@ -2417,6 +2511,16 @@ function dropMongoCollection() {
   showDropMongoCollectionConfirm.value = true;
 }
 
+function dropMongoIndex() {
+  dropMongoIndexLoading.value = false;
+  showDropMongoIndexConfirm.value = true;
+}
+
+function dropAllMongoIndexes() {
+  dropAllMongoIndexesLoading.value = false;
+  showDropAllMongoIndexesConfirm.value = true;
+}
+
 function flushRedisDb() {
   showFlushRedisDbConfirm.value = true;
 }
@@ -2483,6 +2587,53 @@ async function confirmDropMongoCollection() {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
   } finally {
     dropMongoCollectionLoading.value = false;
+  }
+}
+
+function mongoIndexesGroupNodeId(node: Pick<TreeNode, "connectionId" | "database" | "schema" | "tableName" | "label">): string | null {
+  if (!node.connectionId || !node.database) return null;
+  const tableName = node.tableName || node.label;
+  return node.schema ? `${node.connectionId}:${node.database}:${node.schema}:${tableName}:__indexes` : `${node.connectionId}:${node.database}:${tableName}:__indexes`;
+}
+
+async function refreshMongoIndexTree(node: Pick<TreeNode, "connectionId" | "database" | "schema" | "tableName" | "label">) {
+  const nodeId = mongoIndexesGroupNodeId(node);
+  if (!node.connectionId || !node.database || !nodeId) return;
+  await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName || node.label, node.schema, nodeId);
+}
+
+async function confirmDropMongoIndex() {
+  const node = props.node;
+  if (!canDropMongoIndexNode(node) || !node.connectionId || !node.database || !node.tableName || dropMongoIndexLoading.value) return;
+  dropMongoIndexLoading.value = true;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const indexName = mongoIndexNameForNode(node);
+    await api.mongoDropIndexes(node.connectionId, node.database, node.tableName, JSON.stringify(indexName), true);
+    toast(t("contextMenu.dropTableChildObjectSuccess", { name: indexName }), 3000);
+    showDropMongoIndexConfirm.value = false;
+    await refreshMongoIndexTree(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    dropMongoIndexLoading.value = false;
+  }
+}
+
+async function confirmDropAllMongoIndexes() {
+  const node = props.node;
+  if (node.type !== "mongo-collection" || !node.connectionId || !node.database || dropAllMongoIndexesLoading.value) return;
+  dropAllMongoIndexesLoading.value = true;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    const result = await api.mongoDropIndexes(node.connectionId, node.database, node.label, undefined, false);
+    toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: node.label }), 3000);
+    showDropAllMongoIndexesConfirm.value = false;
+    await refreshMongoIndexTree(node);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    dropAllMongoIndexesLoading.value = false;
   }
 }
 
@@ -3958,9 +4109,14 @@ function treeItemMenuItems(): ContextMenuItem[] {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
-    if (canDropMongoCollection.value) {
+    if (canDropAllMongoIndexes.value || canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
-      items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+      if (canDropAllMongoIndexes.value) {
+        items.push({ label: t("contextMenu.dropAllIndexes"), action: dropAllMongoIndexes, icon: Trash2, variant: "destructive" as const });
+      }
+      if (canDropMongoCollection.value) {
+        items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
+      }
     }
     return items;
   }
@@ -4108,7 +4264,16 @@ function treeItemMenuItems(): ContextMenuItem[] {
 
   if (node.type === "index" || node.type === "fkey" || node.type === "trigger") {
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
-    if (canDropTableChildObject.value) {
+    if (node.type === "index" && canDropMongoIndex.value) {
+      items.push({ label: "", separator: true });
+      items.push({
+        label: deleteMenuLabel(t("contextMenu.dropIndex")),
+        action: deleteMenuAction(dropMongoIndex),
+        icon: Trash2,
+        shortcut: shortcutDelete,
+        variant: "destructive" as const,
+      });
+    } else if (canDropTableChildObject.value) {
       items.push({ label: "", separator: true });
       items.push({
         label: deleteMenuLabel(dropTableChildObjectMenuLabel()),
@@ -4623,6 +4788,29 @@ function treeItemMenuItems(): ContextMenuItem[] {
     :loading="dropMongoCollectionLoading"
     :close-on-confirm="false"
     @confirm="confirmDropMongoCollection"
+  />
+
+  <DangerConfirmDialog
+    v-model:open="showDropMongoIndexConfirm"
+    :title="t('contextMenu.confirmDropIndexTitle')"
+    :message="t('contextMenu.confirmDropMongoIndexMessage', { name: mongoIndexNameForNode(node), collection: node.tableName || '' })"
+    :details="mongoIndexDropPreview(node, mongoIndexNameForNode(node))"
+    :confirm-label="t('contextMenu.dropIndex')"
+    :loading="dropMongoIndexLoading"
+    :close-on-confirm="false"
+    @confirm="confirmDropMongoIndex"
+  />
+
+  <DangerConfirmDialog
+    v-model:open="showDropAllMongoIndexesConfirm"
+    :title="t('contextMenu.dropAllIndexes')"
+    :message="t('contextMenu.confirmDropMongoAllIndexesMessage', { name: node.label })"
+    :details-text="t('contextMenu.confirmDropMongoAllIndexesDetails')"
+    :sql="mongoDropAllIndexesPreview(node)"
+    :confirm-label="t('contextMenu.dropAllIndexes')"
+    :loading="dropAllMongoIndexesLoading"
+    :close-on-confirm="false"
+    @confirm="confirmDropAllMongoIndexes"
   />
 
   <DangerConfirmDialog v-model:open="showFlushRedisDbConfirm" :title="t('redis.flushDb')" :message="t('redis.flushDbMessage')" :details="t('redis.flushDbDetails', { db: node.database })" :confirm-label="t('redis.flushDbConfirm')" @confirm="confirmFlushRedisDb" />

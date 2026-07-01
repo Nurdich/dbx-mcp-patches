@@ -9,12 +9,18 @@ use super::with_connection_timeout;
 use crate::types::IndexInfo;
 use futures::TryStreamExt;
 use percent_encoding::percent_decode_str;
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MongoDocumentResult {
     pub documents: Vec<serde_json::Value>,
     pub total: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MongoDropIndexesResult {
+    pub dropped_names: Vec<String>,
+    pub affected_rows: u64,
 }
 
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
@@ -365,6 +371,102 @@ pub async fn create_index(
     let result =
         col.create_index(IndexModel::builder().keys(keys).options(options).build()).await.map_err(|e| e.to_string())?;
     Ok(result.index_name)
+}
+
+pub async fn drop_indexes(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    indexes_json: Option<&str>,
+    single: bool,
+) -> Result<MongoDropIndexesResult, String> {
+    let database = database.trim();
+    let collection = collection.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    if collection.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
+
+    let index = parse_drop_indexes_value(indexes_json, single)?;
+    let before = list_indexes(client, database, collection).await?;
+    client
+        .database(database)
+        .run_command(doc! { "dropIndexes": collection, "index": index })
+        .await
+        .map_err(|e| e.to_string())?;
+    let after = list_indexes(client, database, collection).await?;
+    let dropped_names = diff_dropped_index_names(&before, &after);
+    Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names })
+}
+
+fn diff_dropped_index_names(before: &[IndexInfo], after: &[IndexInfo]) -> Vec<String> {
+    let remaining = after.iter().map(|index| index.name.as_str()).collect::<HashSet<_>>();
+    before.iter().filter(|index| !remaining.contains(index.name.as_str())).map(|index| index.name.clone()).collect()
+}
+
+fn parse_drop_indexes_value(indexes_json: Option<&str>, single: bool) -> Result<Bson, String> {
+    match indexes_json.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(json) => parse_drop_indexes_json(json, single),
+        None if single => Err("dropIndex requires a string index name or JSON document".to_string()),
+        None => Ok(Bson::String("*".to_string())),
+    }
+}
+
+fn parse_drop_indexes_json(json: &str, single: bool) -> Result<Bson, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("Invalid index JSON: {e}"))?;
+    if single {
+        validate_single_drop_index_value(&value)?;
+    } else {
+        validate_multi_drop_indexes_value(&value)?;
+    }
+    Ok(json_value_to_bson(&value))
+}
+
+fn validate_single_drop_index_value(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(name) => {
+            if name.trim().is_empty() {
+                Err("Index name is required".to_string())
+            } else if name == "*" {
+                Err(r#"dropIndex does not accept "*"; use dropIndexes() or dropIndexes("*") instead"#.to_string())
+            } else {
+                Ok(())
+            }
+        }
+        serde_json::Value::Object(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
+        serde_json::Value::Object(_) => Ok(()),
+        serde_json::Value::Array(_) => {
+            Err("dropIndex only accepts a string index name or JSON document; arrays are not supported".to_string())
+        }
+        _ => Err("dropIndex only accepts a string index name or JSON document".to_string()),
+    }
+}
+
+fn validate_multi_drop_indexes_value(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(name) => {
+            if name.trim().is_empty() {
+                Err("Index name is required".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        serde_json::Value::Object(doc) if doc.is_empty() => Err("Index specification is required".to_string()),
+        serde_json::Value::Object(_) => Ok(()),
+        serde_json::Value::Array(items) if items.is_empty() => {
+            Err("dropIndexes only accepts non-empty string arrays".to_string())
+        }
+        serde_json::Value::Array(items) => {
+            if items.iter().all(|item| matches!(item, serde_json::Value::String(name) if !name.trim().is_empty())) {
+                Ok(())
+            } else {
+                Err("dropIndexes only accepts arrays of string index names".to_string())
+            }
+        }
+        _ => Err("dropIndexes only accepts a string index name, JSON document, or string array".to_string()),
+    }
 }
 
 pub async fn insert_document(
@@ -989,6 +1091,95 @@ mod tests {
         assert_eq!(index.columns, vec!["_id"]);
         assert!(index.is_unique);
         assert!(index.is_primary);
+    }
+
+    #[test]
+    fn parse_drop_indexes_value_validates_drop_index_arguments() {
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#""users_email_unique""#), true),
+            Ok(Bson::String(name)) if name == "users_email_unique"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#"{"email":1}"#), true),
+            Ok(Bson::Document(doc)) if doc.get_i64("email").ok() == Some(1)
+        ));
+
+        let wildcard = parse_drop_indexes_value(Some(r#""*""#), true).unwrap_err();
+        assert!(wildcard.contains("dropIndex does not accept"));
+
+        let array = parse_drop_indexes_value(Some(r#"["a_1"]"#), true).unwrap_err();
+        assert!(array.contains("arrays are not supported"));
+
+        let empty = parse_drop_indexes_value(None, true).unwrap_err();
+        assert!(empty.contains("dropIndex requires"));
+    }
+
+    #[test]
+    fn parse_drop_indexes_value_validates_drop_indexes_arguments() {
+        assert!(matches!(
+            parse_drop_indexes_value(None, false),
+            Ok(Bson::String(name)) if name == "*"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#""*""#), false),
+            Ok(Bson::String(name)) if name == "*"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#""users_email_unique""#), false),
+            Ok(Bson::String(name)) if name == "users_email_unique"
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#"{"email":1}"#), false),
+            Ok(Bson::Document(doc)) if doc.get_i64("email").ok() == Some(1)
+        ));
+        assert!(matches!(
+            parse_drop_indexes_value(Some(r#"["a_1","b_1"]"#), false),
+            Ok(Bson::Array(values))
+                if values
+                    == vec![Bson::String("a_1".to_string()), Bson::String("b_1".to_string())]
+        ));
+
+        let invalid_array = parse_drop_indexes_value(Some(r#"[{"a":1}]"#), false).unwrap_err();
+        assert!(invalid_array.contains("arrays of string index names"));
+    }
+
+    #[test]
+    fn diff_dropped_index_names_reports_removed_indexes() {
+        let before = vec![
+            IndexInfo {
+                name: "_id_".to_string(),
+                columns: vec!["_id".to_string()],
+                is_unique: true,
+                is_primary: true,
+                filter: None,
+                index_type: Some("_id: 1".to_string()),
+                included_columns: None,
+                comment: None,
+            },
+            IndexInfo {
+                name: "users_email_unique".to_string(),
+                columns: vec!["email".to_string()],
+                is_unique: true,
+                is_primary: false,
+                filter: None,
+                index_type: Some("email: 1".to_string()),
+                included_columns: None,
+                comment: None,
+            },
+            IndexInfo {
+                name: "users_status_idx".to_string(),
+                columns: vec!["status".to_string()],
+                is_unique: false,
+                is_primary: false,
+                filter: None,
+                index_type: Some("status: 1".to_string()),
+                included_columns: None,
+                comment: None,
+            },
+        ];
+        let after = vec![before[0].clone(), before[2].clone()];
+
+        assert_eq!(diff_dropped_index_names(&before, &after), vec!["users_email_unique".to_string()]);
     }
 
     #[test]

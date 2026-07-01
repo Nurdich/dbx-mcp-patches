@@ -82,6 +82,15 @@ struct MongoCreateIndexRequest {
 }
 
 #[derive(Deserialize)]
+struct MongoDropIndexesRequest {
+    connection_name: String,
+    database: Option<String>,
+    collection: String,
+    indexes_json: Option<String>,
+    single: bool,
+}
+
+#[derive(Deserialize)]
 struct MongoInsertDocumentsRequest {
     connection_name: String,
     database: Option<String>,
@@ -182,6 +191,8 @@ pub fn start(app_handle: AppHandle, state: Arc<AppState>, data_dir: PathBuf) {
                     handle_mongo_aggregate_documents_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/create-index") {
                     handle_mongo_create_index_data(&st, body, &mut stream).await;
+                } else if first_line.starts_with("POST /data/mongo/drop-indexes") {
+                    handle_mongo_drop_indexes_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/insert-documents") {
                     handle_mongo_insert_documents_data(&st, body, &mut stream).await;
                 } else if first_line.starts_with("POST /data/mongo/update-documents") {
@@ -550,6 +561,38 @@ async fn handle_mongo_create_index_data(state: &Arc<AppState>, body: &str, strea
     .await
     {
         Ok(name) => respond_json(stream, &serde_json::json!({ "name": name })).await,
+        Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
+    }
+}
+
+async fn handle_mongo_drop_indexes_data(state: &Arc<AppState>, body: &str, stream: &mut tokio::net::TcpStream) {
+    let req: MongoDropIndexesRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(_) => {
+            respond_error(stream, "400 Bad Request", "Invalid JSON").await;
+            return;
+        }
+    };
+    let Some((pool_key, database, connection_id)) =
+        resolve_mongo_pool_key(state, &req.connection_name, req.database, stream).await
+    else {
+        return;
+    };
+    if let Err(e) = ensure_connection_writable(state, &connection_id, "Drop indexes").await {
+        respond_error(stream, "403 Forbidden", &e).await;
+        return;
+    }
+    match dbx_core::mongo_ops::mongo_drop_indexes_core(
+        state,
+        &pool_key,
+        &database,
+        &req.collection,
+        req.indexes_json.as_deref(),
+        req.single,
+    )
+    .await
+    {
+        Ok(result) => respond_json(stream, &result).await,
         Err(e) => respond_error(stream, "500 Internal Server Error", &e).await,
     }
 }

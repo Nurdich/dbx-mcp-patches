@@ -7194,6 +7194,11 @@ const indexes = ref<IndexInfo[]>([]);
 const indexesLoaded = ref(false);
 const indexesLoading = ref(false);
 const indexesError = ref("");
+const showDropMongoIndexConfirm = ref(false);
+const dropMongoIndexLoading = ref(false);
+const pendingDropMongoIndex = ref<IndexInfo | null>(null);
+const showDropAllMongoIndexesConfirm = ref(false);
+const dropAllMongoIndexesLoading = ref(false);
 const foreignKeys = ref<ForeignKeyInfo[]>([]);
 const foreignKeysLoaded = ref(false);
 const foreignKeysLoading = ref(false);
@@ -7272,6 +7277,8 @@ function toggleCellDetailPanelLayout() {
 
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(props.databaseType));
 const canOpenTableStructureEditor = computed(() => !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && supportsTableStructureEditing(resolvedDatabaseType.value));
+const mongoConnectionConfig = computed(() => connectionStore.getConfig(props.connectionId ?? ""));
+const canManageMongoIndexes = computed(() => resolvedDatabaseType.value === "mongodb" && !!props.connectionId && !!props.database && !!props.tableMeta?.tableName && mongoConnectionConfig.value?.db_type === "mongodb" && mongoConnectionConfig.value?.driver_profile !== "mongodb-legacy");
 const tableInfoTabs = computed(() => {
   const tabs: TableInfoTabItem[] = [];
   if (tableMetadataCapabilities.value.columns) {
@@ -7357,6 +7364,11 @@ async function fetchIndexes() {
   } finally {
     indexesLoading.value = false;
   }
+}
+
+async function reloadIndexes() {
+  indexesLoaded.value = false;
+  await fetchIndexes();
 }
 
 async function fetchForeignKeys() {
@@ -7603,6 +7615,62 @@ const filteredIndexes = computed(() => {
   const q = searchQuery.value.toLowerCase();
   return indexes.value.filter((i) => i.name.toLowerCase().includes(q) || i.columns.some((c) => c.toLowerCase().includes(q)));
 });
+
+const droppableMongoIndexes = computed(() => indexes.value.filter((index) => !index.is_primary));
+const dropMongoIndexConfirmMessage = computed(() =>
+  pendingDropMongoIndex.value
+    ? t("contextMenu.confirmDropMongoIndexMessage", {
+        name: pendingDropMongoIndex.value.name,
+        collection: props.tableMeta?.tableName || "",
+      })
+    : "",
+);
+const dropAllMongoIndexesConfirmMessage = computed(() => t("contextMenu.confirmDropMongoAllIndexesMessage", { name: props.tableMeta?.tableName || "" }));
+const dropAllMongoIndexesConfirmDetails = computed(() => t("contextMenu.confirmDropMongoAllIndexesDetails"));
+const dropMongoIndexPreview = computed(() => (pendingDropMongoIndex.value ? `db.getCollection(${JSON.stringify(props.tableMeta?.tableName || "")}).dropIndex(${JSON.stringify(pendingDropMongoIndex.value.name)})` : ""));
+const dropAllMongoIndexesPreview = computed(() => `db.getCollection(${JSON.stringify(props.tableMeta?.tableName || "")}).dropIndexes()`);
+
+function requestDropMongoIndex(index: IndexInfo) {
+  pendingDropMongoIndex.value = index;
+  showDropMongoIndexConfirm.value = true;
+}
+
+function requestDropAllMongoIndexes() {
+  showDropAllMongoIndexesConfirm.value = true;
+}
+
+async function confirmDropMongoIndex() {
+  if (!props.connectionId || !props.database || !props.tableMeta?.tableName || !pendingDropMongoIndex.value || dropMongoIndexLoading.value) return;
+  dropMongoIndexLoading.value = true;
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+    await api.mongoDropIndexes(props.connectionId, props.database, props.tableMeta.tableName, JSON.stringify(pendingDropMongoIndex.value.name), true);
+    toast(t("contextMenu.dropTableChildObjectSuccess", { name: pendingDropMongoIndex.value.name }), 3000);
+    showDropMongoIndexConfirm.value = false;
+    pendingDropMongoIndex.value = null;
+    await reloadIndexes();
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    dropMongoIndexLoading.value = false;
+  }
+}
+
+async function confirmDropAllMongoIndexes() {
+  if (!props.connectionId || !props.database || !props.tableMeta?.tableName || dropAllMongoIndexesLoading.value) return;
+  dropAllMongoIndexesLoading.value = true;
+  try {
+    await connectionStore.ensureConnected(props.connectionId);
+    const result = await api.mongoDropIndexes(props.connectionId, props.database, props.tableMeta.tableName, undefined, false);
+    toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: props.tableMeta.tableName }), 3000);
+    showDropAllMongoIndexesConfirm.value = false;
+    await reloadIndexes();
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  } finally {
+    dropAllMongoIndexesLoading.value = false;
+  }
+}
 
 const filteredForeignKeys = computed(() => {
   if (!searchQuery.value) return foreignKeys.value;
@@ -9326,6 +9394,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <WrapText class="w-3 h-3" />
                 </Button>
               </div>
+              <div v-else-if="activeTableInfoTab === 'indexes' && canManageMongoIndexes" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
+                <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs text-destructive hover:text-destructive" :disabled="indexesLoading || dropAllMongoIndexesLoading || droppableMongoIndexes.length === 0" @click="requestDropAllMongoIndexes">
+                  <Trash2 class="w-3 h-3" />
+                  <span class="table-info-action-label">{{ t("contextMenu.dropAllIndexes") }}</span>
+                </Button>
+              </div>
               <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
                 <PencilRuler class="w-3 h-3" />
                 <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
@@ -9413,14 +9487,22 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
               </div>
               <div v-else class="divide-y">
                 <div v-for="index in filteredIndexes" :key="index.name" class="p-3 text-xs">
-                  <div class="font-medium truncate">{{ index.name }}</div>
-                  <div class="mt-1 flex flex-wrap gap-1">
-                    <span v-if="index.is_primary" class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">PK</span>
-                    <span v-if="index.is_unique" class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600">UNIQUE</span>
-                    <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
-                  </div>
-                  <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
-                    {{ index.columns.join(", ") }}
+                  <div class="flex items-start gap-2">
+                    <div class="min-w-0 flex-1">
+                      <div class="font-medium truncate">{{ index.name }}</div>
+                      <div class="mt-1 flex flex-wrap gap-1">
+                        <span v-if="index.is_primary" class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-600">PK</span>
+                        <span v-if="index.is_unique" class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-600">UNIQUE</span>
+                        <span v-if="index.index_type" class="rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{{ index.index_type }}</span>
+                      </div>
+                      <div class="mt-2 font-mono text-[11px] text-muted-foreground break-all">
+                        {{ index.columns.join(", ") }}
+                      </div>
+                    </div>
+                    <Button v-if="canManageMongoIndexes && !index.is_primary" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px] text-destructive hover:text-destructive" @click="requestDropMongoIndex(index)">
+                      <Trash2 class="mr-1 h-3 w-3" />
+                      {{ t("contextMenu.dropIndex") }}
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -10142,6 +10224,27 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       :details="deleteRowDetails"
       :confirm-label="pendingDeleteRowIds.length > 1 ? t('grid.deleteRows', { count: pendingDeleteRowIds.length }) : t('grid.deleteRow')"
       @confirm="confirmDeleteRow"
+    />
+    <DangerConfirmDialog
+      v-model:open="showDropMongoIndexConfirm"
+      :title="t('contextMenu.confirmDropIndexTitle')"
+      :message="dropMongoIndexConfirmMessage"
+      :details="dropMongoIndexPreview"
+      :confirm-label="t('contextMenu.dropIndex')"
+      :loading="dropMongoIndexLoading"
+      :close-on-confirm="false"
+      @confirm="confirmDropMongoIndex"
+    />
+    <DangerConfirmDialog
+      v-model:open="showDropAllMongoIndexesConfirm"
+      :title="t('contextMenu.dropAllIndexes')"
+      :message="dropAllMongoIndexesConfirmMessage"
+      :details-text="dropAllMongoIndexesConfirmDetails"
+      :sql="dropAllMongoIndexesPreview"
+      :confirm-label="t('contextMenu.dropAllIndexes')"
+      :loading="dropAllMongoIndexesLoading"
+      :close-on-confirm="false"
+      @confirm="confirmDropAllMongoIndexes"
     />
     <ImagePreviewDialog v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
     <component v-if="previewDialogOpen && previewDialogConfig" :is="previewDialogConfig.component" v-model:open="previewDialogOpen" v-bind="previewDialogConfig.props" />

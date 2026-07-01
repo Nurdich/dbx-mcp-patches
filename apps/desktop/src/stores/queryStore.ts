@@ -10,9 +10,11 @@ import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuer
 import { restoreOpenTabsState, serializeOpenTabs } from "@/lib/openTabsPersistence";
 import {
   evaluateMongoAggregateSafety,
+  evaluateMongoWriteSafety,
   mongoCountToQueryResult,
   mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
+  mongoDroppedIndexesToQueryResult,
   mongoIndexesToQueryResult,
   mongoUseToQueryResult,
   mongoVersionToQueryResult,
@@ -1792,6 +1794,10 @@ export const useQueryStore = defineStore("query", () => {
 
       const mongoWrite = conn?.db_type === "mongodb" ? parseMongoWriteCommand(sql) : null;
       if (mongoWrite) {
+        if (options?.mongoSafety) {
+          const safety = evaluateMongoWriteSafety(mongoWrite, options.mongoSafety);
+          if (!safety.allowed) throw new Error(safety.reason);
+        }
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:mongo-write:start]", {
           traceId,
@@ -1817,6 +1823,29 @@ export const useQueryStore = defineStore("query", () => {
             current.results = undefined;
             current.activeResultIndex = undefined;
             current.result = markQueryResultRowsRaw(mongoCreateIndexToQueryResult(result.name, performance.now() - startedAt));
+            touchResult(current);
+            current.queryAnalysis = undefined;
+            current.querySourceColumns = undefined;
+            current.queryEditabilityReason = undefined;
+            current.mongoEditTarget = undefined;
+            current.tableMeta = undefined;
+            current.resultBaseSql = options?.resultBaseSql ?? sql;
+            current.resultSortedSql = options?.resultSortedSql;
+            syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          }
+          return;
+        } else if (mongoWrite.kind === "dropIndex" || mongoWrite.kind === "dropIndexes") {
+          const result = await api.mongoDropIndexes(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.kind === "dropIndex" ? mongoWrite.index : mongoWrite.indexes, mongoWrite.kind === "dropIndex");
+          console.info("[DBX][executeTabSql:mongo-write:done]", {
+            traceId,
+            droppedNames: result.dropped_names,
+            elapsed: elapsed(),
+          });
+          const current = tabs.value.find((t) => t.id === id);
+          if (current?.executionId === executionId) {
+            current.results = undefined;
+            current.activeResultIndex = undefined;
+            current.result = markQueryResultRowsRaw(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - startedAt));
             touchResult(current);
             current.queryAnalysis = undefined;
             current.querySourceColumns = undefined;
