@@ -146,6 +146,18 @@ export function isToggleSidebarShortcut(event: ShortcutLikeEvent, shortcuts?: Pa
   return matchesShortcut(event, actionShortcut("toggleSidebar", shortcuts));
 }
 
+export function isCopySidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("copySidebarSelection", shortcuts));
+}
+
+export function isPasteSidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("pasteSidebarSelection", shortcuts));
+}
+
+export function isEditSidebarConnectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("editSidebarConnection", shortcuts));
+}
+
 export function isQuickOpenShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("quickOpen", shortcuts));
 }

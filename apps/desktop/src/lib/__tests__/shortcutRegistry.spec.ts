@@ -3,6 +3,7 @@ import { DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, 
 
 describe("shortcutRegistry editor actions", () => {
   const formatterEditorActionIds: ShortcutActionId[] = ["formatSql", "indentMore", "indentLess", "duplicateLine", "deleteLine", "moveLineUp", "moveLineDown", "copyLineUp", "copyLineDown", "undo", "redo", "selectAll"];
+  const sidebarShortcutActionIds: ShortcutActionId[] = ["copySidebarSelection", "pasteSidebarSelection", "editSidebarConnection"];
 
   it("registers formatter editor shortcuts in the generic editor scope", () => {
     for (const actionId of formatterEditorActionIds) {
@@ -35,5 +36,21 @@ describe("shortcutRegistry editor actions", () => {
     const shortcuts = normalizeShortcutSettings({ duplicateLine: "Mod+F" });
 
     expect(findShortcutConflict("duplicateLine", shortcuts.duplicateLine, shortcuts)).toBe("find");
+  });
+
+  it("registers sidebar shortcuts in the sidebar scope", () => {
+    for (const actionId of sidebarShortcutActionIds) {
+      const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === actionId);
+
+      expect(definition?.scope).toBe("sidebar");
+      expect(DEFAULT_SHORTCUT_SETTINGS[actionId]).toBe(definition?.defaultShortcut);
+    }
+  });
+
+  it("detects conflicts only within sidebar shortcuts", () => {
+    const shortcuts = normalizeShortcutSettings({ copySidebarSelection: "Mod+E" });
+
+    expect(findShortcutConflict("copySidebarSelection", shortcuts.copySidebarSelection, shortcuts)).toBe("editSidebarConnection");
+    expect(findShortcutConflict("copyCurrentRow", shortcuts.copyCurrentRow, shortcuts)).toBe(null);
   });
 });

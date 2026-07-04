@@ -79,7 +79,8 @@ import { clearActiveTableReferencePayload, createTableReferencePayload, createTa
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/tableEditing";
 import { tableOpenPageLimit } from "@/lib/tableOpenPageLimit";
 import { supportsDatabaseCreation, supportsDatabaseSearch, supportsFieldLineage, supportsObjectBrowserTreeNode, supportsSchemaDiagram, supportsSqlFileExecution, supportsTableImport, supportsTableTruncate, supportsTableStructureEditing, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
-import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
+import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
+import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/keyboardShortcuts";
 import { formatSqlInsert } from "@/lib/exportFormats";
 import { joinExportedDdls } from "@/lib/ddlExport";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
@@ -118,7 +119,7 @@ import { defaultPasteTableMode, pasteTableModeCopiesData, supportsWholeRowTableD
 import { sidebarDisplayTableName } from "@/lib/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebarLabelTooltip";
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebarTreeSelection";
-import { selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets } from "@/lib/sidebarConnectionSelection";
+import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets, selectedConnectionEditTarget } from "@/lib/sidebarConnectionSelection";
 import { supportsDatabaseUserAdmin } from "@/lib/databaseUserAdmin";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebarTreeContext";
@@ -842,6 +843,12 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  if (isEditConnectionShortcut(event)) {
+    if (!requestEditSelectedConnection()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "F2") {
     if (!requestRenameSelectedNode()) return;
     event.preventDefault();
@@ -860,8 +867,7 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
-  const action = sidebarSelectionCopyAction(event);
-  if (action !== "copy-name") return;
+  if (!isCopyTreeSelectionShortcut(event)) return;
   event.preventDefault();
   event.stopPropagation();
   copySelectedNames();
@@ -872,7 +878,15 @@ function isDeleteTreeNodeShortcut(event: KeyboardEvent): boolean {
 }
 
 function isPasteTreeClipboardShortcut(event: KeyboardEvent): boolean {
-  return (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "v";
+  return isPasteSidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function isEditConnectionShortcut(event: KeyboardEvent): boolean {
+  return isEditSidebarConnectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function isCopyTreeSelectionShortcut(event: KeyboardEvent): boolean {
+  return isCopySidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts);
 }
 
 function pasteTableTargetContext(): TableClipboardContext | null {
@@ -891,6 +905,16 @@ function canPasteTreeClipboardToCurrentNode(): boolean {
 
 function requestPasteTreeClipboard(): boolean {
   const clipboard = connectionStore.treeClipboard;
+  if (clipboard?.kind === "connection-copy") {
+    const targetGroupId = connectionPasteTargetGroupId(props.node, (connectionId) => connectionStore.groupIdForConnection(connectionId));
+    void connectionStore
+      .pasteConnectionClipboard(targetGroupId)
+      .then((count) => {
+        if (count > 0) toast(count > 1 ? t("connection.duplicatedSelected", { count }) : t("connection.duplicated"), 2000);
+      })
+      .catch((e: any) => toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000));
+    return true;
+  }
   if (clipboard?.kind !== "table-copy" || !canPasteTreeClipboardToCurrentNode()) return false;
   pasteTableMode.value = defaultPasteTableMode(currentDatabaseType());
   pasteTableEntries.value = clipboard.tables.map((entry) => ({
@@ -927,6 +951,11 @@ function canRefreshTreeNodeShortcut(): boolean {
 function requestRenameSelectedNode(): boolean {
   const selected = selectedTreeNodesInVisibleOrder();
   if (selected.length > 1 && selected.some((node) => node.id === props.node.id)) return false;
+  const editTarget = selectedConnectionEditTarget(props.node, selected);
+  if (editTarget) {
+    connectionStore.startEditing(editTarget.connectionId);
+    return true;
+  }
   if (canRenameObject.value) {
     openRenameObjectDialog();
     return true;
@@ -936,6 +965,13 @@ function requestRenameSelectedNode(): boolean {
     return true;
   }
   return false;
+}
+
+function requestEditSelectedConnection(): boolean {
+  const editTarget = selectedConnectionEditTarget(props.node, selectedTreeNodesInVisibleOrder());
+  if (!editTarget) return false;
+  connectionStore.startEditing(editTarget.connectionId);
+  return true;
 }
 
 function requestDeleteSelectedNode(): boolean {
@@ -1568,6 +1604,12 @@ async function copyFinalProxyPort() {
 async function copySelectedNames() {
   const selectedNodes = selectedTreeNodesInVisibleOrder();
   const nodes = selectedNodes.length > 1 && selectedNodes.some((node) => node.id === props.node.id) ? selectedNodes : [props.node];
+  const connectionTargets = selectedConnectionClipboardTargets(props.node, nodes);
+  if (connectionTargets.length > 0) {
+    const copiedCount = connectionStore.copyConnectionsToTreeClipboard(connectionTargets.map((node) => node.connectionId));
+    if (copiedCount > 0) toast(t("connection.copied"), 2000);
+    return;
+  }
   updateTreeClipboardForNodes(nodes);
   try {
     await copyToClipboard(nodes.map(copyNameForTreeNode).join("\n"));
@@ -3917,7 +3959,8 @@ onBeforeUnmount(() => {
 
 // ---- CustomContextMenu ----
 
-const shortcutCopyName = computed(() => formatShortcut("Mod+C"));
+const shortcutCopyName = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.copySidebarSelection));
+const shortcutEditConnection = computed(() => formatShortcut(settingsStore.editorSettings.shortcuts.editSidebarConnection));
 const shortcutRename = "F2";
 const shortcutRefresh = "F5";
 const shortcutDelete = "Delete";
@@ -4108,7 +4151,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
         icon: ListFilter,
       });
     }
-    items.push({ label: t("contextMenu.editConnection"), action: editConnection, icon: Pencil });
+    items.push({ label: t("contextMenu.editConnection"), action: editConnection, icon: Pencil, shortcut: shortcutEditConnection.value });
     if (revealConnectionFilePath.value) {
       items.push({
         label: t("contextMenu.revealDatabaseFile"),

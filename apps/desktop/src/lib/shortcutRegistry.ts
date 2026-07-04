@@ -40,9 +40,12 @@ export type ShortcutActionId =
   | "refreshData"
   | "toggleTranspose"
   | "cancelSearch"
-  | "toggleSidebar";
+  | "toggleSidebar"
+  | "copySidebarSelection"
+  | "pasteSidebarSelection"
+  | "editSidebarConnection";
 
-export type ShortcutScope = "global" | "editor" | "grid" | "search";
+export type ShortcutScope = "global" | "editor" | "grid" | "search" | "sidebar";
 
 export interface ShortcutDefinition {
   id: ShortcutActionId;
@@ -305,6 +308,24 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutToggleSidebar",
     scope: "global",
     defaultShortcut: "Mod+B",
+  },
+  {
+    id: "copySidebarSelection",
+    labelKey: "settings.shortcutCopySidebarSelection",
+    scope: "sidebar",
+    defaultShortcut: "Mod+C",
+  },
+  {
+    id: "pasteSidebarSelection",
+    labelKey: "settings.shortcutPasteSidebarSelection",
+    scope: "sidebar",
+    defaultShortcut: "Mod+V",
+  },
+  {
+    id: "editSidebarConnection",
+    labelKey: "settings.shortcutEditSidebarConnection",
+    scope: "sidebar",
+    defaultShortcut: "Mod+E",
   },
 ];
 

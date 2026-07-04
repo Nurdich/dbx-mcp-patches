@@ -2,7 +2,7 @@ import type { TreeNode } from "@/types/database";
 
 type ConnectionTreeNode = TreeNode & { connectionId: string };
 
-function isConnectionNode(node: TreeNode): node is ConnectionTreeNode {
+export function isConnectionNode(node: TreeNode): node is ConnectionTreeNode {
   return node.type === "connection" && !!node.connectionId;
 }
 
@@ -21,4 +21,27 @@ export function selectedConnectionDeleteTargets(currentNode: TreeNode, selectedN
 
 export function selectedConnectionDuplicateTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
   return selectedConnectionActionTargets(currentNode, selectedNodes);
+}
+
+export function selectedConnectionClipboardTargets(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode[] {
+  return selectedConnectionActionTargets(currentNode, selectedNodes);
+}
+
+export function selectedConnectionEditTarget(currentNode: TreeNode, selectedNodes: TreeNode[]): ConnectionTreeNode | null {
+  if (!isConnectionNode(currentNode)) return null;
+  const selectedContainsCurrent = selectedNodes.some((node) => node.id === currentNode.id);
+  if (selectedNodes.length > 1 && selectedContainsCurrent) return null;
+  return currentNode;
+}
+
+export function selectedConnectionClipboardNodes(selectedNodes: TreeNode[]): ConnectionTreeNode[] {
+  if (selectedNodes.length === 0 || !selectedNodes.every(isConnectionNode)) return [];
+  return selectedNodes;
+}
+
+export function connectionPasteTargetGroupId(node: TreeNode | null | undefined, groupIdForConnection: (connectionId: string) => string | null): string | null {
+  if (!node) return null;
+  if (node.type === "connection-group") return node.id;
+  if (isConnectionNode(node)) return groupIdForConnection(node.connectionId);
+  return null;
 }

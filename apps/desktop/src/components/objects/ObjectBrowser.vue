@@ -1019,7 +1019,7 @@ function copySingleTableToClipboard(row: ObjectBrowserRow) {
 
 function openPasteTableDialog() {
   const clipboard = connectionStore.treeClipboard;
-  if (!canPasteTableClipboard() || !clipboard) {
+  if (!canPasteTableClipboard() || clipboard?.kind !== "table-copy") {
     toast(t("contextMenu.noTableToPaste"), 2000);
     return;
   }

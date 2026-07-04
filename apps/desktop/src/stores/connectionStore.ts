@@ -147,10 +147,20 @@ interface TreeClipboardTableEntry {
   tableName: string;
 }
 
-export interface TreeClipboard {
-  kind: "table-copy";
-  tables: TreeClipboardTableEntry[];
+interface TreeClipboardConnectionEntry {
+  config: ConnectionConfig;
+  sourceGroupId: string | null;
 }
+
+export type TreeClipboard =
+  | {
+      kind: "table-copy";
+      tables: TreeClipboardTableEntry[];
+    }
+  | {
+      kind: "connection-copy";
+      connections: TreeClipboardConnectionEntry[];
+    };
 
 interface LoadTreeOptions {
   force?: boolean;
@@ -1015,6 +1025,43 @@ export const useConnectionStore = defineStore("connection", () => {
     rebuildTreeNodes();
     persistSidebarLayoutDebounced();
     stopCreatingConnectionInGroup();
+  }
+
+  function copyConnectionsToTreeClipboard(connectionIds: Iterable<string>): number {
+    const seen = new Set<string>();
+    const entries: TreeClipboardConnectionEntry[] = [];
+    for (const connectionId of connectionIds) {
+      if (seen.has(connectionId)) continue;
+      seen.add(connectionId);
+      const config = getConfig(connectionId);
+      if (!config) continue;
+      entries.push({
+        config: { ...config },
+        sourceGroupId: findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null,
+      });
+    }
+    if (!entries.length) return 0;
+    treeClipboard.value = { kind: "connection-copy", connections: entries };
+    return entries.length;
+  }
+
+  async function pasteConnectionClipboard(targetGroupId?: string | null): Promise<number> {
+    const clipboard = treeClipboard.value;
+    if (clipboard?.kind !== "connection-copy" || clipboard.connections.length === 0) return 0;
+
+    let pastedCount = 0;
+    for (const entry of clipboard.connections) {
+      await addConnection(
+        {
+          ...entry.config,
+          id: uuid(),
+          name: `${entry.config.name} (Copy)`,
+        },
+        targetGroupId === undefined ? entry.sourceGroupId : targetGroupId,
+      );
+      pastedCount += 1;
+    }
+    return pastedCount;
   }
 
   function invalidateCompletionCache(connectionId: string, database?: string) {
@@ -3979,6 +4026,8 @@ export const useConnectionStore = defineStore("connection", () => {
     isTreeNodePinned,
     toggleTreeNodePin,
     addConnection,
+    copyConnectionsToTreeClipboard,
+    pasteConnectionClipboard,
     addEphemeralConnection,
     updateConnection,
     setDefaultDatabase,

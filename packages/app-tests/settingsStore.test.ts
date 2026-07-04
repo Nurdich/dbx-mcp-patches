@@ -161,6 +161,9 @@ test("defaults shortcut settings", () => {
   assert.equal(settings.shortcuts.resetUiZoom, "Mod+0");
   assert.equal(settings.shortcuts.refreshData, "F5");
   assert.equal(settings.shortcuts.toggleTranspose, "Tab");
+  assert.equal(settings.shortcuts.copySidebarSelection, "Mod+C");
+  assert.equal(settings.shortcuts.pasteSidebarSelection, "Mod+V");
+  assert.equal(settings.shortcuts.editSidebarConnection, "Mod+E");
 });
 
 test("keeps saved shortcut overrides", () => {
@@ -172,6 +175,7 @@ test("keeps saved shortcut overrides", () => {
       newQuery: "Shift+Mod+N",
       openSettings: "Shift+Mod+P",
       zoomInUi: "Alt+Mod+=",
+      editSidebarConnection: "Alt+E",
     } as any,
   });
 
@@ -181,6 +185,7 @@ test("keeps saved shortcut overrides", () => {
   assert.equal(settings.shortcuts.newQuery, "Shift+Mod+N");
   assert.equal(settings.shortcuts.openSettings, "Shift+Mod+P");
   assert.equal(settings.shortcuts.zoomInUi, "Alt+Mod+=");
+  assert.equal(settings.shortcuts.editSidebarConnection, "Alt+E");
   assert.equal(settings.shortcuts.saveSql, "Mod+S");
 });
 
