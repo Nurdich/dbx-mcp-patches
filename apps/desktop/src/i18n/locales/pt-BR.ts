@@ -1794,6 +1794,7 @@ export default withEnglishFallback({
     searchByKey: "Chave",
     searchByValue: "Valor",
     searchByAll: "Tudo",
+    searchFields: "Pesquisar campos",
     keys: "{count} chaves",
     loadedKeys: "{loaded} / {total} chaves carregadas",
     loadingKeys: "Carregando chaves...",

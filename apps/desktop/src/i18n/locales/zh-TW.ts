@@ -1697,6 +1697,7 @@ export default withEnglishFallback({
     searchByKey: "鍵",
     searchByValue: "值",
     searchByAll: "全部",
+    searchFields: "搜尋 field",
     keys: "{count} 個 key",
     loadedKeys: "已載入 {loaded} / 共 {total} 個 key",
     loadingKeys: "正在載入 key……",

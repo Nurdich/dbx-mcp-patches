@@ -1792,6 +1792,7 @@ export default withEnglishFallback({
     searchByKey: "キー",
     searchByValue: "値",
     searchByAll: "すべて",
+    searchFields: "フィールド検索",
     keys: "{count}キー",
     loadedKeys: "{loaded}/{total}キー読み込み完了",
     loadingKeys: "キーを読み込み中...",

@@ -1793,6 +1793,7 @@ export default withEnglishFallback({
     searchByKey: "Chiave",
     searchByValue: "Valore",
     searchByAll: "Tutto",
+    searchFields: "Cerca campi",
     keys: "{count} chiavi",
     loadedKeys: "{loaded} / {total} chiavi caricate",
     loadingKeys: "Caricamento chiavi...",

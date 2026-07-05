@@ -1403,8 +1403,8 @@ export async function redisExecuteCommand(connectionId: string, db: number, comm
   return invoke("redis_execute_command", { connectionId, db, command, skipSafetyCheck: skipSafetyCheck ?? false });
 }
 
-export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number): Promise<RedisValue> {
-  return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count });
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filter?: string): Promise<RedisValue> {
+  return invoke("redis_load_more", { connectionId, db, keyRaw, keyType, cursor, count, filter });
 }
 
 export async function redisPubSubPublish(connectionId: string, db: number, channel: string, message: string): Promise<{ subscribers: number }> {
