@@ -3383,4 +3383,17 @@ export default withEnglishFallback({
     noAvailable: "所有可用擴展均已安裝。",
     noInstalled: "暫無已安裝的擴展。",
   },
+  sqlFileTree: {
+    title: "SQL 檔案",
+    openFolder: "開啟資料夾",
+    closePanel: "關閉",
+    loading: "載入中...",
+    noFolder: "未開啟資料夾",
+    noSqlFiles: "未找到 SQL 檔案",
+    folderAlreadyOpen: "此資料夾已開啟",
+    removeFolder: "移除資料夾",
+    openFailed: "開啟資料夾失敗: {message}",
+    loadFailed: "載入 SQL 檔案失敗: {message}",
+    desktopOnly: "此功能僅在桌面端可用",
+  },
 });

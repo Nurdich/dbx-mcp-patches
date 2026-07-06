@@ -3382,4 +3382,17 @@ export default withEnglishFallback({
     noAvailable: "すべての利用可能な拡張機能がインストールされています。",
     noInstalled: "インストールされている拡張機能はありません。",
   },
+  sqlFileTree: {
+    title: "SQL ファイル",
+    openFolder: "フォルダを開く",
+    closePanel: "閉じる",
+    loading: "読み込み中...",
+    noFolder: "フォルダが開かれていません",
+    noSqlFiles: "SQL ファイルが見つかりません",
+    folderAlreadyOpen: "このフォルダは既に開いています",
+    removeFolder: "フォルダを削除",
+    openFailed: "フォルダを開くのに失敗しました: {message}",
+    loadFailed: "SQL ファイルの読み込みに失敗しました: {message}",
+    desktopOnly: "この機能はデスクトップ版のみで利用可能です",
+  },
 });

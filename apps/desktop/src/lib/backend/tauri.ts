@@ -522,6 +522,17 @@ export async function writeExternalSqlFile(path: string, content: string): Promi
   return invoke("write_external_sql_file", { path, content });
 }
 
+export interface SqlFileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children: SqlFileEntry[];
+}
+
+export async function listSqlFilesInFolder(folderPath: string): Promise<SqlFileEntry[]> {
+  return invoke("list_sql_files_in_folder", { folderPath });
+}
+
 // --- AI Conversations ---
 
 export interface AiChatMessage {

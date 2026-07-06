@@ -3383,4 +3383,17 @@ export default withEnglishFallback({
     noAvailable: "Todas as extensões disponíveis já estão instaladas.",
     noInstalled: "Nenhuma extensão instalada.",
   },
+  sqlFileTree: {
+    title: "Arquivos SQL",
+    openFolder: "Abrir pasta",
+    closePanel: "Fechar",
+    loading: "Carregando...",
+    noFolder: "Nenhuma pasta aberta",
+    noSqlFiles: "Nenhum arquivo SQL encontrado",
+    folderAlreadyOpen: "Esta pasta já está aberta",
+    removeFolder: "Remover pasta",
+    openFailed: "Falha ao abrir a pasta: {message}",
+    loadFailed: "Falha ao carregar arquivos SQL: {message}",
+    desktopOnly: "Recurso disponível apenas no desktop",
+  },
 });
