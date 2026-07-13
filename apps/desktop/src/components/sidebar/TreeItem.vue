@@ -73,7 +73,7 @@ import type { ColumnInfo, ConnectionConfig, DatabaseType, ObjectSourceKind, Tree
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { canTreeNodePin, canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { canTreeNodePin, canTreeNodeShowExpander, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
@@ -280,7 +280,6 @@ const emit = defineEmits<{
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
-const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 truncate"));
 const nodeProductionContext = computed(() => {
   const connectionId = props.node.connectionId;
   return productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, props.node.database);
@@ -4192,6 +4191,7 @@ const tableComment = computed(() =>
     ? props.node.comment
     : null,
 );
+const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: !!columnComment.value || !!tableComment.value }));
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 const tableSearchParentId = computed(() => props.node.tableSearchParentId || "");
 const tableSearchValue = computed(() => {
