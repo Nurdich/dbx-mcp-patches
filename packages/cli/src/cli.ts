@@ -24,6 +24,7 @@ import {
   postBridge,
   proxyProfileReferenceLayer,
   proxyProfileSummary,
+  cliConnectionLogOptions,
   pushConnectionLog,
   resolveConnectionRef,
   type Backend,
@@ -104,16 +105,15 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
   const env = options.env ?? process.env;
   let ownedBackend: Backend | undefined;
   const flags = parseFlags(argv);
-  const progressLogs: string[] = [];
-  const popConnectionLog = pushConnectionLog({
-    quiet: flags.quiet || parseBooleanEnv(env.DBX_QUIET),
-    verbose: flags.verbose || parseBooleanEnv(env.DBX_VERBOSE),
-    sink: (message) => progressLogs.push(message),
-  });
-  const progress = () => progressLogs.join("");
-  const succeed = (stdout: string) => ok(stdout, progress());
-  const succeedJson = (payload: unknown) => okJson(payload, progress());
-  const failed = (code: string, message: string, json = flags.json) => fail(code, message, json, progress());
+  const popConnectionLog = pushConnectionLog(
+    cliConnectionLogOptions({
+      quiet: flags.quiet || parseBooleanEnv(env.DBX_QUIET),
+      verbose: flags.verbose || parseBooleanEnv(env.DBX_VERBOSE),
+    }),
+  );
+  const succeed = (stdout: string) => ok(stdout);
+  const succeedJson = (payload: unknown) => okJson(payload);
+  const failed = (code: string, message: string, json = flags.json) => fail(code, message, json);
 
   try {
     const args = flags.args;

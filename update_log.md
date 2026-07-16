@@ -1,5 +1,41 @@
 # Update Log
 
+## 2026-07-16 — 修复 CLI 流逝输出非实时（批量延迟显示）
+
+### 根因
+
+`packages/cli/src/cli.ts` 的 `runCli()` 用自定义 `sink` 把 `[dbx]` 行推入 `progressLogs[]`，仅在 `succeed()` / `fail()` 返回时通过 `CliRunResult.stderr` 一次性写出；`main()` 又在命令结束后才 `process.stderr.write(result.stderr)`，导致所有进度行在命令结束时才出现。
+
+`connection-log.ts` 的 `defaultSink` 本身已支持即时 `stderr.write`；MCP 的 `startConnectionLogCollector` 缓冲行为正确，无需改动。
+
+### 修复
+
+| 文件 | 变更 |
+|------|------|
+| `packages/node-core/src/connection-log.ts` | 新增 `stderrStreamSink()`、`cliConnectionLogOptions()`；`writeStderrLine()` 在非 TTY 下调用 `setBlocking(true)` 减少 Windows 管道缓冲 |
+| `packages/cli/src/cli.ts` | 改用 `cliConnectionLogOptions()` 即时写 stderr；移除 `progressLogs` 收集与 `result.stderr` 中的进度前缀（错误信息仍经 `fail()` 输出） |
+
+- **CLI**：每条 `connectionLog()` 立即写 stderr（真实时流逝输出）
+- **MCP**：仍用 collector 缓冲，响应正文前 prepend
+
+### 验证
+
+`dbx report 11`（代理连接，约 3.7s）：
+
+- 首条 stderr：**80ms**（命令总时长 3666ms）→ `streamedBeforeEnd: true`
+- 进度行时间戳分散：80 → 113 → 124 → 924 → 2101 → 2879 → 3653 ms
+
+`report` / `stats` / `query` 共用 `runCli()` + `connectionLog`，均已实时流式。
+
+### 已安装 dist 同步
+
+- `packages/node-core/dist/connection-log.js`、`.d.ts`
+- `packages/cli/dist/cli.js`
+- `C:\usr\local\node_modules\@dbx-app\mcp-server\node_modules\@dbx-app\node-core\dist\`
+- `G:\usr\local\node_modules\@dbx-app\cli\dist\` 及 node-core dist
+
+---
+
 ## 2026-07-16 — 术语：「流逝日志」→「流逝输出」
 
 用户可见文档统一将连接反馈功能称为 **流逝输出**（streaming output），不再使用「连接进度日志」「进度日志」「日志反馈」等表述。技术模块名 `connection-log.ts` 保持不变。

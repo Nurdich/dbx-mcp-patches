@@ -12,8 +12,35 @@ function activeOptions(): ConnectionLogOptions {
   return stack.at(-1) ?? { quiet: false, verbose: false };
 }
 
-function defaultSink(message: string): void {
+function ensureStderrLineBuffered(): void {
+  const handle = (process.stderr as NodeJS.WriteStream & { _handle?: { setBlocking?: (blocking: boolean) => void } })._handle;
+  handle?.setBlocking?.(true);
+}
+
+function writeStderrLine(message: string): void {
+  ensureStderrLineBuffered();
   process.stderr.write(message);
+}
+
+function defaultSink(message: string): void {
+  writeStderrLine(message);
+}
+
+/** Immediate stderr sink for CLI streaming. Optional collect callback for buffering (tests/MCP). */
+export function stderrStreamSink(collect?: (message: string) => void): (message: string) => void {
+  return (message: string) => {
+    writeStderrLine(message);
+    collect?.(message);
+  };
+}
+
+/** CLI options: each connectionLog() line streams to stderr immediately. */
+export function cliConnectionLogOptions(opts: { quiet?: boolean; verbose?: boolean } = {}): ConnectionLogOptions {
+  return {
+    quiet: opts.quiet ?? false,
+    verbose: opts.verbose ?? false,
+    sink: stderrStreamSink(),
+  };
 }
 
 export function pushConnectionLog(options: ConnectionLogOptions = {}): () => void {
@@ -110,6 +137,7 @@ export function startConnectionLogCollector(options: ConnectionLogOptions = {}, 
     quiet: false,
     verbose: false,
     ...options,
+    // MCP: buffer only; prepend in tool response. CLI uses cliConnectionLogOptions() instead.
     sink: (message) => logs.push(message),
   });
   if (config) {
