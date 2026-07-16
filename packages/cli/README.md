@@ -60,7 +60,7 @@ dbx report 3..5          # connections #3, #4, #5
 dbx query 2 "select 1"
 ```
 
-Range syntax: `1-15`, `1..15`, `1:15`, `#1-#15`. Max 15 connections per range; end index ≤ 15.
+Range syntax: `1-15`, `1..15`, `1:15`, `#1-#15`. Max 15 connections per range (range size, not end index).
 
 ## `dbx stats`
 
@@ -143,7 +143,7 @@ dbx report 3..5          # #3、#4、#5
 dbx query 1 "select 1"   # 单连接不变
 ```
 
-范围语法：`1-15`、`1..15`、`1:15`、`#1-#15`。单次最多 15 个连接，结束序号 ≤ 15。
+范围语法：`1-15`、`1..15`、`1:15`、`#1-#15`。单次最多 15 个连接（按范围跨度计，结束序号无上限）。
 
 ### 数据库状态概览
 

@@ -1,5 +1,56 @@
 # Update Log
 
+## 2026-07-17 — 修复范围校验：按跨度而非结束序号限制
+
+### 问题
+
+`dbx stats 23-35` 报错 `Range end must be <= 15. Got 35.`，但 23–35 仅 13 个连接，应在批量上限内。
+
+### 根因
+
+`parseListIndexRange` 错误地将 `MAX_LIST_INDEX_RANGE_END = 15` 当作结束序号上限；正确语义是**单次批量最多 15 个连接**（`end - start + 1 <= 15`），结束序号可指向列表中任意有效位置。
+
+### 修复
+
+| 文件 | 变更 |
+|------|------|
+| `packages/node-core/src/list-index.ts` | 删除 `MAX_LIST_INDEX_RANGE_END` 及 `end > 15` 检查；保留 `MAX_LIST_INDEX_RANGE_SIZE = 15` 跨度校验 |
+| `packages/node-core/dist/list-index.js` / `.d.ts` | 同步构建产物 |
+| `packages/cli/README.md` | 文档改为「范围跨度 ≤ 15」，移除「结束序号 ≤ 15」 |
+
+已同步至：
+
+- `G:\usr\local\node_modules\@dbx-app\cli\node_modules\@dbx-app\node-core\dist\`
+- `C:\usr\local\node_modules\@dbx-app\mcp-server\node_modules\@dbx-app\node-core\dist\`
+
+### 校验规则（修复后）
+
+| 规则 | 值 |
+|------|-----|
+| 起始序号 | ≥ 1 |
+| 结束序号 | ≥ 起始序号（无 15 上限） |
+| 范围跨度 `end - start + 1` | ≤ 15 |
+| 单个序号 | 任意有效索引（如 `50`） |
+
+### 示例
+
+| 命令 | 结果 |
+|------|------|
+| `dbx stats 1-15` | ✅ 15 个连接 |
+| `dbx stats 23-35` | ✅ 13 个连接 |
+| `dbx stats 23-37` | ✅ 15 个连接 |
+| `dbx stats 1-16` | ❌ `Range size must be <= 15. Got 16 (1-16).` |
+| `dbx stats 50` | ✅ 单连接 #50（若存在） |
+
+### 验证
+
+```powershell
+dbx stats 23-35
+# 应通过范围校验并尝试连接（可能因 DB 连接失败，但不再报 end <= 15）
+```
+
+---
+
 ## 2026-07-17 — 修复 CLI `resolveConnectionsByIndexRef` 重复导出崩溃
 
 ### 问题
@@ -61,8 +112,8 @@ CLI 非交互模式下，连接参数支持**序号范围**语法，一次命令
 | 规则 | 值 |
 |------|-----|
 | 起始序号 | ≥ 1 |
-| 结束序号 | ≤ 15 |
-| 单次批量连接数 | ≤ 15 |
+| 结束序号 | ≥ 起始序号 |
+| 单次批量连接数（范围跨度） | ≤ 15 |
 | 逆序范围 | 拒绝（如 `5-3`） |
 
 超出限制返回 `INVALID_LIST_INDEX_RANGE`。
@@ -81,7 +132,7 @@ CLI 非交互模式下，连接参数支持**序号范围**语法，一次命令
 
 | 模块 | 导出 |
 |------|------|
-| `list-index.ts` | `parseListIndexRange`、`MAX_LIST_INDEX_RANGE_END`、`MAX_LIST_INDEX_RANGE_SIZE`、`ListIndexRangeError` |
+| `list-index.ts` | `parseListIndexRange`、`MAX_LIST_INDEX_RANGE_SIZE`、`ListIndexRangeError` |
 | `connections.ts` | `resolveConnectionsByIndexRef` |
 
 ### 修改文件

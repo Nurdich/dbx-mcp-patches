@@ -1,9 +1,6 @@
 import type { ConnectionConfig } from "./connections.js";
 import type { TunnelProfile } from "./tunnel-profiles.js";
 
-/** Maximum end index allowed in a numeric range reference (e.g. `1-15`). */
-export const MAX_LIST_INDEX_RANGE_END = 15;
-
 /** Maximum number of connections in a single range batch. */
 export const MAX_LIST_INDEX_RANGE_SIZE = 15;
 
@@ -46,9 +43,6 @@ export function parseListIndexRange(value: string): number[] | undefined {
   if (start < 1) {
     throw new ListIndexRangeError(`Range start must be >= 1. Got ${start}.`);
   }
-  if (end > MAX_LIST_INDEX_RANGE_END) {
-    throw new ListIndexRangeError(`Range end must be <= ${MAX_LIST_INDEX_RANGE_END}. Got ${end}.`);
-  }
   if (start > end) {
     throw new ListIndexRangeError(`Invalid range: start (${start}) must be <= end (${end}).`);
   }
@@ -56,7 +50,7 @@ export function parseListIndexRange(value: string): number[] | undefined {
   const size = end - start + 1;
   if (size > MAX_LIST_INDEX_RANGE_SIZE) {
     throw new ListIndexRangeError(
-      `Range cannot include more than ${MAX_LIST_INDEX_RANGE_SIZE} connections. Got ${size} (${start}-${end}).`,
+      `Range size must be <= ${MAX_LIST_INDEX_RANGE_SIZE}. Got ${size} (${start}-${end}).`,
     );
   }
 
