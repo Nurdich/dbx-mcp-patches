@@ -23,7 +23,7 @@ Local enhancements for [DBX](https://github.com/t8y2/dbx) MCP Server, CLI, and n
 - Stats: `dbx_get_database_stats` / `dbx stats` (catalog, rows desc)
 - Report: `dbx_get_database_report` / `dbx report`
 - Numeric list IDs (`#` column, use `1` / `#2` for connections and proxies)
-- Connection progress logging (CLI stderr / MCP tool responses / Web API client stages)
+- Streaming output (CLI stderr / MCP tool responses / Web API client stages)
 
 ## Install into DBX monorepo
 
