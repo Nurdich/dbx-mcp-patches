@@ -80,21 +80,29 @@ export function sortStatsRows<T extends Record<string, unknown>>(rows: T[]): T[]
   });
 }
 
-function resolveCatalogStatsScope(
+export function resolveCatalogStatsScope(
   dbType: string,
   options: DatabaseStatsOptions,
-  scopeValue: { schema?: string },
+  scopeValue: { config: ConnectionConfig; schema?: string },
 ): CatalogStatsScope {
   const explicitDatabase = options.database?.trim();
   const explicitSchema = options.schema?.trim();
+  const configDatabase = scopeValue.config.database?.trim();
+
   if (dbType === "dameng") {
     return {
-      database: explicitDatabase,
-      schema: explicitSchema || explicitDatabase || scopeValue.schema,
+      database: explicitDatabase || configDatabase || undefined,
+      schema: explicitSchema || explicitDatabase || scopeValue.schema || configDatabase,
+    };
+  }
+  if (MYSQL_STATS_TYPES.has(dbType)) {
+    return {
+      database: explicitDatabase || configDatabase || undefined,
+      schema: explicitSchema,
     };
   }
   return {
-    database: explicitDatabase,
+    database: explicitDatabase || configDatabase || undefined,
     schema: explicitSchema,
   };
 }
@@ -130,7 +138,10 @@ export function buildCatalogStatsSql(dbType: string, scope: CatalogStatsScope = 
       ? `TABLE_SCHEMA = ${sqlLiteral(explicitDatabase)}`
       : `TABLE_SCHEMA NOT IN (${systemDbs})`;
     const scopeColumn = explicitDatabase ? "" : "TABLE_SCHEMA AS database_name, ";
-    return `SELECT ${scopeColumn}TABLE_NAME AS name, TABLE_TYPE AS type, ENGINE AS engine, TABLE_ROWS AS rows_estimate, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, (COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)) AS total_bytes, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE ${dbFilter} AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')`;
+    const tableTypeFilter = explicitDatabase
+      ? `TABLE_TYPE = 'BASE TABLE'`
+      : `TABLE_TYPE IN ('BASE TABLE', 'VIEW')`;
+    return `SELECT ${scopeColumn}TABLE_NAME AS name, TABLE_TYPE AS type, ENGINE AS engine, TABLE_ROWS AS rows_estimate, DATA_LENGTH AS data_bytes, INDEX_LENGTH AS index_bytes, (COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)) AS total_bytes, TABLE_COMMENT AS comment FROM information_schema.TABLES WHERE ${dbFilter} AND ${tableTypeFilter}`;
   }
   if (POSTGRES_STATS_TYPES.has(dbType)) {
     const systemSchemas = sqlInList(POSTGRES_SYSTEM_SCHEMAS);
@@ -194,6 +205,12 @@ export function deriveCatalogSummaryFromStats(
   const explicitSchema = scope.schema?.trim();
   const tableCount = stats.rows.length;
 
+  if (MYSQL_STATS_TYPES.has(dbType) && explicitDatabase) {
+    return formatSummaryKeyValues([
+      ["database_name", explicitDatabase],
+      ["table_count", tableCount],
+    ]);
+  }
   if (MYSQL_STATS_TYPES.has(dbType) && !explicitDatabase) {
     return formatSummaryKeyValues([
       ["database_count", uniqueNonEmptyFieldCount(stats.rows, "database_name")],
@@ -392,21 +409,9 @@ export async function fetchDatabaseStats(backend: Backend, config: ConnectionCon
 
   const parts: string[] = [];
   const queryOptions = options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined;
-  let summaryText = "";
-  const summarySql = buildCatalogSummarySql(dbType, catalogScope);
-  if (summarySql) {
-    try {
-      const summary = await backend.executeQuery(scopeValue.config, summarySql, queryOptions);
-      summaryText = formatSummaryLines(summary);
-    } catch {
-      // Summary is optional; table catalog remains useful.
-    }
-  }
 
   const stats = await backend.executeQuery(scopeValue.config, statsSql, queryOptions);
-  if (!summaryText) {
-    summaryText = deriveCatalogSummaryFromStats(dbType, catalogScope, stats, scopeValue.config);
-  }
+  const summaryText = deriveCatalogSummaryFromStats(dbType, catalogScope, stats, scopeValue.config);
   if (summaryText) parts.push("Summary", summaryText);
   if (stats.rows.length === 0) {
     parts.push(parts.length > 0 ? "" : "", "No tables found in catalog.");

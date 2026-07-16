@@ -11,6 +11,7 @@ import {
   fetchDatabaseStats,
   formatStatsOverviewTable,
   metadataScope,
+  resolveCatalogStatsScope,
   type CatalogStatsScope,
   type DatabaseStatsOptions,
 } from "./database-stats.js";
@@ -35,25 +36,6 @@ function defaultStatsSchema(dbType: string): string {
   if (dbType === "sqlserver") return "dbo";
   if (MYSQL_STATS_TYPES.has(dbType)) return "";
   return "public";
-}
-
-function resolveCatalogStatsScope(
-  dbType: string,
-  options: DatabaseStatsOptions,
-  scopeValue: { schema?: string },
-): CatalogStatsScope {
-  const explicitDatabase = options.database?.trim();
-  const explicitSchema = options.schema?.trim();
-  if (dbType === "dameng") {
-    return {
-      database: explicitDatabase,
-      schema: explicitSchema || explicitDatabase || scopeValue.schema,
-    };
-  }
-  return {
-    database: explicitDatabase,
-    schema: explicitSchema,
-  };
 }
 
 function formatSummaryLines(result: QueryResult): string {

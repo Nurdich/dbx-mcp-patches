@@ -1,5 +1,53 @@
 # Update Log
 
+## 2026-07-17 — 修复 stats 未使用连接默认 database 导致全库扫描超时
+
+### 根因
+
+`resolveCatalogStatsScope()` 仅读取 CLI/MCP 传入的 `--database` / `database` 参数，**忽略** `ConnectionConfig.database`。当连接已配置 `database: "kfpt_robot_resource"` 但用户未传 `--database` 时：
+
+1. `buildCatalogStatsSql()` 生成 `TABLE_SCHEMA NOT IN ('information_schema', ...)` — 扫描**整台服务器所有用户库**
+2. 输出标签显示 `(all user scopes)`
+3. 大实例上 `information_schema.TABLES` 全库扫描超过 30s 超时
+
+`metadataScope()` 虽将 database 写入连接 config，但 SQL 作用域未继承该值。
+
+### 修复
+
+| 项 | 变更 |
+|----|------|
+| `resolveCatalogStatsScope()` | 导出；MySQL/Dameng 默认 `options.database \|\| config.database` |
+| `buildCatalogStatsSql()` | 单库模式加 `TABLE_SCHEMA = 'xxx'`；仅查 `BASE TABLE`（跳过 VIEW） |
+| `fetchDatabaseStats()` | 移除 `buildCatalogSummarySql` 二次查询，仅一次主查询 + JS 摘要推导 |
+| `deriveCatalogSummaryFromStats()` | 单库模式输出 `database_name` + `table_count` |
+| `database-report.ts` | 复用导出的 `resolveCatalogStatsScope`，删除重复实现 |
+
+### 修复后 SQL 示例（连接 #23，`database=kfpt_robot_resource`，无 `--database`）
+
+```sql
+SELECT TABLE_NAME AS name, TABLE_TYPE AS type, ENGINE AS engine,
+       TABLE_ROWS AS rows_estimate, DATA_LENGTH AS data_bytes,
+       INDEX_LENGTH AS index_bytes,
+       (COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0)) AS total_bytes,
+       TABLE_COMMENT AS comment
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA = 'kfpt_robot_resource'
+  AND TABLE_TYPE = 'BASE TABLE'
+```
+
+### 批量 `dbx stats 23-50`
+
+每个连接独立解析自身 `config.database`，不再共用全库扫描模式。
+
+### 修改文件
+
+- `packages/node-core/src/database-stats.ts`
+- `packages/node-core/src/database-report.ts`
+- `packages/node-core/dist/database-stats.js` / `.d.ts`
+- `packages/node-core/dist/database-report.js`
+
+---
+
 ## 2026-07-17 — stats 摘要移除 SQL COUNT，改 JS 内存推导
 
 ### 变更摘要
