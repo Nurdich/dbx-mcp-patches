@@ -9,6 +9,7 @@ import {
   connectionLog,
   connectionStageError,
   describeConnectionTarget,
+  logQuerySql,
   logTransportLayers,
   withConnectionStage,
 } from "./connection-log.js";
@@ -60,6 +61,19 @@ const MAX_ROWS = 100;
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const QUERY_TIMEOUT_MS = 30_000;
 
+function parseDurationMsEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const match = raw.match(/^(\d+)(ms|s|m)?$/);
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  if (!Number.isInteger(amount) || amount < 1) return undefined;
+  const unit = match[2] ?? "ms";
+  if (unit === "ms") return amount;
+  if (unit === "s") return amount * 1000;
+  return amount * 60_000;
+}
+
 interface PoolEntry {
   type: "pg" | "mysql";
   pool: unknown;
@@ -78,10 +92,18 @@ interface RqliteResponse {
 }
 
 const pools = new Map<string, PoolEntry>();
+const poolInflight = new Map<string, Promise<import("pg").Pool | import("mysql2/promise").Pool>>();
 const proxyTunnels = new Map<string, { server: Server; port: number; sockets: Set<Socket> }>();
 
 function poolKey(config: ConnectionConfig): string {
-  return `${config.id}:${config.database || ""}`;
+  return [
+    config.id,
+    config.db_type,
+    config.host,
+    String(config.port),
+    config.username || "",
+    config.database || "",
+  ].join(":");
 }
 
 function evictPool(key: string, entry: PoolEntry) {
@@ -134,24 +156,42 @@ async function getPgPool(config: ConnectionConfig): Promise<import("pg").Pool> {
     return existing.pool as import("pg").Pool;
   }
 
-  const pg = await import("pg");
-  const endpoint = await connectionEndpoint(config);
-  connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+  const inflight = poolInflight.get(key) as Promise<import("pg").Pool> | undefined;
+  if (inflight) return inflight;
+
+  const create = (async () => {
+    const cached = pools.get(key);
+    if (cached?.type === "pg") {
+      resetIdleTimer(key, cached);
+      return cached.pool as import("pg").Pool;
+    }
+
+    const pg = await import("pg");
+    const endpoint = await connectionEndpoint(config);
+    connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+    try {
+      const pool = new pg.default.Pool({
+        connectionString: buildConnectionUrl(config, endpoint),
+        max: 3,
+        idleTimeoutMillis: 30_000,
+        connectionTimeoutMillis: 10_000,
+      });
+      pool.on("error", () => {});
+      const entry: PoolEntry = { type: "pg", pool, timer: setTimeout(() => {}, 0) };
+      pools.set(key, entry);
+      resetIdleTimer(key, entry);
+      connectionLog("Database connection pool ready");
+      return pool;
+    } catch (error) {
+      throw connectionStageError("Database connection", error);
+    }
+  })();
+
+  poolInflight.set(key, create);
   try {
-    const pool = new pg.default.Pool({
-      connectionString: buildConnectionUrl(config, endpoint),
-      max: 3,
-      idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 10_000,
-    });
-    pool.on("error", () => {});
-    const entry: PoolEntry = { type: "pg", pool, timer: setTimeout(() => {}, 0) };
-    pools.set(key, entry);
-    resetIdleTimer(key, entry);
-    connectionLog("Database connection pool ready");
-    return pool;
-  } catch (error) {
-    throw connectionStageError("Database connection", error);
+    return await create;
+  } finally {
+    if (poolInflight.get(key) === create) poolInflight.delete(key);
   }
 }
 
@@ -163,26 +203,44 @@ async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/pr
     return existing.pool as import("mysql2/promise").Pool;
   }
 
-  const mysql = await import("mysql2/promise");
-  const endpoint = await connectionEndpoint(config);
-  connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+  const inflight = poolInflight.get(key) as Promise<import("mysql2/promise").Pool> | undefined;
+  if (inflight) return inflight;
+
+  const create = (async () => {
+    const cached = pools.get(key);
+    if (cached?.type === "mysql") {
+      resetIdleTimer(key, cached);
+      return cached.pool as import("mysql2/promise").Pool;
+    }
+
+    const mysql = await import("mysql2/promise");
+    const endpoint = await connectionEndpoint(config);
+    connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+    try {
+      const poolOptions: import("mysql2/promise").PoolOptions = {
+        uri: buildConnectionUrl(config, endpoint),
+        connectionLimit: 3,
+        idleTimeout: 30_000,
+        connectTimeout: 10_000,
+      };
+      const tls = await mysqlTlsOptions(config);
+      if (tls) poolOptions.ssl = tls;
+      const pool = mysql.default.createPool(poolOptions);
+      const entry: PoolEntry = { type: "mysql", pool, timer: setTimeout(() => {}, 0) };
+      pools.set(key, entry);
+      resetIdleTimer(key, entry);
+      connectionLog("Database connection pool ready");
+      return pool;
+    } catch (error) {
+      throw connectionStageError("Database connection", error);
+    }
+  })();
+
+  poolInflight.set(key, create);
   try {
-    const poolOptions: import("mysql2/promise").PoolOptions = {
-      uri: buildConnectionUrl(config, endpoint),
-      connectionLimit: 3,
-      idleTimeout: 30_000,
-      connectTimeout: 10_000,
-    };
-    const tls = await mysqlTlsOptions(config);
-    if (tls) poolOptions.ssl = tls;
-    const pool = mysql.default.createPool(poolOptions);
-    const entry: PoolEntry = { type: "mysql", pool, timer: setTimeout(() => {}, 0) };
-    pools.set(key, entry);
-    resetIdleTimer(key, entry);
-    connectionLog("Database connection pool ready");
-    return pool;
-  } catch (error) {
-    throw connectionStageError("Database connection", error);
+    return await create;
+  } finally {
+    if (poolInflight.get(key) === create) poolInflight.delete(key);
   }
 }
 
@@ -751,7 +809,7 @@ function resolveMaxRows(options?: QueryOptions): number {
 }
 
 function resolveTimeoutMs(options?: QueryOptions): number {
-  return options?.timeoutMs ?? QUERY_TIMEOUT_MS;
+  return options?.timeoutMs ?? parseDurationMsEnv("DBX_QUERY_TIMEOUT") ?? QUERY_TIMEOUT_MS;
 }
 
 function convertBridgeQueryResult(result: BridgeQueryResult, options?: QueryOptions): QueryResult {
@@ -896,6 +954,7 @@ async function rqliteRequest(config: ConnectionConfig, endpoint: "/db/query" | "
 
 export async function executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
   return withConnectionStage("Executing query", async () => {
+    logQuerySql(sql);
     if (hasActiveSshLayer(config)) {
       connectionLog("SSH tunnel active; routing query via DBX desktop bridge");
       const result = await withTimeout(

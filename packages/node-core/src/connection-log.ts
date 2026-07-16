@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ConnectionConfig } from "./connections.js";
 
 export interface ConnectionLogOptions {
@@ -7,9 +8,10 @@ export interface ConnectionLogOptions {
 }
 
 const stack: ConnectionLogOptions[] = [];
+const logStorage = new AsyncLocalStorage<ConnectionLogOptions>();
 
 function activeOptions(): ConnectionLogOptions {
-  return stack.at(-1) ?? { quiet: false, verbose: false };
+  return logStorage.getStore() ?? stack.at(-1) ?? { quiet: false, verbose: false };
 }
 
 function ensureStderrLineBuffered(): void {
@@ -52,12 +54,9 @@ export function pushConnectionLog(options: ConnectionLogOptions = {}): () => voi
 }
 
 export async function runWithConnectionLog<T>(options: ConnectionLogOptions, fn: () => T | Promise<T>): Promise<T> {
-  const pop = pushConnectionLog(options);
-  try {
-    return await fn();
-  } finally {
-    pop();
-  }
+  const parent = activeOptions();
+  const merged: ConnectionLogOptions = { quiet: false, verbose: false, ...parent, ...options };
+  return logStorage.run(merged, () => fn());
 }
 
 export function connectionLog(message: string, opts?: { verboseOnly?: boolean }): void {
@@ -66,6 +65,12 @@ export function connectionLog(message: string, opts?: { verboseOnly?: boolean })
   if (opts?.verboseOnly && !options.verbose) return;
   const sink = options.sink ?? defaultSink;
   sink(`[dbx] ${message}\n`);
+}
+
+/** Log catalog/query SQL on stderr when verbose mode is active. */
+export function logQuerySql(sql: string): void {
+  const normalized = sql.replace(/\s+/g, " ").trim();
+  connectionLog(`SQL: ${normalized}`, { verboseOnly: true });
 }
 
 export function describeConnectionTarget(config: ConnectionConfig): string {

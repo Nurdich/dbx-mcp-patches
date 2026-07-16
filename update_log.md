@@ -1,5 +1,47 @@
 # Update Log
 
+## 2026-07-17 — 批量并行：遇错继续 + 修复连接池/日志串线
+
+### 问题 1：批量遇错即停
+
+`dbx stats 23-50 -P 3` 中任一连接失败（如密码错误、Access denied），`Promise.all` + 未捕获异常导致**整批中止**，后续连接不再执行。
+
+### 问题 2：并行日志/连接池串线（#30 显示连到 realauth）
+
+终端现象：
+```
+Resolved connection "..._riskmanage_c" ... kfpt_riskmanage from ref "#30"
+Connecting to database mysql @ ... kfpt_realauth (via ...)
+Access denied for user 'u_kfpt_realauth'@'%' to database 'kfpt_realauth'
+```
+
+**根因（双重）：**
+
+1. **连接日志全局 stack 竞态**：`runWithConnectionLog` 用共享 `stack[]`，并行 worker 在 `await connectionEndpoint()` 时互相 push/pop，导致 `connectionLog()` 读到错误 worker 的 sink/上下文；resolve 阶段无 `[#N]` 前缀，更易与并行 Connecting 日志混淆。
+2. **连接池 key 过窄 + 创建竞态**：`poolKey` 仅 `id:database`，未含 username/host/port；并发 `getMysqlPool` 无 inflight 锁，存在 TOCTOU 重复创建/覆盖风险。
+
+`executeQuery` 本身始终使用传入的 `config` 参数，无 stale global config；问题在池缓存 key 与并行日志隔离。
+
+### 修复
+
+| 项 | 变更 |
+|----|------|
+| `runConnectionBatch` | 每连接 try/catch，失败写 stderr（`[#N] name: msg`），**继续下一连接** |
+| 批量输出 | 失败连接正文显示 `**Error** (...)`；末尾 `Batch: X/Y succeeded` + Failures 列表 |
+| 退出码 | 任一失败 exit 1，但 stdout 仍含全部成功+失败结果 |
+| `connection-log.ts` | `AsyncLocalStorage` 隔离并行 worker 日志上下文 |
+| `poolKey` | `id:db_type:host:port:username:database` |
+| `getPgPool` / `getMysqlPool` | `poolInflight` 去重，并发同 key 共享创建 Promise |
+| 批量 worker | 传入 `{ ...config }` 浅拷贝，避免共享对象被改写 |
+
+### 修改文件
+
+- `packages/cli/src/cli.ts` + `dist/cli.js`
+- `packages/node-core/src/connection-log.ts` + `dist/connection-log.js`
+- `packages/node-core/src/database.ts` + `dist/database.js`
+
+---
+
 ## 2026-07-17 — 修复 stats 未使用连接默认 database 导致全库扫描超时
 
 ### 根因

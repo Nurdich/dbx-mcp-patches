@@ -41,6 +41,46 @@ import { connectionSummary, csvTable, errorPayload, formatCell, formatErrorMessa
 
 const FILE_CAPABLE_CONNECTION_TYPES = new Set(["sqlite", "duckdb", "access", "h2"]);
 const CONNECTION_BATCH_SEPARATOR = "\n---\n\n";
+
+type BatchItemResult<T> =
+  | { ok: true; value: T; index: number }
+  | { ok: false; error: Error; index: number };
+
+function normalizeBatchError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  return new Error(String(error));
+}
+
+function batchErrorCode(error: Error): string {
+  if (error instanceof CliError) return error.code;
+  return "ERROR";
+}
+
+function formatBatchErrorBody(config: ConnectionConfig, error: Error): string {
+  const code = error instanceof CliError ? `[${error.code}] ` : "";
+  return `**Error** (${config.name}): ${code}${error.message}`;
+}
+
+function batchExitCode(results: BatchItemResult<unknown>[]): number {
+  return results.some((r) => !r.ok) ? 1 : 0;
+}
+
+function formatBatchSummary(results: BatchItemResult<unknown>[], configs: ConnectionConfig[]): string {
+  const failures = results.filter((r): r is Extract<BatchItemResult<unknown>, { ok: false }> => !r.ok);
+  if (failures.length === 0) return "";
+  const successes = results.length - failures.length;
+  const lines = failures.map((r) => `- #${r.index + 1} ${configs[r.index]!.name}: ${r.error.message}`);
+  return `\n---\n\nBatch: ${successes}/${results.length} succeeded\nFailures:\n${lines.join("\n")}\n`;
+}
+
+function finishBatchOutput(
+  stdoutBody: string,
+  results: BatchItemResult<unknown>[],
+  configs: ConnectionConfig[],
+): CliRunResult {
+  const summary = configs.length > 1 ? formatBatchSummary(results, configs) : "";
+  return { exitCode: batchExitCode(results), stdout: `${stdoutBody}${summary}`, stderr: "" };
+}
 const DEFAULT_PORTS: Record<string, number> = {
   kwdb: 26257,
   rqlite: 4001,
@@ -344,11 +384,12 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx stats");
       const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
       const configs = await resolveConnectionsForCli(backend, connectionRef);
-      const bodies = await runConnectionBatch(configs, flags, async (config) => {
+      const batchResults = await runConnectionBatch(configs, flags, async (config) => {
         try {
           return await fetchDatabaseStats(backend, config, {
             database: flags.database,
             schema: flags.schema,
+            timeoutMs: flags.timeoutMs,
           });
         } catch (error) {
           if (error instanceof DatabaseStatsError) {
@@ -357,24 +398,29 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
           throw error;
         }
       });
-      const jsonResults = bodies.map((body, i) => ({
+      const jsonResults = batchResults.map((r, i) => ({
         index: i + 1,
         connection: configs[i].name,
         database: flags.database,
         schema: flags.schema,
-        stats: body,
+        ...(r.ok
+          ? { ok: true as const, stats: r.value }
+          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
       }));
-      const textParts = bodies.map((body, i) =>
-        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${body}`,
+      const textParts = batchResults.map((r, i) =>
+        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${r.ok ? r.value : formatBatchErrorBody(configs[i], r.error)}`,
       );
       if (flags.format === "json") {
-        if (configs.length === 1) return succeedJson(jsonResults[0]);
-        return succeedJson({ connections: jsonResults });
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
       }
       if (flags.format === "csv") {
         throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx stats.");
       }
-      return succeed(`${joinBatchOutput(textParts)}\n`);
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
     if (args[0] === "report") {
@@ -382,11 +428,12 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx report");
       const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
       const configs = await resolveConnectionsForCli(backend, connectionRef);
-      const bodies = await runConnectionBatch(configs, flags, async (config) => {
+      const batchResults = await runConnectionBatch(configs, flags, async (config) => {
         try {
           return await fetchDatabaseReport(backend, config, {
             database: flags.database,
             schema: flags.schema,
+            timeoutMs: flags.timeoutMs,
           });
         } catch (error) {
           if (error instanceof DatabaseStatsError) {
@@ -395,54 +442,72 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
           throw error;
         }
       });
-      const jsonResults = bodies.map((body, i) => ({
+      const jsonResults = batchResults.map((r, i) => ({
         index: i + 1,
         connection: configs[i].name,
         database: flags.database,
         schema: flags.schema,
-        report: body,
+        ...(r.ok
+          ? { ok: true as const, report: r.value }
+          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
       }));
-      const textParts = bodies.map((body, i) =>
-        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${body}`,
+      const textParts = batchResults.map((r, i) =>
+        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${r.ok ? r.value : formatBatchErrorBody(configs[i], r.error)}`,
       );
       if (flags.format === "json") {
-        if (configs.length === 1) return succeedJson(jsonResults[0]);
-        return succeedJson({ connections: jsonResults });
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
       }
       if (flags.format === "csv") {
         throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx report.");
       }
-      return succeed(`${joinBatchOutput(textParts)}\n`);
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
     if (args[0] === "schema" && args[1] === "list") {
       ensureArgCount(args, 3, "dbx schema list");
       const connectionRef = required(args[2], "Connection name is required.");
       const configs = await resolveConnectionsForCli(backend, connectionRef);
-      const tablesByConnection = await runConnectionBatch(configs, flags, async (config) => backend.listTables(config, flags.schema));
-      const jsonResults = tablesByConnection.map((tables, i) => ({
+      const batchResults = await runConnectionBatch(configs, flags, async (config) => backend.listTables(config, flags.schema));
+      const jsonResults = batchResults.map((r, i) => ({
         index: i + 1,
         connection: configs[i].name,
         schema: flags.schema,
-        tables: tables.map((table, index) => ({ index: index + 1, ...table })),
+        ...(r.ok
+          ? { ok: true as const, tables: r.value.map((table, index) => ({ index: index + 1, ...table })) }
+          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
       }));
       if (flags.format === "csv" && configs.length > 1) {
         throw new CliError("INVALID_OPTION", "CSV format is not supported for batch schema list.");
       }
-      const textParts = tablesByConnection.map((tables, i) =>
-        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${mdTable(
+      const textParts = batchResults.map((r, i) => {
+        const heading = connectionBatchHeading(configs[i], i + 1, configs.length);
+        if (!r.ok) return `${heading}${formatBatchErrorBody(configs[i], r.error)}`;
+        return `${heading}${mdTable(
           ["#", "Table", "Type"],
-          tables.map((t, idx) => [String(idx + 1), t.name, t.type]),
-        )}`,
-      );
+          r.value.map((t, idx) => [String(idx + 1), t.name, t.type]),
+        )}`;
+      });
       if (flags.format === "json") {
-        if (configs.length === 1) return succeedJson(jsonResults[0]);
-        return succeedJson({ connections: jsonResults });
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
       }
       if (flags.format === "csv") {
-        return succeed(csvTable(["index", "name", "type"], tablesByConnection[0].map((table, index) => ({ index: index + 1, ...table }))));
+        const first = batchResults[0];
+        if (!first?.ok) return finishBatchOutput("", batchResults, configs);
+        return finishBatchOutput(
+          csvTable(["index", "name", "type"], first.value.map((table, index) => ({ index: index + 1, ...table }))),
+          batchResults,
+          configs,
+        );
       }
-      return succeed(`${joinBatchOutput(textParts)}\n`);
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
     if (args[0] === "schema" && args[1] === "describe") {
@@ -450,39 +515,50 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const connectionRef = required(args[2], "Connection name is required.");
       const table = required(args[3], "Table name is required.");
       const configs = await resolveConnectionsForCli(backend, connectionRef);
-      const columnsByConnection = await runConnectionBatch(configs, flags, async (config) =>
+      const batchResults = await runConnectionBatch(configs, flags, async (config) =>
         backend.describeTable(config, table, flags.schema),
       );
-      const jsonResults = columnsByConnection.map((columns, i) => ({
+      const jsonResults = batchResults.map((r, i) => ({
         index: i + 1,
         connection: configs[i].name,
         schema: flags.schema,
         table,
-        columns,
+        ...(r.ok ? { ok: true as const, columns: r.value } : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
       }));
       if (flags.format === "csv" && configs.length > 1) {
         throw new CliError("INVALID_OPTION", "CSV format is not supported for batch schema describe.");
       }
-      const textParts = columnsByConnection.map((columns, i) =>
-        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${mdTable(
+      const textParts = batchResults.map((r, i) => {
+        const heading = connectionBatchHeading(configs[i], i + 1, configs.length);
+        if (!r.ok) return `${heading}${formatBatchErrorBody(configs[i], r.error)}`;
+        return `${heading}${mdTable(
           ["Column", "Type", "Nullable", "Default", "Comment"],
-          columns.map((c) => [
+          r.value.map((c) => [
             c.is_primary_key ? `${c.name} (PK)` : c.name,
             c.data_type,
             c.is_nullable ? "YES" : "NO",
             c.column_default ?? "",
             c.comment ?? "",
           ]),
-        )}`,
-      );
+        )}`;
+      });
       if (flags.format === "json") {
-        if (configs.length === 1) return succeedJson(jsonResults[0]);
-        return succeedJson({ connections: jsonResults });
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
       }
       if (flags.format === "csv") {
-        return succeed(csvTable(["name", "data_type", "is_nullable", "is_primary_key", "column_default", "comment"], columnsByConnection[0]));
+        const first = batchResults[0];
+        if (!first?.ok) return finishBatchOutput("", batchResults, configs);
+        return finishBatchOutput(
+          csvTable(["name", "data_type", "is_nullable", "is_primary_key", "column_default", "comment"], first.value),
+          batchResults,
+          configs,
+        );
       }
-      return succeed(`${joinBatchOutput(textParts)}\n`);
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
     if (args[0] === "query") {
@@ -505,37 +581,43 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const safety = evaluateSqlSafety(sql, safetyOptions);
       if (!safety.allowed) return failed("SQL_BLOCKED", safety.reason ?? "SQL blocked.", flags.json);
       const configs = await resolveConnectionsForCli(backend, connectionRef);
-      const queryResults = await runConnectionBatch(configs, flags, async (config) =>
+      const batchResults = await runConnectionBatch(configs, flags, async (config) =>
         backend.executeQuery(config, sql, { maxRows: flags.maxRows, timeoutMs: flags.timeoutMs }),
       );
       if (flags.format === "csv" && configs.length > 1) {
         throw new CliError("INVALID_OPTION", "CSV format is not supported for batch query.");
       }
-      const jsonResults = queryResults.map((result, i) => ({
+      const jsonResults = batchResults.map((r, i) => ({
         index: i + 1,
         connection: configs[i].name,
-        columns: result.columns,
-        rows: result.rows,
-        row_count: result.row_count,
+        ...(r.ok
+          ? { ok: true as const, columns: r.value.columns, rows: r.value.rows, row_count: r.value.row_count }
+          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
       }));
-      const textParts = queryResults.map((result, i) => {
+      const textParts = batchResults.map((r, i) => {
         const heading = connectionBatchHeading(configs[i], i + 1, configs.length);
-        if (result.columns.length === 0) {
-          return `${heading}Query executed. ${result.row_count} row(s) affected.`;
+        if (!r.ok) return `${heading}${formatBatchErrorBody(configs[i], r.error)}`;
+        if (r.value.columns.length === 0) {
+          return `${heading}Query executed. ${r.value.row_count} row(s) affected.`;
         }
         return `${heading}${mdTable(
-          result.columns,
-          result.rows.map((row) => result.columns.map((column) => formatCell(row[column]))),
-        )}\n\n${result.row_count} row(s)`;
+          r.value.columns,
+          r.value.rows.map((row) => r.value.columns.map((column) => formatCell(row[column]))),
+        )}\n\n${r.value.row_count} row(s)`;
       });
       if (flags.format === "json") {
-        if (configs.length === 1) return succeedJson(jsonResults[0]);
-        return succeedJson({ connections: jsonResults });
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
       }
       if (flags.format === "csv") {
-        return succeed(csvTable(queryResults[0].columns, queryResults[0].rows));
+        const first = batchResults[0];
+        if (!first?.ok) return finishBatchOutput("", batchResults, configs);
+        return finishBatchOutput(csvTable(first.value.columns, first.value.rows), batchResults, configs);
       }
-      return succeed(`${joinBatchOutput(textParts)}\n`);
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
     if (args[0] === "context") {
@@ -543,23 +625,28 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx context");
       const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
       const configs = await resolveConnectionsForCli(backend, connectionRef);
-      const contexts = await runConnectionBatch(configs, flags, async (config) =>
+      const batchResults = await runConnectionBatch(configs, flags, async (config) =>
         buildSchemaContext(backend, config, {
           schema: flags.schema,
           tables: flags.tables,
           maxTables: flags.maxTables,
         }),
       );
-      const jsonResults = contexts.map((context, i) => ({ index: i + 1, ...context }));
-      const textParts = contexts.map((context, i) =>
-        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${formatSchemaContext(context)}`,
+      const jsonResults = batchResults.map((r, i) =>
+        r.ok ? { index: i + 1, ok: true as const, ...r.value } : { index: i + 1, ok: false as const, error: r.error.message, code: batchErrorCode(r.error) },
+      );
+      const textParts = batchResults.map((r, i) =>
+        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${r.ok ? formatSchemaContext(r.value) : formatBatchErrorBody(configs[i], r.error)}`,
       );
       if (flags.format === "json") {
-        if (configs.length === 1) return succeedJson(jsonResults[0]);
-        return succeedJson({ connections: jsonResults });
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
       }
       if (flags.format === "csv") throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx context.");
-      return succeed(`${joinBatchOutput(textParts)}\n`);
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
     if (args[0] === "open") {
@@ -567,40 +654,40 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const connectionRef = required(args[1], "Connection name is required.");
       const table = required(args[2], "Table name is required.");
       const configs = await resolveConnectionsForCli(backend, connectionRef);
-      const openResponses = await runConnectionBatch(configs, flags, async (config) =>
-        postBridge("/open-table", {
+      const batchResults = await runConnectionBatch(configs, flags, async (config) => {
+        const response = await postBridge("/open-table", {
           connection_name: config.name,
           table,
           schema: flags.schema,
           database: flags.database,
-        }),
-      );
-      for (let i = 0; i < openResponses.length; i++) {
-        if (!openResponses[i].ok) {
-          return failed(
-            "DBX_NOT_RUNNING",
-            openResponses[i].text || "DBX is not running. Please start DBX first.",
-            flags.json,
-          );
+        });
+        if (!response.ok) {
+          throw new CliError("DBX_NOT_RUNNING", response.text || "DBX is not running. Please start DBX first.");
         }
-      }
-      const jsonResults = configs.map((config, i) => ({
+        return response;
+      });
+      const jsonResults = batchResults.map((r, i) => ({
         index: i + 1,
-        opened: true,
-        connection: config.name,
+        connection: configs[i].name,
         table,
         schema: flags.schema,
         database: flags.database,
+        ...(r.ok
+          ? { ok: true as const, opened: true }
+          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
       }));
-      const textParts = configs.map((config, i) =>
-        `${connectionBatchHeading(config, i + 1, configs.length)}Opened ${table} in DBX`,
+      const textParts = batchResults.map((r, i) =>
+        `${connectionBatchHeading(configs[i], i + 1, configs.length)}${r.ok ? `Opened ${table} in DBX` : formatBatchErrorBody(configs[i], r.error)}`,
       );
       if (flags.format === "json") {
-        if (configs.length === 1) return succeedJson(jsonResults[0]);
-        return succeedJson({ connections: jsonResults });
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
       }
       if (flags.format === "csv") throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx open.");
-      return succeed(`${joinBatchOutput(textParts)}\n`);
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
     return failed("USAGE", usage(), flags.json);
@@ -800,27 +887,41 @@ async function runConnectionBatch<T>(
   configs: ConnectionConfig[],
   flags: Pick<ParsedFlags, "parallel" | "quiet" | "verbose">,
   worker: (config: ConnectionConfig, index: number) => Promise<T>,
-): Promise<T[]> {
+): Promise<BatchItemResult<T>[]> {
+  const runOne = async (i: number): Promise<BatchItemResult<T>> => {
+    const config = { ...configs[i]! };
+    try {
+      const value = await runWithConnectionLog(
+        batchConnectionLogOptions({ quiet: flags.quiet, verbose: flags.verbose }, i + 1),
+        () => worker(config, i),
+      );
+      return { ok: true, value, index: i };
+    } catch (error) {
+      const err = normalizeBatchError(error);
+      if (!flags.quiet) {
+        stderrStreamSink()(`[#${i + 1}] ${configs[i]!.name}: ${err.message}\n`);
+      }
+      return { ok: false, error: err, index: i };
+    }
+  };
+
   if (configs.length <= 1 || flags.parallel === undefined) {
-    const results: T[] = [];
+    const results: BatchItemResult<T>[] = [];
     for (let i = 0; i < configs.length; i++) {
-      results.push(await worker(configs[i], i));
+      results.push(await runOne(i));
     }
     return results;
   }
 
   const concurrency = Math.min(flags.parallel, configs.length);
-  const results: T[] = new Array(configs.length);
+  const results: BatchItemResult<T>[] = new Array(configs.length);
   let cursor = 0;
 
   const runSlot = async () => {
     while (true) {
       const i = cursor++;
       if (i >= configs.length) return;
-      results[i] = await runWithConnectionLog(
-        batchConnectionLogOptions({ quiet: flags.quiet, verbose: flags.verbose }, i + 1),
-        () => worker(configs[i], i),
-      );
+      results[i] = await runOne(i);
     }
   };
 
@@ -877,8 +978,8 @@ function usage() {
     "      [--proxy] [--proxy-type socks5|http] [--proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]",
     "      [--proxy-profile-id id|# | --proxy-profile-name name|#] [--json]",
     "  dbx proxies list [--json]",
-    "  dbx stats <connection|#|range> [--schema name] [--database name] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx report <connection|#|range> [--schema name] [--database name] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx stats <connection|#|range> [--schema name] [--database name] [--timeout 60s] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx report <connection|#|range> [--schema name] [--database name] [--timeout 60s] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
     "  dbx schema list <connection|#|range> [--schema name] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
     "  dbx schema describe <connection|#|range> <table> [--schema name] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
     "  dbx query <connection|#|range> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
