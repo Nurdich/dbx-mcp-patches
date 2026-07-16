@@ -1,5 +1,74 @@
 # Update Log
 
+## 2026-07-17 — CLI 参数短别名
+
+常用长选项增加单字母短别名，`dbx help` 与 README 统一为 `-x, --long` 格式。
+
+### 别名表
+
+| 短 | 长 | 说明 | 冲突处理 |
+|----|-----|------|----------|
+| `-j` | `--json` | JSON 输出 | 新增 |
+| `-q` | `--quiet` | 关闭 stderr 进度 | 已有 |
+| `-v` | `--verbose` | 额外细节 | 已有 |
+| `-P [n]` | `--parallel [n]` | 并行批量 | 已有 |
+| `-d NAME` | `--database` | 目标库 | 新增 |
+| `-s NAME` | `--schema` | 目标 schema | 新增 |
+| `-t DUR` | `--timeout` | 查询超时 | 新增 |
+| `-H HOST` | `--proxy-host` | 代理主机（connections add） | `-h` 已用于 help |
+| `-o PATH` | `--output` | 报告输出路径（report） | 已有（report save） |
+| `-n` | `--no-save` | 跳过报告保存 | 新增 |
+| `-h` | `--help` | 帮助 | 已有 |
+| `-V` | `--version` | 版本 | 已有 |
+
+**仍为长选项-only：** `--file`、`--limit`、`--format`、`--allow-writes`、`--proxy`、`--name`、`--type`、`--host`、`--port` 等（避免与 `-p`/`-f`/`-t` 等冲突或语义不清）。
+
+### 修改文件
+
+- `packages/cli/src/cli.ts` — `parseFlags`、`usage()`、错误路径 `-j` 识别
+- `packages/cli/README.md`
+- `packages/cli/dist/cli.js`（同步）
+
+---
+
+## 2026-07-17 — `dbx report` 默认保存到文件
+
+### 变更摘要
+
+`dbx report` 现在**默认将报告写入文件**，同时仍完整输出到 stdout；保存路径提示输出到 stderr（`[dbx] Report saved: ...`）。
+
+### 默认路径
+
+| 模式 | 路径 |
+|------|------|
+| 单连接 | `{DBX app data}/reports/dbx-report-{connection}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
+| 批量（如 `23-50`） | `{DBX app data}/reports/dbx-report-batch-{timestamp}/dbx-report-{connection}-{scope}.md`（每个成功连接一个文件） |
+| `--json` | 同上，扩展名 `.json` |
+
+`DBX app data` = `dbx doctor` 中的 App data directory（可用 `DBX_DATA_DIR` 覆盖）。
+
+### 新增 CLI 标志
+
+| 标志 | 说明 |
+|------|------|
+| `--no-save` | 跳过文件写入（仅 stdout） |
+| `--output` / `-o` | 单连接：指定输出文件；批量：指定输出目录 |
+
+### 修改文件
+
+- `packages/node-core/src/database-report.ts` — 路径/文件名 helper
+- `packages/cli/src/cli.ts` — 默认保存、`--no-save`、`-o`
+- `packages/cli/README.md`
+- `packages/mcp-server/src/index.ts` — 工具描述注明 CLI 默认保存
+
+### 已安装 dist（手动同步）
+
+- `packages/node-core/dist/database-report.js`、`.d.ts`
+- `packages/cli/dist/cli.js`、`.d.ts`
+- `G:\usr\local\node_modules\@dbx-app\cli\dist\`
+
+---
+
 ## 2026-07-17 — 批量并行：遇错继续 + 修复连接池/日志串线
 
 ### 问题 1：批量遇错即停

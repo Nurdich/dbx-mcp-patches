@@ -1,8 +1,10 @@
+import { join } from "node:path";
 import type { Backend } from "./backend.js";
 import type { ConnectionConfig } from "./connections.js";
 import type { QueryResult } from "./database.js";
 import { withConnectionStage } from "./connection-log.js";
 import { formatCell, mdTable } from "./format.js";
+import { appDataDir } from "./paths.js";
 import {
   DatabaseStatsError,
   buildCatalogStatsSql,
@@ -241,4 +243,56 @@ export async function fetchDatabaseReport(backend: Backend, config: ConnectionCo
 
   return parts.join("\n");
   });
+}
+
+export type ReportSaveExtension = "md" | "json";
+
+export interface ReportSavePathOptions {
+  connectionName: string;
+  database?: string;
+  schema?: string;
+  extension: ReportSaveExtension;
+  timestamp?: string;
+}
+
+export function sanitizeReportFilenamePart(value: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return sanitized || "default";
+}
+
+export function reportTimestamp(date = new Date()): string {
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+export function defaultReportsDir(): string {
+  return join(appDataDir(), "reports");
+}
+
+export function reportScopeLabel(database?: string, schema?: string): string {
+  return database?.trim() || schema?.trim() || "default";
+}
+
+export function buildReportSavePath(options: ReportSavePathOptions): string {
+  const timestamp = options.timestamp ?? reportTimestamp();
+  const scope = sanitizeReportFilenamePart(reportScopeLabel(options.database, options.schema));
+  const filename = `dbx-report-${sanitizeReportFilenamePart(options.connectionName)}-${scope}-${timestamp}.${options.extension}`;
+  return join(defaultReportsDir(), filename);
+}
+
+export function buildBatchReportDir(timestamp?: string): string {
+  return join(defaultReportsDir(), `dbx-report-batch-${timestamp ?? reportTimestamp()}`);
+}
+
+export function buildBatchReportSavePath(
+  dir: string,
+  options: Omit<ReportSavePathOptions, "timestamp">,
+): string {
+  const scope = sanitizeReportFilenamePart(reportScopeLabel(options.database, options.schema));
+  const filename = `dbx-report-${sanitizeReportFilenamePart(options.connectionName)}-${scope}.${options.extension}`;
+  return join(dir, filename);
 }

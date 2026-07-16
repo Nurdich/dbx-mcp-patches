@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, extname } from "node:path";
 import {
   BRIDGE_REQUIRED_TYPES,
   buildSchemaContext,
@@ -11,6 +12,10 @@ import {
   evaluateSqlSafety,
   fetchDatabaseStats,
   fetchDatabaseReport,
+  buildBatchReportDir,
+  buildBatchReportSavePath,
+  buildReportSavePath,
+  reportTimestamp,
   findProxyProfile,
   findProxyProfilesByName,
   formatSchemaContext,
@@ -147,6 +152,8 @@ interface ParsedFlags {
   quiet: boolean;
   verbose: boolean;
   parallel?: number;
+  noSave: boolean;
+  output?: string;
 }
 
 export async function runCli(argv: string[], options: CliRunOptions = {}): Promise<CliRunResult> {
@@ -455,16 +462,20 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         `${connectionBatchHeading(configs[i], i + 1, configs.length)}${r.ok ? r.value : formatBatchErrorBody(configs[i], r.error)}`,
       );
       if (flags.format === "json") {
+        let result: CliRunResult;
         if (configs.length === 1) {
-          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
-          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+          if (batchResults[0]!.ok) result = succeedJson(jsonResults[0]);
+          else result = finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        } else {
+          result = finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
         }
-        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
+        return appendReportSaveNotice(result, await saveReportFiles(flags, configs, batchResults, jsonResults));
       }
       if (flags.format === "csv") {
         throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx report.");
       }
-      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
+      const result = finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
+      return appendReportSaveNotice(result, await saveReportFiles(flags, configs, batchResults, jsonResults));
     }
 
     if (args[0] === "schema" && args[1] === "list") {
@@ -701,7 +712,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         : typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
           ? error.code
           : "ERROR";
-    const wantsJson = argv.includes("--json");
+    const wantsJson = argv.includes("--json") || argv.includes("-j");
     return failed(code, message, wantsJson);
   } finally {
     popConnectionLog();
@@ -726,6 +737,7 @@ function parseFlags(argv: string[]): ParsedFlags {
     version: false,
     quiet: false,
     verbose: false,
+    noSave: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -734,7 +746,7 @@ function parseFlags(argv: string[]): ParsedFlags {
       args.push(...argv.slice(i + 1));
       break;
     }
-    if (arg === "--json") {
+    if (arg === "--json" || arg === "-j") {
       flags.json = true;
       flags.format = "json";
     } else if (arg === "--format") flags.format = parseFormat(readOptionValue(argv, ++i, "--format"));
@@ -751,12 +763,12 @@ function parseFlags(argv: string[]): ParsedFlags {
         flags.parallel = DEFAULT_PARALLEL_CONCURRENCY;
       }
     }
-    else if (arg === "--schema") flags.schema = readOptionValue(argv, ++i, "--schema");
-    else if (arg === "--database") flags.database = readOptionValue(argv, ++i, "--database");
+    else if (arg === "--schema" || arg === "-s") flags.schema = readOptionValue(argv, ++i, "--schema");
+    else if (arg === "--database" || arg === "-d") flags.database = readOptionValue(argv, ++i, "--database");
     else if (arg === "--tables") flags.tables = splitCsv(readOptionValue(argv, ++i, "--tables"));
     else if (arg === "--max-tables") flags.maxTables = parsePositiveInt(readOptionValue(argv, ++i, "--max-tables"), "--max-tables");
     else if (arg === "--limit") flags.maxRows = parsePositiveInt(readOptionValue(argv, ++i, "--limit"), "--limit");
-    else if (arg === "--timeout") flags.timeoutMs = parseDurationMs(readOptionValue(argv, ++i, "--timeout"), "--timeout");
+    else if (arg === "--timeout" || arg === "-t") flags.timeoutMs = parseDurationMs(readOptionValue(argv, ++i, "--timeout"), "--timeout");
     else if (arg === "--file") flags.file = readOptionValue(argv, ++i, "--file");
     else if (arg === "--allow-writes") flags.allowWrites = true;
     else if (arg === "--allow-dangerous-sql") flags.allowDangerous = true;
@@ -770,12 +782,14 @@ function parseFlags(argv: string[]): ParsedFlags {
     else if (arg === "--driver-profile") flags.driverProfile = readOptionValue(argv, ++i, "--driver-profile");
     else if (arg === "--proxy") flags.proxy = true;
     else if (arg === "--proxy-type") flags.proxyType = parseProxyType(readOptionValue(argv, ++i, "--proxy-type"));
-    else if (arg === "--proxy-host") flags.proxyHost = readOptionValue(argv, ++i, "--proxy-host");
+    else if (arg === "--proxy-host" || arg === "-H") flags.proxyHost = readOptionValue(argv, ++i, "--proxy-host");
     else if (arg === "--proxy-port") flags.proxyPort = parsePositiveInt(readOptionValue(argv, ++i, "--proxy-port"), "--proxy-port");
     else if (arg === "--proxy-username") flags.proxyUsername = readOptionValue(argv, ++i, "--proxy-username");
     else if (arg === "--proxy-password") flags.proxyPassword = readOptionValue(argv, ++i, "--proxy-password");
     else if (arg === "--proxy-profile-id") flags.proxyProfileId = readOptionValue(argv, ++i, "--proxy-profile-id");
     else if (arg === "--proxy-profile-name") flags.proxyProfileName = readOptionValue(argv, ++i, "--proxy-profile-name");
+    else if (arg === "--no-save" || arg === "-n") flags.noSave = true;
+    else if (arg === "--output" || arg === "-o") flags.output = readOptionValue(argv, ++i, arg);
     else if (arg.startsWith("-")) throw new CliError("UNKNOWN_OPTION", `Unknown option: ${arg}`);
     else args.push(arg);
   }
@@ -938,6 +952,93 @@ function joinBatchOutput(parts: string[]): string {
   return parts.join(CONNECTION_BATCH_SEPARATOR);
 }
 
+function appendReportSaveNotice(result: CliRunResult, savedPaths: string[]): CliRunResult {
+  if (savedPaths.length === 0) return result;
+  const notice = savedPaths.map((path) => `[dbx] Report saved: ${path}`).join("\n");
+  return { ...result, stderr: `${result.stderr}${notice}\n` };
+}
+
+function reportSaveExtension(format: ParsedFlags["format"]): "md" | "json" {
+  return format === "json" ? "json" : "md";
+}
+
+function looksLikeReportOutputFile(path: string): boolean {
+  const ext = extname(path).toLowerCase();
+  return ext === ".md" || ext === ".json";
+}
+
+async function saveReportFiles(
+  flags: ParsedFlags,
+  configs: ConnectionConfig[],
+  batchResults: BatchItemResult<string>[],
+  jsonResults: unknown[],
+): Promise<string[]> {
+  if (flags.noSave) return [];
+
+  const extension = reportSaveExtension(flags.format);
+  const timestamp = reportTimestamp();
+  const savedPaths: string[] = [];
+
+  if (configs.length === 1) {
+    const result = batchResults[0];
+    if (!result?.ok) return [];
+
+    const config = configs[0]!;
+    const outputPath = flags.output ?? buildReportSavePath({
+      connectionName: config.name,
+      database: flags.database ?? config.database,
+      schema: flags.schema,
+      extension,
+      timestamp,
+    });
+    const content =
+      flags.format === "json"
+        ? `${JSON.stringify(jsonResults[0], null, 2)}\n`
+        : result.value.endsWith("\n")
+          ? result.value
+          : `${result.value}\n`;
+
+    await mkdir(dirname(outputPath), { recursive: true });
+    await writeFile(outputPath, content, "utf-8");
+    savedPaths.push(outputPath);
+    return savedPaths;
+  }
+
+  if (flags.output && looksLikeReportOutputFile(flags.output)) {
+    throw new CliError(
+      "INVALID_OPTION",
+      "Batch dbx report requires --output to be a directory (one file per connection). Omit --output to use the default batch folder.",
+    );
+  }
+
+  const batchDir = flags.output ?? buildBatchReportDir(timestamp);
+  await mkdir(batchDir, { recursive: true });
+
+  for (let i = 0; i < configs.length; i++) {
+    const result = batchResults[i];
+    if (!result?.ok) continue;
+
+    const config = configs[i]!;
+    const outputPath = buildBatchReportSavePath(batchDir, {
+      connectionName: config.name,
+      database: flags.database ?? config.database,
+      schema: flags.schema,
+      extension,
+    });
+    const content =
+      flags.format === "json"
+        ? `${JSON.stringify(jsonResults[i], null, 2)}\n`
+        : result.value.endsWith("\n")
+          ? result.value
+          : `${result.value}\n`;
+
+    await writeFile(outputPath, content, "utf-8");
+    savedPaths.push(outputPath);
+  }
+
+  return savedPaths;
+}
+
 async function findConnectionOrThrow(backend: Backend, ref: string) {
   const connections = await backend.loadConnections();
   try {
@@ -971,23 +1072,35 @@ function fail(code: string, message: string, json: boolean, stderr = ""): CliRun
 function usage() {
   return [
     "Usage:",
-    "  dbx doctor [--json]",
-    "  dbx capabilities [--json]",
-    "  dbx connections list [--json]",
-    "  dbx connections add --name <name> --type <db_type> --host <host> [--port n] [--username u] [--password p] [--database db] [--ssl] [--driver-profile x]",
-    "      [--proxy] [--proxy-type socks5|http] [--proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]",
-    "      [--proxy-profile-id id|# | --proxy-profile-name name|#] [--json]",
-    "  dbx proxies list [--json]",
-    "  dbx stats <connection|#|range> [--schema name] [--database name] [--timeout 60s] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx report <connection|#|range> [--schema name] [--database name] [--timeout 60s] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx schema list <connection|#|range> [--schema name] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx schema describe <connection|#|range> <table> [--schema name] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx query <connection|#|range> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx context <connection|#|range> [--schema name] [--tables a,b] [--max-tables n] [--parallel|-P [n]] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx open <connection|#|range> <table> [--schema name] [--database name] [--parallel|-P [n]] [--json]",
+    "  dbx doctor [-j, --json]",
+    "  dbx capabilities [-j, --json]",
+    "  dbx connections list [-j, --json]",
+    "  dbx connections add --name <name> --type <db_type> --host <host> [--port n] [--username u] [--password p] [-d, --database db] [--ssl] [--driver-profile x]",
+    "      [--proxy] [--proxy-type socks5|http] [-H, --proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]",
+    "      [--proxy-profile-id id|# | --proxy-profile-name name|#] [-j, --json]",
+    "  dbx proxies list [-j, --json]",
+    "  dbx stats <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
+    "  dbx report <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json] [-n, --no-save] [-o, --output path]",
+    "  dbx schema list <connection|#|range> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
+    "  dbx schema describe <connection|#|range> <table> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
+    "  dbx query <connection|#|range> <sql> [--file path] [--limit n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
+    "  dbx context <connection|#|range> [-s, --schema name] [--tables a,b] [--max-tables n] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
+    "  dbx open <connection|#|range> <table> [-s, --schema name] [-d, --database name] [-P, --parallel [n]] [-j, --json]",
+    "",
+    "Global short options:",
+    "  -j, --json           JSON output",
+    "  -q, --quiet          Suppress progress on stderr",
+    "  -v, --verbose        Extra progress detail (e.g. SQL text)",
+    "  -P, --parallel [n]   Concurrent batch (default concurrency 15; -P 3 limits to 3)",
+    "  -d, --database NAME  Target database",
+    "  -s, --schema NAME    Target schema",
+    "  -t, --timeout DUR    Query timeout (e.g. 500ms, 60s, 1m)",
+    "  -H, --proxy-host H   Proxy host (connections add)",
+    "  -o, --output PATH    Report output file or batch directory (dbx report)",
+    "  -n, --no-save        Skip saving report to file (dbx report)",
     "",
     "Connection range (non-interactive CLI only): 1-15, 1..15, 1:15, #1-#15, 23-50 — any valid index range (no span cap).",
-    `Parallel batch: --parallel or -P runs connections concurrently (default concurrency ${DEFAULT_PARALLEL_CONCURRENCY}); -P 3 limits to 3 at a time. Omit for sequential.`,
+    `Parallel batch: -P or --parallel runs connections concurrently (default ${DEFAULT_PARALLEL_CONCURRENCY}); -P 3 limits to 3 at a time. Omit for sequential.`,
   ].join("\n");
 }
 

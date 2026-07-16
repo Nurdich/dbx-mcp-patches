@@ -72,8 +72,9 @@ Range syntax: `1-15`, `1..15`, `1:15`, `#1-#15`, `23-50`. **No span cap** — an
 Catalog-based overview (table metadata, size/row estimates) matching MCP `dbx_get_database_stats`:
 
 ```bash
-dbx stats my-postgres --schema public
-dbx stats my-mysql --json
+dbx stats my-postgres -s public
+dbx stats my-mysql -j
+dbx stats 23-50 -P 3 -t 120s -d mydb
 ```
 
 Supports MySQL/MariaDB family, PostgreSQL family, SQLite/rqlite, MongoDB (collStats), Redis (INFO/DBSIZE), and generic `information_schema` fallback for other SQL engines.
@@ -83,11 +84,48 @@ Supports MySQL/MariaDB family, PostgreSQL family, SQLite/rqlite, MongoDB (collSt
 Comprehensive catalog-based report matching MCP `dbx_get_database_report`:
 
 ```bash
-dbx report my-postgres --schema public
-dbx report 1 --json
+dbx report my-postgres -s public
+dbx report 1 -j
+dbx report 23-50 -P 3              # batch: one saved file per connection
+dbx report my-postgres -n          # stdout only, skip file write
+dbx report my-postgres -o ./out.md # custom output path
 ```
 
 Report sections: Database Summary, Tables (sorted by row estimate), Column Comments, Indexes. All instant catalog data — no `COUNT(*)` queries.
+
+**Default save:** Reports are written to a file by default (full report still printed to stdout). Save notice goes to stderr.
+
+| Mode | Default path |
+|------|----------------|
+| Single connection | `{DBX app data}/reports/dbx-report-{connection}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
+| Batch (`1-15`, `23-50`, …) | `{DBX app data}/reports/dbx-report-batch-{timestamp}/dbx-report-{connection}-{scope}.md` (one file per successful connection) |
+| `--json` | Same pattern with `.json` extension |
+
+`DBX app data` is the DBX data directory (`dbx doctor` → App data directory; override with `DBX_DATA_DIR`).
+
+| Flag | Description |
+|------|-------------|
+| `-n, --no-save` | Skip writing report file(s) |
+| `-o, --output` | Single: output file path. Batch: output directory (required when overriding batch save location) |
+
+## Short options
+
+| Short | Long | Description |
+|-------|------|-------------|
+| `-j` | `--json` | JSON output |
+| `-q` | `--quiet` | Suppress progress on stderr |
+| `-v` | `--verbose` | Extra detail (e.g. SQL text) |
+| `-P [n]` | `--parallel [n]` | Concurrent batch (default 15) |
+| `-d NAME` | `--database` | Target database |
+| `-s NAME` | `--schema` | Target schema |
+| `-t DUR` | `--timeout` | Query timeout (`60s`, `1m`) |
+| `-H HOST` | `--proxy-host` | Proxy host (`connections add`) |
+| `-o PATH` | `--output` | Report file/dir (`dbx report`) |
+| `-n` | `--no-save` | Skip report file save |
+| `-h` | `--help` | Show help |
+| `-V` | `--version` | Show version |
+
+Long-only (no short alias): `--file`, `--limit`, `--format`, `--allow-writes`, connection-add fields, etc.
 
 ## Environment
 
@@ -101,7 +139,7 @@ Report sections: Database Summary, Tables (sorted by row estimate), Column Comme
 ## Output formats
 
 - Default: Markdown-style tables on stdout
-- `--json` or `--format json`: JSON output
+- `-j, --json` or `--format json`: JSON output
 - `--format csv`: CSV (where supported)
 
 Errors go to stderr with exit code `1`.
@@ -157,5 +195,46 @@ dbx query 1 "select 1"   # 单连接不变
 ### 数据库状态概览
 
 ```bash
-dbx stats my-postgres --schema public
+dbx stats my-postgres -s public
+dbx report 1 -j -n
+dbx report 23-50 -P 3 -o ./reports/batch/
 ```
+
+### 短选项
+
+| 短 | 长 | 说明 |
+|----|-----|------|
+| `-j` | `--json` | JSON 输出 |
+| `-q` | `--quiet` | 关闭 stderr 进度 |
+| `-v` | `--verbose` | 额外细节（如 SQL） |
+| `-P [n]` | `--parallel [n]` | 并行批量（默认 15） |
+| `-d` | `--database` | 目标库 |
+| `-s` | `--schema` | 目标 schema |
+| `-t` | `--timeout` | 查询超时 |
+| `-o` | `--output` | 报告输出路径（`dbx report`） |
+| `-n` | `--no-save` | 不保存报告文件 |
+
+`dbx report` 默认保存到 `./reports/`，stderr 显示路径；`-n` 跳过，`-o` 自定义路径。
+
+### 数据库报告（`dbx report`）
+
+与 MCP `dbx_get_database_report` 对齐。**默认保存**到文件，同时完整输出到 stdout；保存路径提示在 stderr。
+
+```bash
+dbx report my-postgres -s public
+dbx report 1 -j
+dbx report 23-50 -P 3              # 批量：每个连接一个文件
+dbx report my-postgres -n         # 仅 stdout，不写文件
+dbx report my-postgres -o ./out.md  # 自定义输出路径
+```
+
+| 模式 | 默认路径 |
+|------|----------|
+| 单连接 | `{DBX 数据目录}/reports/dbx-report-{连接名}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
+| 批量 | `{DBX 数据目录}/reports/dbx-report-batch-{时间戳}/dbx-report-{连接名}-{scope}.md`（每个成功连接一个文件） |
+| `--json` | 同上，扩展名为 `.json` |
+
+| 标志 | 说明 |
+|------|------|
+| `--no-save` | 不写入文件 |
+| `--output` / `-o` | 单连接：输出文件；批量：输出目录 |
