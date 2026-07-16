@@ -1,5 +1,54 @@
 # Update Log
 
+## 2026-07-17 — CLI 批量范围并行执行（`--parallel` / `-P`）
+
+### 功能
+
+为批量序号/范围命令新增**并行模式**，在保持默认顺序执行的同时，可通过标志并发连接多个数据库。
+
+| 标志 | 说明 |
+|------|------|
+| （默认） | 顺序执行，一次一个连接 |
+| `--parallel` / `-P` | 并行，默认并发数 **5** |
+| `-P N` / `--parallel N` | 并行，最多 **N** 个并发（不超过批量大小） |
+
+### 适用命令
+
+`stats`、`report`、`query`、`schema list`、`schema describe`、`context`、`open`
+
+### 行为
+
+| 输出 | 行为 |
+|------|------|
+| stdout | 各连接结果以 `---` 分隔，**按原序号顺序**排列（非完成顺序） |
+| JSON | `{ connections: [...] }` 数组按 index 排序 |
+| stderr（并行） | 每行加 `[#N]` 前缀，避免交错混淆 |
+| stderr（顺序） | 无额外前缀，与原先一致 |
+
+### 示例
+
+```bash
+dbx stats 23-35              # 顺序
+dbx stats 23-35 --parallel   # 并行，默认 5 并发
+dbx stats 23-35 -P 3         # 并行，最多 3 并发
+```
+
+### 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `packages/cli/src/cli.ts` | `runConnectionBatch`、`--parallel`/`-P` 解析、7 个批量命令重构 |
+| `packages/cli/README.md` | 并行用法文档（中英文） |
+| `packages/cli/dist/cli.js` | 构建产物 |
+
+已同步至 `G:\usr\local\node_modules\@dbx-app\cli\dist\`
+
+### 范围校验（901e2364 修复，已存在）
+
+`parseListIndexRange` 按**跨度**限制（≤15 个连接），非结束序号 ≤15。`dbx stats 23-35` 可正常通过校验。
+
+---
+
 ## 2026-07-17 — 修复范围校验：按跨度而非结束序号限制
 
 ### 问题

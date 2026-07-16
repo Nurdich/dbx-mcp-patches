@@ -56,11 +56,16 @@ List output includes a `#` column (1-based index). Use a single index or a **ran
 dbx connections list
 dbx stats 1              # first connection
 dbx stats 1-15           # connections #1 through #15 (sequential)
+dbx stats 23-50          # any valid index range (sequential by default)
+dbx stats 23-50 --parallel   # same range, up to 15 concurrent (default)
+dbx stats 23-50 -P 3         # max 3 concurrent
 dbx report 3..5          # connections #3, #4, #5
 dbx query 2 "select 1"
 ```
 
-Range syntax: `1-15`, `1..15`, `1:15`, `#1-#15`. Max 15 connections per range (range size, not end index).
+Range syntax: `1-15`, `1..15`, `1:15`, `#1-#15`, `23-50`. **No span cap** — any valid start–end range is allowed. Use `--parallel` to limit simultaneous connections (default **15**), not range size.
+
+**Parallel batch:** add `--parallel` or `-P` to run multiple connections concurrently (default concurrency **15**). Use `-P N` to set the limit (capped at batch size). Without the flag, connections run **sequentially** (one at a time). Applies to `stats`, `report`, `query`, `schema list`, `schema describe`, `context`, and `open`. Stderr progress lines are prefixed with `[#N]` in parallel mode. stdout/JSON results stay in original index order, separated by `---`.
 
 ## `dbx stats`
 
@@ -139,11 +144,15 @@ dbx connections add --name prod --type postgres --host db.example.com --port 543
 
 ```bash
 dbx stats 1-15           # 依次对 #1–#15 执行 stats
+dbx stats 23-35 --parallel   # 并行，默认最多 5 个并发
+dbx stats 23-35 -P 3         # 最多 3 个并发
 dbx report 3..5          # #3、#4、#5
 dbx query 1 "select 1"   # 单连接不变
 ```
 
 范围语法：`1-15`、`1..15`、`1:15`、`#1-#15`。单次最多 15 个连接（按范围跨度计，结束序号无上限）。
+
+**并行批量：** 加 `--parallel` 或 `-P` 可并发执行多个连接（默认并发数 **5**）；`-P N` 指定上限（不超过批量大小）。不加标志时仍为**顺序**执行。适用于 `stats`、`report`、`query`、`schema list`、`schema describe`、`context`、`open`。并行模式下 stderr 进度行带 `[#N]` 前缀；stdout/JSON 结果仍按原序号排列，以 `---` 分隔。
 
 ### 数据库状态概览
 
