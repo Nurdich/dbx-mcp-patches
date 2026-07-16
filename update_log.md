@@ -1,5 +1,37 @@
 # Update Log
 
+## 2026-07-17 — 范围无跨度上限；15 = 默认并行并发数
+
+### 语义变更
+
+原先 `MAX_LIST_INDEX_RANGE_SIZE = 15` 限制单次范围跨度（如 `23-50` 报 28 > 15）。**15 现指 `--parallel` 默认并发数**，不再限制范围跨度。
+
+| 场景 | 行为 |
+|------|------|
+| `dbx stats 23-50` | 允许，28 个连接，**顺序**执行 |
+| `dbx stats 23-50 --parallel` | 28 个连接，**最多 15 并发**（默认） |
+| `dbx stats 23-50 -P 3` | 28 个连接，**最多 3 并发** |
+| 范围 > 100 | 允许，stderr 输出警告（不阻断） |
+
+### 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `packages/node-core/src/list-index.ts` | 删除 `MAX_LIST_INDEX_RANGE_SIZE` 跨度校验；新增 `DEFAULT_PARALLEL_CONCURRENCY=15`、`MAX_LIST_INDEX_RANGE_WARN_SIZE=100` |
+| `packages/cli/src/cli.ts` | 从 node-core 导入默认并发；大范围警告；usage 文案 |
+| `packages/cli/README.md` | 文档更新 |
+| dist 同步 | `packages/node-core/dist`、`packages/cli/dist`、`G:\usr\local\node_modules\@dbx-app\cli`、mcp-server node-core |
+
+### 示例
+
+```bash
+dbx stats 23-50              # 顺序，28 连接
+dbx stats 23-50 --parallel   # 并行，默认 15 并发
+dbx stats 23-50 -P 3         # 并行，3 并发
+```
+
+---
+
 ## 2026-07-17 — CLI 批量范围并行执行（`--parallel` / `-P`）
 
 ### 功能
@@ -9,7 +41,7 @@
 | 标志 | 说明 |
 |------|------|
 | （默认） | 顺序执行，一次一个连接 |
-| `--parallel` / `-P` | 并行，默认并发数 **5** |
+| `--parallel` / `-P` | 并行，默认并发数 **15** |
 | `-P N` / `--parallel N` | 并行，最多 **N** 个并发（不超过批量大小） |
 
 ### 适用命令
@@ -29,7 +61,7 @@
 
 ```bash
 dbx stats 23-35              # 顺序
-dbx stats 23-35 --parallel   # 并行，默认 5 并发
+dbx stats 23-35 --parallel   # 并行，默认 15 并发
 dbx stats 23-35 -P 3         # 并行，最多 3 并发
 ```
 
@@ -43,9 +75,9 @@ dbx stats 23-35 -P 3         # 并行，最多 3 并发
 
 已同步至 `G:\usr\local\node_modules\@dbx-app\cli\dist\`
 
-### 范围校验（901e2364 修复，已存在）
+### 范围校验
 
-`parseListIndexRange` 按**跨度**限制（≤15 个连接），非结束序号 ≤15。`dbx stats 23-35` 可正常通过校验。
+`parseListIndexRange` **不再限制范围跨度**。`15` 为 `--parallel` 默认并发数。超过 100 个连接时 CLI 输出警告（不阻断）。
 
 ---
 

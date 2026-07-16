@@ -1,8 +1,11 @@
 import type { ConnectionConfig } from "./connections.js";
 import type { TunnelProfile } from "./tunnel-profiles.js";
 
-/** Maximum number of connections in a single range batch. */
-export const MAX_LIST_INDEX_RANGE_SIZE = 15;
+/** Default concurrency when `--parallel` / `-P` is used without a numeric limit. */
+export const DEFAULT_PARALLEL_CONCURRENCY = 15;
+
+/** Soft warning threshold for large ranges (does not block). */
+export const MAX_LIST_INDEX_RANGE_WARN_SIZE = 100;
 
 export class ListIndexRangeError extends Error {
   readonly code = "INVALID_LIST_INDEX_RANGE";
@@ -26,6 +29,7 @@ export function parseListIndex(value: string): number | undefined {
 /**
  * Parse a single index or inclusive range: `1`, `#2`, `1-15`, `1..15`, `1:15`, `#1-#15`.
  * Returns undefined when the token is not numeric/range syntax (e.g. a connection name or UUID).
+ * Range span is not capped; use `--parallel` concurrency to limit simultaneous connections.
  */
 export function parseListIndexRange(value: string): number[] | undefined {
   const trimmed = value.trim();
@@ -48,12 +52,6 @@ export function parseListIndexRange(value: string): number[] | undefined {
   }
 
   const size = end - start + 1;
-  if (size > MAX_LIST_INDEX_RANGE_SIZE) {
-    throw new ListIndexRangeError(
-      `Range size must be <= ${MAX_LIST_INDEX_RANGE_SIZE}. Got ${size} (${start}-${end}).`,
-    );
-  }
-
   return Array.from({ length: size }, (_, i) => start + i);
 }
 
