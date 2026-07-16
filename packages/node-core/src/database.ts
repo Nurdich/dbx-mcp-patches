@@ -5,6 +5,13 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import {
+  connectionLog,
+  connectionStageError,
+  describeConnectionTarget,
+  logTransportLayers,
+  withConnectionStage,
+} from "./connection-log.js";
 import { sqlSafetyFromEnv } from "./sql-safety.js";
 import { isDirectQueryType } from "./diagnostics.js";
 import { bridgePortFilePath } from "./paths.js";
@@ -129,17 +136,23 @@ async function getPgPool(config: ConnectionConfig): Promise<import("pg").Pool> {
 
   const pg = await import("pg");
   const endpoint = await connectionEndpoint(config);
-  const pool = new pg.default.Pool({
-    connectionString: buildConnectionUrl(config, endpoint),
-    max: 3,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
-  });
-  pool.on("error", () => {});
-  const entry: PoolEntry = { type: "pg", pool, timer: setTimeout(() => {}, 0) };
-  pools.set(key, entry);
-  resetIdleTimer(key, entry);
-  return pool;
+  connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+  try {
+    const pool = new pg.default.Pool({
+      connectionString: buildConnectionUrl(config, endpoint),
+      max: 3,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000,
+    });
+    pool.on("error", () => {});
+    const entry: PoolEntry = { type: "pg", pool, timer: setTimeout(() => {}, 0) };
+    pools.set(key, entry);
+    resetIdleTimer(key, entry);
+    connectionLog("Database connection pool ready");
+    return pool;
+  } catch (error) {
+    throw connectionStageError("Database connection", error);
+  }
 }
 
 async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/promise").Pool> {
@@ -152,19 +165,25 @@ async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/pr
 
   const mysql = await import("mysql2/promise");
   const endpoint = await connectionEndpoint(config);
-  const poolOptions: import("mysql2/promise").PoolOptions = {
-    uri: buildConnectionUrl(config, endpoint),
-    connectionLimit: 3,
-    idleTimeout: 30_000,
-    connectTimeout: 10_000,
-  };
-  const tls = await mysqlTlsOptions(config);
-  if (tls) poolOptions.ssl = tls;
-  const pool = mysql.default.createPool(poolOptions);
-  const entry: PoolEntry = { type: "mysql", pool, timer: setTimeout(() => {}, 0) };
-  pools.set(key, entry);
-  resetIdleTimer(key, entry);
-  return pool;
+  connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+  try {
+    const poolOptions: import("mysql2/promise").PoolOptions = {
+      uri: buildConnectionUrl(config, endpoint),
+      connectionLimit: 3,
+      idleTimeout: 30_000,
+      connectTimeout: 10_000,
+    };
+    const tls = await mysqlTlsOptions(config);
+    if (tls) poolOptions.ssl = tls;
+    const pool = mysql.default.createPool(poolOptions);
+    const entry: PoolEntry = { type: "mysql", pool, timer: setTimeout(() => {}, 0) };
+    pools.set(key, entry);
+    resetIdleTimer(key, entry);
+    connectionLog("Database connection pool ready");
+    return pool;
+  } catch (error) {
+    throw connectionStageError("Database connection", error);
+  }
 }
 
 type ProxyLayer = { type: "proxy" } & ProxyTunnelConfig;
@@ -183,34 +202,44 @@ function hasDirectRedisSupport(config: ConnectionConfig): boolean {
 }
 
 async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: string; port: number }> {
+  logTransportLayers(config);
   const proxy = firstProxyLayer(config);
   if (!proxy) return { host: config.host, port: config.port };
   const existing = proxyTunnels.get(config.id);
-  if (existing) return { host: "127.0.0.1", port: existing.port };
+  if (existing) {
+    connectionLog(`Reusing proxy tunnel on 127.0.0.1:${existing.port}`, { verboseOnly: true });
+    return { host: "127.0.0.1", port: existing.port };
+  }
 
-  const sockets = new Set<Socket>();
-  const server = createServer((inbound) => {
-    sockets.add(inbound);
-    inbound.once("close", () => sockets.delete(inbound));
-    connectViaProxy(config, proxy)
-      .then((outbound) => {
-        sockets.add(outbound);
-        outbound.once("close", () => sockets.delete(outbound));
-        inbound.pipe(outbound);
-        outbound.pipe(inbound);
-      })
-      .catch(() => inbound.destroy());
-  });
-  const port = await new Promise<number>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (address && typeof address === "object") resolve(address.port);
-      else reject(new Error("Failed to bind proxy tunnel"));
+  connectionLog(`Starting local proxy tunnel to ${config.host}:${config.port}...`);
+  try {
+    const sockets = new Set<Socket>();
+    const server = createServer((inbound) => {
+      sockets.add(inbound);
+      inbound.once("close", () => sockets.delete(inbound));
+      connectViaProxy(config, proxy)
+        .then((outbound) => {
+          sockets.add(outbound);
+          outbound.once("close", () => sockets.delete(outbound));
+          inbound.pipe(outbound);
+          outbound.pipe(inbound);
+        })
+        .catch(() => inbound.destroy());
     });
-  });
-  proxyTunnels.set(config.id, { server, port, sockets });
-  return { host: "127.0.0.1", port };
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (address && typeof address === "object") resolve(address.port);
+        else reject(new Error("Failed to bind proxy tunnel"));
+      });
+    });
+    proxyTunnels.set(config.id, { server, port, sockets });
+    connectionLog(`Proxy tunnel ready on 127.0.0.1:${port}`);
+    return { host: "127.0.0.1", port };
+  } catch (error) {
+    throw connectionStageError("Proxy connection", error);
+  }
 }
 
 export function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; port: number }): string {
@@ -688,30 +717,33 @@ interface MongoDocumentResult {
 }
 
 async function bridgeDataRequest<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  let bridgeUrl: string;
-  try {
-    const port = (await readFile(bridgePortFilePath(), "utf-8")).trim();
-    bridgeUrl = `http://127.0.0.1:${port}`;
-  } catch {
-    throw new Error("DBX desktop app is not running. This database type requires DBX to be running for query execution.");
-  }
-  const res = await fetch(`${bridgeUrl}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    let errorMsg: string;
+  return withConnectionStage("Connecting to DBX desktop bridge", async () => {
+    let bridgeUrl: string;
     try {
-      const parsed = JSON.parse(errBody);
-      errorMsg = parsed.error || errBody;
+      const port = (await readFile(bridgePortFilePath(), "utf-8")).trim();
+      bridgeUrl = `http://127.0.0.1:${port}`;
+      connectionLog(`Bridge endpoint: ${bridgeUrl}`, { verboseOnly: true });
     } catch {
-      errorMsg = errBody;
+      throw new Error("DBX desktop app is not running. This database type requires DBX to be running for query execution.");
     }
-    throw new Error(errorMsg || `Bridge request failed: ${res.status}`);
-  }
-  return res.json() as Promise<T>;
+    const res = await fetch(`${bridgeUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      let errorMsg: string;
+      try {
+        const parsed = JSON.parse(errBody);
+        errorMsg = parsed.error || errBody;
+      } catch {
+        errorMsg = errBody;
+      }
+      throw new Error(errorMsg || `Bridge request failed: ${res.status}`);
+    }
+    return res.json() as Promise<T>;
+  });
 }
 
 function resolveMaxRows(options?: QueryOptions): number {
@@ -805,7 +837,9 @@ function quoteSqliteIdentifier(identifier: string): string {
 }
 
 function sqliteQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): QueryResult {
-  const db = new Database(sqlitePath(config), { readonly: !sqlSafetyFromEnv().allowWrites });
+  const path = sqlitePath(config);
+  connectionLog(`Opening SQLite database ${path}`);
+  const db = new Database(path, { readonly: !sqlSafetyFromEnv().allowWrites });
   try {
     const stmt = db.prepare(sql);
     if (stmt.reader) {
@@ -861,19 +895,21 @@ async function rqliteRequest(config: ConnectionConfig, endpoint: "/db/query" | "
 }
 
 export async function executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
-  if (hasActiveSshLayer(config)) {
-    const result = await withTimeout(
-      bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
-        connection_id: config.id,
-        connection_name: config.name,
-        database: config.database || "",
-        sql,
-      }),
-      resolveTimeoutMs(options),
-    );
-    return convertBridgeQueryResult(result, options);
-  }
-  if (config.db_type === "mongodb") {
+  return withConnectionStage("Executing query", async () => {
+    if (hasActiveSshLayer(config)) {
+      connectionLog("SSH tunnel active; routing query via DBX desktop bridge");
+      const result = await withTimeout(
+        bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+          connection_id: config.id,
+          connection_name: config.name,
+          database: config.database || "",
+          sql,
+        }),
+        resolveTimeoutMs(options),
+      );
+      return convertBridgeQueryResult(result, options);
+    }
+    if (config.db_type === "mongodb") {
     const version = parseMongoVersionCommand(sql);
     if (version) {
       const result = await withTimeout(mongoServerVersion(config), resolveTimeoutMs(options));
@@ -930,20 +966,21 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     throw new Error(
       'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
     );
-  }
-  if (isDirectQueryType(config.db_type)) {
-    return query(config, sql, undefined, options);
-  }
-  const result = await withTimeout(
-    bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
-      connection_id: config.id,
-      connection_name: config.name,
-      database: config.database || "",
-      sql,
-    }),
-    resolveTimeoutMs(options),
-  );
-  return convertBridgeQueryResult(result, options);
+    }
+    if (isDirectQueryType(config.db_type)) {
+      return query(config, sql, undefined, options);
+    }
+    const result = await withTimeout(
+      bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+        connection_id: config.id,
+        connection_name: config.name,
+        database: config.database || "",
+        sql,
+      }),
+      resolveTimeoutMs(options),
+    );
+    return convertBridgeQueryResult(result, options);
+  });
 }
 
 export async function executeRedisCommand(config: ConnectionConfig, db: number, command: string, options?: RedisCommandOptions): Promise<RedisCommandResult> {
@@ -966,38 +1003,42 @@ export async function executeRedisCommand(config: ConnectionConfig, db: number, 
 }
 
 async function executeRedisCommandDirect(config: ConnectionConfig, db: number, commandText: string, options?: RedisCommandOptions): Promise<RedisCommandResult> {
-  const argv = parseRedisCommandArgv(commandText);
-  const command = argv[0].toUpperCase();
-  const safety = classifyRedisCommand(command) as RedisCommandSafety;
-  if (!options?.skipSafetyCheck && safety === "blocked") {
-    throw new Error(`Redis command is blocked for safety: ${command}`);
-  }
+  return withConnectionStage("Connecting to Redis", async () => {
+    const argv = parseRedisCommandArgv(commandText);
+    const command = argv[0].toUpperCase();
+    const safety = classifyRedisCommand(command) as RedisCommandSafety;
+    if (!options?.skipSafetyCheck && safety === "blocked") {
+      throw new Error(`Redis command is blocked for safety: ${command}`);
+    }
 
-  const { Redis } = await import("ioredis");
-  const endpoint = await connectionEndpoint(config);
-  const tls = await redisTlsOptions(config);
-  const client = new Redis({
-    host: endpoint.host,
-    port: endpoint.port,
-    username: config.username || undefined,
-    password: config.password || undefined,
-    db,
-    tls,
-    lazyConnect: true,
-    enableReadyCheck: false,
-    maxRetriesPerRequest: 0,
-    enableOfflineQueue: false,
-    connectTimeout: Math.min(resolveTimeoutMs(options), 10_000),
-    commandTimeout: resolveTimeoutMs(options),
+    const { Redis } = await import("ioredis");
+    const endpoint = await connectionEndpoint(config);
+    connectionLog(`Connecting to Redis @ ${endpoint.host}:${endpoint.port} (db ${db})`);
+    const tls = await redisTlsOptions(config);
+    const client = new Redis({
+      host: endpoint.host,
+      port: endpoint.port,
+      username: config.username || undefined,
+      password: config.password || undefined,
+      db,
+      tls,
+      lazyConnect: true,
+      enableReadyCheck: false,
+      maxRetriesPerRequest: 0,
+      enableOfflineQueue: false,
+      connectTimeout: Math.min(resolveTimeoutMs(options), 10_000),
+      commandTimeout: resolveTimeoutMs(options),
+    });
+
+    try {
+      await client.connect();
+      connectionLog(`Executing Redis command: ${command}`);
+      const value = await client.call(command, ...argv.slice(1));
+      return { command, safety, value: redisValueToJson(value) };
+    } finally {
+      client.disconnect();
+    }
   });
-
-  try {
-    await client.connect();
-    const value = await client.call(command, ...argv.slice(1));
-    return { command, safety, value: redisValueToJson(value) };
-  } finally {
-    client.disconnect();
-  }
 }
 
 async function redisTlsOptions(config: ConnectionConfig): Promise<import("node:tls").ConnectionOptions | undefined> {
@@ -1038,7 +1079,8 @@ function redisTextToJson(value: string): unknown {
 }
 
 export async function listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]> {
-  if (config.db_type === "mongodb") {
+  return withConnectionStage("Listing tables", async () => {
+    if (config.db_type === "mongodb") {
     const collections = await bridgeDataRequest<CollectionListEntry[]>("/data/mongo/list-collections", {
       connection_id: config.id,
       connection_name: config.name,
@@ -1067,10 +1109,12 @@ export async function listTables(config: ConnectionConfig, schema?: string): Pro
     result = await query(config, `SELECT table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`, [schema || "public"]);
   }
   return result.rows.map((r) => ({ name: String(r.name || r.NAME), type: String(r.type || r.TYPE || "TABLE") }));
+  });
 }
 
 export async function describeTable(config: ConnectionConfig, table: string, schema?: string): Promise<ColumnInfo[]> {
-  if (config.db_type === "mongodb") {
+  return withConnectionStage(`Describing table ${table}`, async () => {
+    if (config.db_type === "mongodb") {
     const result = await mongoFindDocuments(config, table, 0, 20, "{}");
     return inferMongoColumns(result.documents);
   }
@@ -1109,6 +1153,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
     result = await query(config, POSTGRES_DESCRIBE_TABLE_COMPAT_SQL, [schema || "public", table]);
   }
   return result.rows.map((row) => mapDescribeTableColumn(row, normalizeEnumValues(row.enum_values)));
+  });
 }
 
 async function mongoFindDocuments(config: ConnectionConfig, collection: string, skip: number, limit: number, filter: string, projection?: string, sort?: string): Promise<MongoDocumentResult> {

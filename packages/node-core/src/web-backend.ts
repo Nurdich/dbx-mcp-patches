@@ -1,4 +1,5 @@
 import type { ConnectionConfig } from "./connections.js";
+import { connectionLog, describeConnectionTarget, logTransportLayers, withConnectionStage } from "./connection-log.js";
 import type { TableInfo, ColumnInfo, QueryOptions, QueryResult } from "./database.js";
 import {
   collectionListToTableInfos,
@@ -163,10 +164,14 @@ export async function removeConnectionById(id: string): Promise<boolean> {
 }
 
 async function ensureConnected(config: ConnectionConfig): Promise<void> {
-  await apiFetch("/api/connection/connect", {
-    method: "POST",
-    body: JSON.stringify({ config }),
+  logTransportLayers(config);
+  await withConnectionStage(`Connecting to ${describeConnectionTarget(config)} via DBX Web API`, async () => {
+    await apiFetch("/api/connection/connect", {
+      method: "POST",
+      body: JSON.stringify({ config }),
+    });
   });
+  connectionLog("DBX Web API connection ready");
 }
 
 export async function listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]> {

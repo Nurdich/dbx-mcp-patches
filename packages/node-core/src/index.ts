@@ -1,5 +1,6 @@
 export * from "./backend.js";
 export * from "./bridge.js";
+export * from "./connection-log.js";
 export * from "./connections.js";
 export * from "./database-stats.js";
 export * from "./database-report.js";

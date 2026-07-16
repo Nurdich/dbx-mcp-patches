@@ -26,6 +26,9 @@ import {
   DatabaseStatsError,
   fetchDatabaseStats,
   fetchDatabaseReport,
+  mcpConnectionLogOptions,
+  prependConnectionProgress,
+  startConnectionLogCollector,
   type Backend,
   type ConnectionConfig,
   type QueryResult,
@@ -75,6 +78,34 @@ function connectionIdentity(config: ConnectionConfig): string {
 
 function labeledText(config: ConnectionConfig, body: string): ReturnType<typeof text> {
   return text(`[${connectionIdentity(config)}]\n${body}`);
+}
+
+function labeledTextWithProgress(config: ConnectionConfig, body: string, progress: string): ReturnType<typeof text> {
+  return labeledText(config, prependConnectionProgress(body, progress));
+}
+
+function toolResultWithProgress(result: ReturnType<typeof text>, progress: string): ReturnType<typeof text> {
+  const body = result.content[0]?.text ?? "";
+  return text(prependConnectionProgress(body, progress));
+}
+
+function toolErrorWithProgress(code: string, message: string, progress: string) {
+  return { ...text(prependConnectionProgress(`${code}: ${message}`, progress)), isError: true };
+}
+
+async function runConnectingTool<T>(
+  config: ConnectionConfig,
+  run: () => Promise<T>,
+): Promise<{ value: T; progress: string } | { progress: string; error: unknown }> {
+  const collector = startConnectionLogCollector(mcpConnectionLogOptions(), config);
+  try {
+    const value = await run();
+    return { value, progress: collector.progress() };
+  } catch (error) {
+    return { progress: collector.progress(), error };
+  } finally {
+    collector.dispose();
+  }
 }
 
 function formatQueryToolResult(result: QueryResult, title?: string) {
@@ -249,10 +280,15 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       if (error) return error;
       const resolvedConfig = config!;
       const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
-      const tables = await backend.listTables(scopeValue.config, scopeValue.schema);
-      if (tables.length === 0) return text("No tables found.");
+      const outcome = await runConnectingTool(resolvedConfig, () => backend.listTables(scopeValue.config, scopeValue.schema));
+      if ("error" in outcome) {
+        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        return toolErrorWithProgress("LIST_TABLES_ERROR", msg, outcome.progress);
+      }
+      const { value: tables, progress } = outcome;
+      if (tables.length === 0) return toolResultWithProgress(text("No tables found."), progress);
       const rows = tables.map((t, i) => [String(i + 1), t.name, t.type]);
-      return labeledText(resolvedConfig, mdTable(["#", "Table", "Type"], rows));
+      return labeledTextWithProgress(resolvedConfig, mdTable(["#", "Table", "Type"], rows), progress);
     },
   );
 
@@ -271,10 +307,15 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       if (error) return error;
       const resolvedConfig = config!;
       const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
-      const columns = await backend.describeTable(scopeValue.config, table, scopeValue.schema);
-      if (columns.length === 0) return text("No columns found.");
+      const outcome = await runConnectingTool(resolvedConfig, () => backend.describeTable(scopeValue.config, table, scopeValue.schema));
+      if ("error" in outcome) {
+        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        return toolErrorWithProgress("DESCRIBE_TABLE_ERROR", msg, outcome.progress);
+      }
+      const { value: columns, progress } = outcome;
+      if (columns.length === 0) return toolResultWithProgress(text("No columns found."), progress);
       const rows = columns.map((c) => [c.is_primary_key ? `${c.name} (PK)` : c.name, c.data_type, c.is_nullable ? "YES" : "NO", c.column_default ?? "", c.comment ?? ""]);
-      return labeledText(resolvedConfig, mdTable(["Column", "Type", "Nullable", "Default", "Comment"], rows));
+      return labeledTextWithProgress(resolvedConfig, mdTable(["Column", "Type", "Nullable", "Default", "Comment"], rows), progress);
     },
   );
 
@@ -292,20 +333,21 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       if (error) return error;
       const resolvedConfig = config!;
 
-      try {
-        const body = await fetchDatabaseStats(backend, resolvedConfig, {
+      const outcome = await runConnectingTool(resolvedConfig, () =>
+        fetchDatabaseStats(backend, resolvedConfig, {
           database: database ?? scope.database,
           schema,
           redisDb: redisDbFromValue(database) ?? redisDbFromValue(scope.database),
-        });
-        return labeledText(resolvedConfig, body);
-      } catch (e: unknown) {
-        if (e instanceof DatabaseStatsError) {
-          return toolError(e.code, e.message);
+        }),
+      );
+      if ("error" in outcome) {
+        if (outcome.error instanceof DatabaseStatsError) {
+          return toolErrorWithProgress(outcome.error.code, outcome.error.message, outcome.progress);
         }
-        const msg = e instanceof Error ? e.message : String(e);
-        return toolError("DATABASE_STATS_ERROR", msg);
+        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        return toolErrorWithProgress("DATABASE_STATS_ERROR", msg, outcome.progress);
       }
+      return labeledTextWithProgress(resolvedConfig, outcome.value, outcome.progress);
     },
   );
 
@@ -323,20 +365,21 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       if (error) return error;
       const resolvedConfig = config!;
 
-      try {
-        const body = await fetchDatabaseReport(backend, resolvedConfig, {
+      const outcome = await runConnectingTool(resolvedConfig, () =>
+        fetchDatabaseReport(backend, resolvedConfig, {
           database: database ?? scope.database,
           schema,
           redisDb: redisDbFromValue(database) ?? redisDbFromValue(scope.database),
-        });
-        return labeledText(resolvedConfig, body);
-      } catch (e: unknown) {
-        if (e instanceof DatabaseStatsError) {
-          return toolError(e.code, e.message);
+        }),
+      );
+      if ("error" in outcome) {
+        if (outcome.error instanceof DatabaseStatsError) {
+          return toolErrorWithProgress(outcome.error.code, outcome.error.message, outcome.progress);
         }
-        const msg = e instanceof Error ? e.message : String(e);
-        return toolError("DATABASE_REPORT_ERROR", msg);
+        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        return toolErrorWithProgress("DATABASE_REPORT_ERROR", msg, outcome.progress);
       }
+      return labeledTextWithProgress(resolvedConfig, outcome.value, outcome.progress);
     },
   );
 
@@ -368,18 +411,27 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       }
       // MongoDB shell commands don't fit the SQL safety evaluator; the backend
       // (node-core executeQuery) applies command-aware read/write gating.
-      try {
+      const outcome = await runConnectingTool(scopedConfig, async () => {
         const statements = scopedConfig.db_type === "mongodb" ? [sql] : splitSqlStatements(sql);
-        const results = [];
+        const results: QueryResult[] = [];
         for (const statement of statements) {
           results.push(await backend.executeQuery(withDatabase(scopedConfig, database ?? scope.database), statement));
         }
-        if (results.length === 1) return labeledText(scopedConfig, formatQueryToolResult(results[0]).content[0].text);
-        return labeledText(scopedConfig, results.map((result, index) => formatQueryToolResult(result, `Statement ${index + 1}`).content[0].text).join("\n\n"));
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return toolError("QUERY_ERROR", msg);
+        return results;
+      });
+      if ("error" in outcome) {
+        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        return toolErrorWithProgress("QUERY_ERROR", msg, outcome.progress);
       }
+      const { value: results, progress } = outcome;
+      if (results.length === 1) {
+        return labeledTextWithProgress(scopedConfig, formatQueryToolResult(results[0]).content[0].text, progress);
+      }
+      return labeledTextWithProgress(
+        scopedConfig,
+        results.map((result, index) => formatQueryToolResult(result, `Statement ${index + 1}`).content[0].text).join("\n\n"),
+        progress,
+      );
     },
   );
 
@@ -407,15 +459,16 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       if (isProductionDatabase(scopedConfig, String(defaultRedisDb(scopedConfig, scope, db))) && safety.safety !== "allowed") {
         return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute write or dangerous Redis commands against a production database.");
       }
-      try {
-        const result = await backend.executeRedisCommand(scopedConfig, defaultRedisDb(scopedConfig, scope, db), command, {
+      const outcome = await runConnectingTool(scopedConfig, () =>
+        backend.executeRedisCommand!(scopedConfig, defaultRedisDb(scopedConfig, scope, db), command, {
           skipSafetyCheck: safety.skipSafetyCheck,
-        });
-        return labeledText(scopedConfig, formatRedisCommandToolResult(result).content[0].text);
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return toolError("REDIS_COMMAND_ERROR", msg);
+        }),
+      );
+      if ("error" in outcome) {
+        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        return toolErrorWithProgress("REDIS_COMMAND_ERROR", msg, outcome.progress);
       }
+      return labeledTextWithProgress(scopedConfig, formatRedisCommandToolResult(outcome.value).content[0].text, outcome.progress);
     },
   );
 
@@ -434,13 +487,20 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
       if (error) return error;
       const resolvedConfig = config!;
-      const context = await buildSchemaContext(backend, withDatabase(resolvedConfig, database ?? scope.database), {
-        schema,
-        tables,
-        maxTables: max_tables,
-      });
-      if (context.tables.length === 0) return text("No matching tables found.");
-      return labeledText(resolvedConfig, formatSchemaContext(context));
+      const outcome = await runConnectingTool(resolvedConfig, () =>
+        buildSchemaContext(backend, withDatabase(resolvedConfig, database ?? scope.database), {
+          schema,
+          tables,
+          maxTables: max_tables,
+        }),
+      );
+      if ("error" in outcome) {
+        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+        return toolErrorWithProgress("SCHEMA_CONTEXT_ERROR", msg, outcome.progress);
+      }
+      const { value: context, progress } = outcome;
+      if (context.tables.length === 0) return toolResultWithProgress(text("No matching tables found."), progress);
+      return labeledTextWithProgress(resolvedConfig, formatSchemaContext(context), progress);
     },
   );
 
@@ -632,7 +692,16 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       async ({ connection_id, connection_name, table, database, schema }) => {
         const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
         if (error) return error;
-        return bridgeRequest("/open-table", { connection_id: config!.id, connection_name: config!.name, table, database, schema }, `Opened ${table} in DBX`);
+        const resolvedConfig = config!;
+        const outcome = await runConnectingTool(resolvedConfig, () =>
+          bridgeRequest("/open-table", { connection_id: resolvedConfig.id, connection_name: resolvedConfig.name, table, database, schema }, `Opened ${table} in DBX`),
+        );
+        if ("error" in outcome) {
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          const code = msg.startsWith("DBX is not running") ? "DBX_NOT_RUNNING" : "OPEN_TABLE_ERROR";
+          return toolErrorWithProgress(code, msg, outcome.progress);
+        }
+        return toolResultWithProgress(outcome.value, outcome.progress);
       },
     );
 
@@ -672,18 +741,26 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
         }
         // MongoDB shell commands bypass the SQL safety evaluator; pass MCP
         // safety flags to the desktop executor for command-aware gating.
-        return bridgeRequest(
-          "/execute-query",
-          {
-            connection_id: resolvedConfig.id,
-            connection_name: resolvedConfig.name,
-            sql,
-            database,
-            allow_writes: safetyOptions.allowWrites,
-            allow_dangerous: safetyOptions.allowDangerous,
-          },
-          "Query sent to DBX",
+        const outcome = await runConnectingTool(resolvedConfig, () =>
+          bridgeRequest(
+            "/execute-query",
+            {
+              connection_id: resolvedConfig.id,
+              connection_name: resolvedConfig.name,
+              sql,
+              database,
+              allow_writes: safetyOptions.allowWrites,
+              allow_dangerous: safetyOptions.allowDangerous,
+            },
+            "Query sent to DBX",
+          ),
         );
+        if ("error" in outcome) {
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          const code = msg.startsWith("DBX is not running") ? "DBX_NOT_RUNNING" : "EXECUTE_AND_SHOW_ERROR";
+          return toolErrorWithProgress(code, msg, outcome.progress);
+        }
+        return toolResultWithProgress(outcome.value, outcome.progress);
       },
     );
   }
@@ -695,7 +772,7 @@ async function bridgeRequest(path: string, body: Record<string, unknown>, succes
   const res = await postBridge(path, body);
   if (res.ok) return text(successMsg);
   const message = res.text.startsWith("DBX is not running") ? res.text : `Failed: ${res.text}`;
-  return toolError("DBX_NOT_RUNNING", message);
+  throw new Error(message);
 }
 
 async function main() {

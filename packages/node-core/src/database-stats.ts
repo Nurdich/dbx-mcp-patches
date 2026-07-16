@@ -1,6 +1,7 @@
 import type { Backend } from "./backend.js";
 import type { ConnectionConfig } from "./connections.js";
 import type { QueryResult } from "./database.js";
+import { withConnectionStage } from "./connection-log.js";
 import { formatCell, mdTable } from "./format.js";
 
 const MYSQL_STATS_TYPES = new Set(["mysql", "doris", "starrocks", "manticoresearch"]);
@@ -327,8 +328,9 @@ export class DatabaseStatsError extends Error {
 }
 
 export async function fetchDatabaseStats(backend: Backend, config: ConnectionConfig, options: DatabaseStatsOptions = {}): Promise<string> {
-  const scopeValue = metadataScope(config, options.database, options.schema);
-  const dbType = scopeValue.config.db_type;
+  return withConnectionStage("Fetching catalog stats", async () => {
+    const scopeValue = metadataScope(config, options.database, options.schema);
+    const dbType = scopeValue.config.db_type;
 
   if (dbType === "redis") {
     return fetchRedisDatabaseStats(backend, scopeValue.config, options);
@@ -368,4 +370,5 @@ export async function fetchDatabaseStats(backend: Backend, config: ConnectionCon
   }
 
   return parts.join("\n");
+  });
 }

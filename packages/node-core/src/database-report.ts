@@ -1,6 +1,7 @@
 import type { Backend } from "./backend.js";
 import type { ConnectionConfig } from "./connections.js";
 import type { QueryResult } from "./database.js";
+import { withConnectionStage } from "./connection-log.js";
 import { formatCell, mdTable } from "./format.js";
 import {
   DatabaseStatsError,
@@ -186,8 +187,9 @@ function formatColumnCommentsTable(result: QueryResult): string {
 }
 
 export async function fetchDatabaseReport(backend: Backend, config: ConnectionConfig, options: DatabaseStatsOptions = {}): Promise<string> {
-  const scopeValue = metadataScope(config, options.database, options.schema);
-  const dbType = scopeValue.config.db_type;
+  return withConnectionStage("Generating database report", async () => {
+    const scopeValue = metadataScope(config, options.database, options.schema);
+    const dbType = scopeValue.config.db_type;
 
   if (dbType === "redis" || dbType === "mongodb") {
     const statsBody = await fetchDatabaseStats(backend, scopeValue.config, options);
@@ -250,4 +252,5 @@ export async function fetchDatabaseReport(backend: Backend, config: ConnectionCo
   }
 
   return parts.join("\n");
+  });
 }

@@ -219,6 +219,33 @@ DBX_MCP_ALLOW_DANGEROUS_SQL=1
 
 Redis connections use `dbx_execute_redis_command` instead of `dbx_execute_query`. Redis write commands honor `DBX_MCP_ALLOW_WRITES`; dangerous Redis commands such as `KEYS`, `FLUSHALL`, and `EVAL` require `DBX_MCP_ALLOW_DANGEROUS_SQL=1`.
 
+## Connection Progress Logging
+
+Tools that connect to a database (`dbx_list_tables`, `dbx_describe_table`, `dbx_execute_query`, `dbx_get_database_stats`, `dbx_get_database_report`, `dbx_execute_redis_command`, `dbx_get_schema_context`, etc.) prepend connection progress to the tool response:
+
+```
+[dbx] Using connection "my-db" (postgres @ host:5432/mydb)
+[dbx] Connecting via socks5 proxy proxy.example.com:1080
+[dbx] Starting local proxy tunnel to host:5432...
+[dbx] Proxy tunnel ready on 127.0.0.1:54321
+[dbx] Connecting to database postgres @ host:5432/mydb (via 127.0.0.1:54321)
+[dbx] Database connection pool ready
+
+---
+
+[my-db (uuid) [postgres @ host:5432]]
+| results... |
+```
+
+On errors, the same progress lines appear before the error message so you can see which stage failed (proxy, tunnel, database, etc.).
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DBX_MCP_QUIET=1` | off | Suppress all connection progress in tool responses |
+| `DBX_MCP_VERBOSE=1` | off | Include extra verbose-only steps (e.g. reused proxy tunnel, bridge endpoint) |
+
+CLI uses the same logging via stderr with `--quiet` / `--verbose` or `DBX_QUIET` / `DBX_VERBOSE`.
+
 ## How It Works
 
 ```
@@ -476,6 +503,33 @@ DBX_MCP_ALLOW_DANGEROUS_SQL=1
 ```
 
 Redis 连接使用 `dbx_execute_redis_command`，不通过 `dbx_execute_query` 执行。Redis 写命令遵循 `DBX_MCP_ALLOW_WRITES`；`KEYS`、`FLUSHALL`、`EVAL` 等危险 Redis 命令需要设置 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`。
+
+### 连接进度日志
+
+会建立数据库连接的工具（`dbx_list_tables`、`dbx_describe_table`、`dbx_execute_query`、`dbx_get_database_stats`、`dbx_get_database_report`、`dbx_execute_redis_command`、`dbx_get_schema_context` 等）会在返回结果前附带连接进度：
+
+```
+[dbx] Using connection "my-db" (postgres @ host:5432/mydb)
+[dbx] Connecting via socks5 proxy proxy.example.com:1080
+[dbx] Starting local proxy tunnel to host:5432...
+[dbx] Proxy tunnel ready on 127.0.0.1:54321
+[dbx] Connecting to database postgres @ host:5432/mydb (via 127.0.0.1:54321)
+[dbx] Database connection pool ready
+
+---
+
+[my-db (uuid) [postgres @ host:5432]]
+| 查询结果... |
+```
+
+出错时，错误信息前同样会显示进度，便于定位失败阶段（代理、隧道、数据库等）。
+
+| 变量 | 默认 | 作用 |
+|------|------|------|
+| `DBX_MCP_QUIET=1` | 关闭 | 不在工具响应中显示连接进度 |
+| `DBX_MCP_VERBOSE=1` | 关闭 | 显示更多 verbose 步骤（如复用代理隧道、bridge 端点） |
+
+CLI 通过 stderr 输出相同日志，可用 `--quiet` / `--verbose` 或 `DBX_QUIET` / `DBX_VERBOSE`。
 
 ### 工作原理
 

@@ -1,5 +1,56 @@
 # Update Log
 
+## 2026-07-16 — 连接进度日志（CLI / MCP / Web API）
+
+### 变更摘要
+
+为 CLI、MCP Server 和 Web 后端 API 调用统一接入 `connection-log` 模块，在连接数据库时输出代理步骤、隧道阶段和清晰错误信息，便于调试代理/SSH 隧道连接问题。
+
+### node-core 新增 / 扩展
+
+| 模块 | 导出 |
+|------|------|
+| `connection-log.ts` | `connectionLog`、`withConnectionStage`、`startConnectionLogCollector`、`mcpConnectionLogOptions`、`prependConnectionProgress` |
+
+`database.ts`、`connections.ts`、`database-stats.ts`、`database-report.ts` 在连接各阶段调用 `connectionLog` / `withConnectionStage`。
+
+### MCP 行为
+
+会连接数据库的工具在响应正文前附带 `[dbx]` 进度段，与结果之间用 `---` 分隔。出错时进度段保留，便于定位失败阶段。
+
+| 环境变量 | 默认 | 作用 |
+|----------|------|------|
+| `DBX_MCP_QUIET=1` | 关 | 抑制工具响应中的连接进度 |
+| `DBX_MCP_VERBOSE=1` | 关 | 显示 verbose-only 步骤（复用隧道、bridge 端点等） |
+
+### CLI 行为
+
+- `--quiet` / `-q` 或 `DBX_QUIET=1`：抑制进度
+- `--verbose` / `-v` 或 `DBX_VERBOSE=1`：显示 verbose 步骤
+- 进度输出到 **stderr**，查询结果仍在 stdout
+
+### Web / External API
+
+`web-backend.ts` 的 `ensureConnected()` 在调用 `/api/connection/connect` 前后记录进度。Web 模式下的实际隧道建立发生在 DBX Web 服务端；node-core 层记录客户端可见的 API 连接阶段，供 MCP Web 模式消费。
+
+### 修改文件
+
+- `packages/node-core/src/connection-log.ts`（新建/扩展）
+- `packages/node-core/src/database.ts`、`connections.ts`、`database-stats.ts`、`database-report.ts`
+- `packages/node-core/src/web-backend.ts`
+- `packages/node-core/src/index.ts`
+- `packages/mcp-server/src/index.ts`
+- `packages/cli/src/cli.ts`
+- `packages/mcp-server/README.md`
+
+**已安装 dist 同步：**
+
+- `C:\usr\local\node_modules\@dbx-app\mcp-server\dist\index.js`
+- `C:\usr\local\node_modules\@dbx-app\mcp-server\node_modules\@dbx-app\node-core\dist\`
+- `G:\usr\local\node_modules\@dbx-app\cli\dist\` 及 node-core dist
+
+---
+
 ## 2026-07-16 — 数据库完整报告 `dbx report` / `dbx_get_database_report`
 
 ### 变更摘要

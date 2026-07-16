@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import {
   BRIDGE_REQUIRED_TYPES,
   buildSchemaContext,
+  ConnectionResolveError,
   createBackend,
   DatabaseStatsError,
   DIRECT_QUERY_TYPES,
@@ -20,11 +21,11 @@ import {
   isProxyTunnelProfile,
   loadTunnelProfiles,
   notifyReload,
-  parseListIndex,
   postBridge,
   proxyProfileReferenceLayer,
   proxyProfileSummary,
-  resolveConnectionByIndex,
+  pushConnectionLog,
+  resolveConnectionRef,
   type Backend,
   type ConnectionConfig,
   type ProxyTunnelConfig,
@@ -95,21 +96,33 @@ interface ParsedFlags {
   proxyPassword?: string;
   proxyProfileId?: string;
   proxyProfileName?: string;
+  quiet: boolean;
+  verbose: boolean;
 }
 
 export async function runCli(argv: string[], options: CliRunOptions = {}): Promise<CliRunResult> {
   const env = options.env ?? process.env;
   let ownedBackend: Backend | undefined;
+  const flags = parseFlags(argv);
+  const progressLogs: string[] = [];
+  const popConnectionLog = pushConnectionLog({
+    quiet: flags.quiet || parseBooleanEnv(env.DBX_QUIET),
+    verbose: flags.verbose || parseBooleanEnv(env.DBX_VERBOSE),
+    sink: (message) => progressLogs.push(message),
+  });
+  const progress = () => progressLogs.join("");
+  const succeed = (stdout: string) => ok(stdout, progress());
+  const succeedJson = (payload: unknown) => okJson(payload, progress());
+  const failed = (code: string, message: string, json = flags.json) => fail(code, message, json, progress());
 
   try {
-    const flags = parseFlags(argv);
     const args = flags.args;
 
     if (flags.version) {
-      return ok(`${await packageVersion()}\n`);
+      return succeed(`${await packageVersion()}\n`);
     }
     if (args.length === 0 || flags.help || args[0] === "help") {
-      return ok(`${usage()}\n`);
+      return succeed(`${usage()}\n`);
     }
 
     const backendFactory = options.backendFactory ?? createBackend;
@@ -118,9 +131,9 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
     if (args[0] === "doctor") {
       ensureArgCount(args, 1, "dbx doctor");
       const diagnostics = await (options.diagnostics ?? getDbxDiagnostics)();
-      if (flags.format === "json") return okJson(diagnostics);
+      if (flags.format === "json") return succeedJson(diagnostics);
       if (flags.format === "csv") {
-        return ok(
+        return succeed(
           csvTable(["check", "value"], [
             { check: "appDataDir", value: diagnostics.appDataDir },
             { check: "dbPath", value: diagnostics.dbPath },
@@ -137,7 +150,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
           ]),
         );
       }
-      return ok(formatDoctor(diagnostics));
+      return succeed(formatDoctor(diagnostics));
     }
 
     if (args[0] === "capabilities") {
@@ -146,9 +159,9 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         directQueryTypes: [...DIRECT_QUERY_TYPES],
         bridgeRequiredTypes: [...BRIDGE_REQUIRED_TYPES],
       };
-      if (flags.format === "json") return okJson(payload);
+      if (flags.format === "json") return succeedJson(payload);
       if (flags.format === "csv") {
-        return ok(
+        return succeed(
           csvTable(
             ["mode", "type"],
             [
@@ -158,7 +171,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
           ),
         );
       }
-      return ok(
+      return succeed(
         `${mdTable(
           ["Mode", "Types"],
           [
@@ -176,11 +189,11 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         index: index + 1,
         ...connectionSummary(connection),
       }));
-      if (flags.format === "json") return okJson({ connections: summaries });
+      if (flags.format === "json") return succeedJson({ connections: summaries });
       if (flags.format === "csv") {
-        return ok(csvTable(["index", "id", "name", "type", "host", "port", "database"], summaries));
+        return succeed(csvTable(["index", "id", "name", "type", "host", "port", "database"], summaries));
       }
-      return ok(
+      return succeed(
         `${mdTable(
           ["#", "ID", "Name", "Type", "Host", "Port", "Database"],
           summaries.map((c) => [String(c.index), c.id, c.name, c.type, c.host, String(c.port), c.database ?? ""]),
@@ -283,8 +296,8 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       await notifyReload().catch(() => {});
       const proxyNote = savedProxyLabel ? ` using saved proxy profile "${savedProxyLabel}"` : "";
       const payload = { id: config.id, name: config.name, proxy_profile: savedProxyLabel || undefined };
-      if (flags.format === "json") return okJson({ added: payload });
-      return ok(`Connection "${config.name}" added (id: ${config.id})${proxyNote}.\n`);
+      if (flags.format === "json") return succeedJson({ added: payload });
+      return succeed(`Connection "${config.name}" added (id: ${config.id})${proxyNote}.\n`);
     }
 
     if (args[0] === "proxies" && args[1] === "list") {
@@ -292,8 +305,8 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const profiles = await loadTunnelProfilesForBackend(backend);
       const proxies = profiles.filter((profile) => profile.type === "proxy");
       if (proxies.length === 0) {
-        if (flags.format === "json") return okJson({ proxies: [] });
-        return ok("No saved proxy profiles found. Create one in DBX Settings > Tunnels.\n");
+        if (flags.format === "json") return succeedJson({ proxies: [] });
+        return succeed("No saved proxy profiles found. Create one in DBX Settings > Tunnels.\n");
       }
       const rows = proxies.map((profile, index) => ({
         index: index + 1,
@@ -306,11 +319,11 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         enabled: profile.enabled === false ? "no" : "yes",
         summary: isProxyTunnelProfile(profile) ? proxyProfileSummary(profile) : profile.name || profile.id,
       }));
-      if (flags.format === "json") return okJson({ proxies: rows });
+      if (flags.format === "json") return succeedJson({ proxies: rows });
       if (flags.format === "csv") {
-        return ok(csvTable(["index", "id", "name", "type", "host", "port", "username", "enabled", "summary"], rows));
+        return succeed(csvTable(["index", "id", "name", "type", "host", "port", "username", "enabled", "summary"], rows));
       }
-      return ok(
+      return succeed(
         `${mdTable(
           ["#", "ID", "Name", "Type", "Host", "Port", "Username", "Enabled", "Summary"],
           rows.map((row) => [String(row.index), row.id, row.name, row.type, row.host, String(row.port), row.username, row.enabled, row.summary]),
@@ -329,12 +342,12 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
           schema: flags.schema,
         });
         if (flags.format === "json") {
-          return okJson({ connection: connectionName, database: flags.database, schema: flags.schema, stats: body });
+          return succeedJson({ connection: connectionName, database: flags.database, schema: flags.schema, stats: body });
         }
         if (flags.format === "csv") {
           throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx stats.");
         }
-        return ok(`${body}\n`);
+        return succeed(`${body}\n`);
       } catch (error) {
         if (error instanceof DatabaseStatsError) {
           throw new CliError(error.code, error.message);
@@ -354,12 +367,12 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
           schema: flags.schema,
         });
         if (flags.format === "json") {
-          return okJson({ connection: connectionName, database: flags.database, schema: flags.schema, report: body });
+          return succeedJson({ connection: connectionName, database: flags.database, schema: flags.schema, report: body });
         }
         if (flags.format === "csv") {
           throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx report.");
         }
-        return ok(`${body}\n`);
+        return succeed(`${body}\n`);
       } catch (error) {
         if (error instanceof DatabaseStatsError) {
           throw new CliError(error.code, error.message);
@@ -374,14 +387,14 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const config = await findConnectionOrThrow(backend, connectionName);
       const tables = await backend.listTables(config, flags.schema);
       if (flags.format === "json") {
-        return okJson({
+        return succeedJson({
           connection: connectionName,
           schema: flags.schema,
           tables: tables.map((table, index) => ({ index: index + 1, ...table })),
         });
       }
-      if (flags.format === "csv") return ok(csvTable(["index", "name", "type"], tables.map((table, index) => ({ index: index + 1, ...table }))));
-      return ok(`${mdTable(["#", "Table", "Type"], tables.map((t, i) => [String(i + 1), t.name, t.type]))}\n`);
+      if (flags.format === "csv") return succeed(csvTable(["index", "name", "type"], tables.map((table, index) => ({ index: index + 1, ...table }))));
+      return succeed(`${mdTable(["#", "Table", "Type"], tables.map((t, i) => [String(i + 1), t.name, t.type]))}\n`);
     }
 
     if (args[0] === "schema" && args[1] === "describe") {
@@ -390,11 +403,11 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const table = required(args[3], "Table name is required.");
       const config = await findConnectionOrThrow(backend, connectionName);
       const columns = await backend.describeTable(config, table, flags.schema);
-      if (flags.format === "json") return okJson({ connection: connectionName, schema: flags.schema, table, columns });
+      if (flags.format === "json") return succeedJson({ connection: connectionName, schema: flags.schema, table, columns });
       if (flags.format === "csv") {
-        return ok(csvTable(["name", "data_type", "is_nullable", "is_primary_key", "column_default", "comment"], columns));
+        return succeed(csvTable(["name", "data_type", "is_nullable", "is_primary_key", "column_default", "comment"], columns));
       }
-      return ok(
+      return succeed(
         `${mdTable(
           ["Column", "Type", "Nullable", "Default", "Comment"],
           columns.map((c) => [
@@ -426,15 +439,15 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         allowDangerous: flags.allowDangerous || envSafety.allowDangerous,
       };
       const safety = evaluateSqlSafety(sql, safetyOptions);
-      if (!safety.allowed) return fail("SQL_BLOCKED", safety.reason ?? "SQL blocked.", flags.json);
+      if (!safety.allowed) return failed("SQL_BLOCKED", safety.reason ?? "SQL blocked.", flags.json);
       const config = await findConnectionOrThrow(backend, connectionName);
       const result = await backend.executeQuery(config, sql, { maxRows: flags.maxRows, timeoutMs: flags.timeoutMs });
       if (flags.format === "json") {
-        return okJson({ connection: connectionName, columns: result.columns, rows: result.rows, row_count: result.row_count });
+        return succeedJson({ connection: connectionName, columns: result.columns, rows: result.rows, row_count: result.row_count });
       }
-      if (flags.format === "csv") return ok(csvTable(result.columns, result.rows));
-      if (result.columns.length === 0) return ok(`Query executed. ${result.row_count} row(s) affected.\n`);
-      return ok(
+      if (flags.format === "csv") return succeed(csvTable(result.columns, result.rows));
+      if (result.columns.length === 0) return succeed(`Query executed. ${result.row_count} row(s) affected.\n`);
+      return succeed(
         `${mdTable(
           result.columns,
           result.rows.map((row) => result.columns.map((column) => formatCell(row[column]))),
@@ -452,9 +465,9 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         tables: flags.tables,
         maxTables: flags.maxTables,
       });
-      if (flags.format === "json") return okJson(context);
+      if (flags.format === "json") return succeedJson(context);
       if (flags.format === "csv") throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx context.");
-      return ok(`${formatSchemaContext(context)}\n`);
+      return succeed(`${formatSchemaContext(context)}\n`);
     }
 
     if (args[0] === "open") {
@@ -468,27 +481,30 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         database: flags.database,
       });
       if (!response.ok) {
-        return fail("DBX_NOT_RUNNING", response.text || "DBX is not running. Please start DBX first.", flags.json);
+        return failed("DBX_NOT_RUNNING", response.text || "DBX is not running. Please start DBX first.", flags.json);
       }
       if (flags.format === "json") {
-        return okJson({ opened: true, connection: connectionName, table, schema: flags.schema, database: flags.database });
+        return succeedJson({ opened: true, connection: connectionName, table, schema: flags.schema, database: flags.database });
       }
       if (flags.format === "csv") throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx open.");
-      return ok(`Opened ${table} in DBX\n`);
+      return succeed(`Opened ${table} in DBX\n`);
     }
 
-    return fail("USAGE", usage(), flags.json);
+    return failed("USAGE", usage(), flags.json);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const code =
       error instanceof CliError
         ? error.code
+        : error instanceof ConnectionResolveError
+          ? error.code
         : typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
           ? error.code
           : "ERROR";
     const wantsJson = argv.includes("--json");
-    return fail(code, message, wantsJson);
+    return failed(code, message, wantsJson);
   } finally {
+    popConnectionLog();
     await ownedBackend?.close?.().catch(() => {});
   }
 }
@@ -508,6 +524,8 @@ function parseFlags(argv: string[]): ParsedFlags {
     allowDangerous: false,
     help: false,
     version: false,
+    quiet: false,
+    verbose: false,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -522,6 +540,8 @@ function parseFlags(argv: string[]): ParsedFlags {
     } else if (arg === "--format") flags.format = parseFormat(readOptionValue(argv, ++i, "--format"));
     else if (arg === "--help" || arg === "-h") flags.help = true;
     else if (arg === "--version" || arg === "-V") flags.version = true;
+    else if (arg === "--quiet" || arg === "-q") flags.quiet = true;
+    else if (arg === "--verbose" || arg === "-v") flags.verbose = true;
     else if (arg === "--schema") flags.schema = readOptionValue(argv, ++i, "--schema");
     else if (arg === "--database") flags.database = readOptionValue(argv, ++i, "--database");
     else if (arg === "--tables") flags.tables = splitCsv(readOptionValue(argv, ++i, "--tables"));
@@ -623,37 +643,14 @@ function splitCsv(value: string) {
 
 async function findConnectionOrThrow(backend: Backend, ref: string) {
   const connections = await backend.loadConnections();
-  const trimmed = ref.trim();
-  if (!trimmed) throw new CliError("CONNECTION_NOT_FOUND", "Connection reference is required.");
-
-  const byId = connections.find((connection) => connection.id === trimmed);
-  if (byId) return byId;
-
-  const matching = connections.filter((connection) => connection.name.toLowerCase() === trimmed.toLowerCase());
-  if (matching.length > 1) {
-    const lines = matching.map((connection) => {
-      const idx = connections.indexOf(connection);
-      const num = idx >= 0 ? idx + 1 : "?";
-      return `- #${num} ${connection.id}: ${connection.db_type} @ ${connection.host}:${connection.port}`;
-    });
-    throw new CliError(
-      "AMBIGUOUS_CONNECTION",
-      `Multiple connections found with name "${ref}". Specify connection id or list index (#):\n${lines.join("\n")}`,
-    );
-  }
-  if (matching.length === 1) return matching[0];
-
-  const listIndex = parseListIndex(trimmed);
-  if (listIndex !== undefined) {
-    const config = resolveConnectionByIndex(connections, listIndex);
-    if (!config) {
-      const hint = connections.length > 0 ? ` Valid range: 1-${connections.length}.` : "";
-      throw new CliError("CONNECTION_NOT_FOUND", `Connection index #${listIndex} not found. Run \`dbx connections list\`.${hint}`);
+  try {
+    return resolveConnectionRef(connections, ref);
+  } catch (error) {
+    if (error instanceof ConnectionResolveError) {
+      throw new CliError(error.code, error.message);
     }
-    return config;
+    throw error;
   }
-
-  throw new CliError("CONNECTION_NOT_FOUND", `Connection "${ref}" not found.`);
 }
 
 function required(value: string | undefined, message: string) {
@@ -661,17 +658,17 @@ function required(value: string | undefined, message: string) {
   return value;
 }
 
-function ok(stdout: string): CliRunResult {
-  return { exitCode: 0, stdout, stderr: "" };
+function ok(stdout: string, stderr = ""): CliRunResult {
+  return { exitCode: 0, stdout, stderr };
 }
 
-function okJson(payload: unknown): CliRunResult {
-  return ok(`${JSON.stringify(payload, null, 2)}\n`);
+function okJson(payload: unknown, stderr = ""): CliRunResult {
+  return ok(`${JSON.stringify(payload, null, 2)}\n`, stderr);
 }
 
-function fail(code: string, message: string, json: boolean): CliRunResult {
+function fail(code: string, message: string, json: boolean, stderr = ""): CliRunResult {
   const text = json ? `${JSON.stringify(errorPayload(code, message), null, 2)}\n` : `${formatErrorMessage(code, message)}\n`;
-  return { exitCode: 1, stdout: "", stderr: text };
+  return { exitCode: 1, stdout: "", stderr: `${stderr}${text}` };
 }
 
 function usage() {
@@ -684,12 +681,12 @@ function usage() {
     "      [--proxy] [--proxy-type socks5|http] [--proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]",
     "      [--proxy-profile-id id|# | --proxy-profile-name name|#] [--json]",
     "  dbx proxies list [--json]",
-    "  dbx stats <connection|#> [--schema name] [--database name] [--json]",
-    "  dbx report <connection|#> [--schema name] [--database name] [--json]",
-    "  dbx schema list <connection|#> [--schema name] [--json]",
-    "  dbx schema describe <connection|#> <table> [--schema name] [--json]",
-    "  dbx query <connection|#> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]",
-    "  dbx context <connection|#> [--schema name] [--tables a,b] [--max-tables n] [--json]",
+    "  dbx stats <connection|#> [--schema name] [--database name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx report <connection|#> [--schema name] [--database name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx schema list <connection|#> [--schema name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx schema describe <connection|#> <table> [--schema name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx query <connection|#> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx context <connection|#> [--schema name] [--tables a,b] [--max-tables n] [--quiet|-q] [--verbose|-v] [--json]",
     "  dbx open <connection|#> <table> [--schema name] [--database name] [--json]",
   ].join("\n");
 }
