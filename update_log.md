@@ -1,5 +1,44 @@
 # Update Log
 
+## 2026-07-17 — 修复 CLI `resolveConnectionsByIndexRef` 重复导出崩溃
+
+### 问题
+
+运行任意依赖 `@dbx-app/node-core` 的 CLI 命令（如 `dbx connections list`）报错：
+
+```
+SyntaxError: Identifier 'resolveConnectionsByIndexRef' has already been declared
+file:///G:/usr/local/node_modules/@dbx-app/cli/node_modules/@dbx-app/node-core/dist/connections.js:338
+```
+
+### 根因
+
+手动 dist 同步时，`resolveConnectionsByIndexRef` 函数被**整段追加两次**（`connections.js` 第 311 行与第 338 行内容完全相同；`connections.d.ts` 声明亦重复）。源文件 `packages/node-core/src/connections.ts` 仅有一处定义，无重复。
+
+`list-index.js` 经检查无类似重复导出。
+
+### 修复
+
+| 文件 | 变更 |
+|------|------|
+| `packages/node-core/dist/connections.js` | 删除第 337–363 行重复函数块，保留第 311–336 行 |
+| `packages/node-core/dist/connections.d.ts` | 删除重复 `export declare function resolveConnectionsByIndexRef` |
+
+已同步至：
+
+- `G:\usr\local\node_modules\@dbx-app\cli\node_modules\@dbx-app\node-core\dist\`
+- `C:\usr\local\node_modules\@dbx-app\mcp-server\node_modules\@dbx-app\node-core\dist\`
+- `dbx-mcp-patches/packages/node-core/dist/`
+
+### 验证
+
+```powershell
+dbx connections list
+# exit 0 — 成功列出 52 条连接
+```
+
+---
+
 ## 2026-07-17 — CLI 连接序号范围批量（1–15）
 
 ### 变更摘要
