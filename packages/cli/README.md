@@ -1,0 +1,126 @@
+# @dbx-app/cli
+
+Command-line interface for DBX — list connections, inspect schema, run safe queries, and mirror MCP server capabilities from the terminal.
+
+## Install
+
+```bash
+npm install -g @dbx-app/cli
+```
+
+Or use the `dbx` shim from a global npm prefix (see DBX docs).
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `dbx doctor` | Check DBX data directory, connection store, and desktop bridge |
+| `dbx capabilities` | List database types supported via direct query vs desktop bridge |
+| `dbx connections list` | List configured connections |
+| `dbx connections add` | Add a connection (inline proxy or saved proxy profile) |
+| `dbx proxies list` | List saved proxy tunnel profiles from DBX Settings > Tunnels |
+| `dbx stats` | Database status overview from system catalog views |
+| `dbx report` | Full database report: summary, tables, column comments, indexes |
+| `dbx schema list` | List tables and views |
+| `dbx schema describe` | Show column definitions for a table |
+| `dbx query` | Execute a SQL query (read-only by default) |
+| `dbx context` | Compact schema context for writing SQL |
+| `dbx open` | Open a table in the DBX desktop app (requires DBX running) |
+
+## `dbx connections add`
+
+Required flags: `--name`, `--type`, `--host`. Optional: `--port`, `--username`, `--password`, `--database`, `--ssl`, `--driver-profile`.
+
+### Inline proxy (SOCKS5 / HTTP)
+
+```bash
+dbx connections add --name prod --type postgres --host db.example.com --port 5432 \
+  --proxy --proxy-type socks5 --proxy-host 127.0.0.1 --proxy-port 1080
+```
+
+### Saved proxy profile (Settings > Tunnels)
+
+```bash
+dbx proxies list
+dbx connections add --name prod --type postgres --host db.example.com --port 5432 \
+  --proxy-profile-name "Office SOCKS5"
+```
+
+Inline proxy flags and profile reference flags are **mutually exclusive**. Specify either `--proxy-profile-id` or `--proxy-profile-name`, not both.
+
+## `dbx stats`
+
+Catalog-based overview (table metadata, size/row estimates) matching MCP `dbx_get_database_stats`:
+
+```bash
+dbx stats my-postgres --schema public
+dbx stats my-mysql --json
+```
+
+Supports MySQL/MariaDB family, PostgreSQL family, SQLite/rqlite, MongoDB (collStats), Redis (INFO/DBSIZE), and generic `information_schema` fallback for other SQL engines.
+
+## `dbx report`
+
+Comprehensive catalog-based report matching MCP `dbx_get_database_report`:
+
+```bash
+dbx report my-postgres --schema public
+dbx report 1 --json
+```
+
+Report sections: Database Summary, Tables (sorted by row estimate), Column Comments, Indexes. All instant catalog data — no `COUNT(*)` queries.
+
+## Environment
+
+| Variable | Description |
+|----------|-------------|
+| `DBX_CONNECTION` | Default connection name for `query`, `context`, and `stats` |
+| `DBX_MCP_ALLOW_WRITES` | Allow write SQL in `dbx query` when set to `1` or `true` |
+| `DBX_MCP_ALLOW_DANGEROUS_SQL` | Allow dangerous SQL patterns (requires writes enabled) |
+| `DBX_WEB_URL` | Use DBX Web backend instead of local SQLite store |
+
+## Output formats
+
+- Default: Markdown-style tables on stdout
+- `--json` or `--format json`: JSON output
+- `--format csv`: CSV (where supported)
+
+Errors go to stderr with exit code `1`.
+
+---
+
+# @dbx-app/cli（中文）
+
+DBX 命令行工具 — 在终端中列出连接、查看 schema、执行安全查询，并与 MCP Server 能力对齐。
+
+## 命令
+
+| 命令 | 说明 |
+|------|------|
+| `dbx connections add` | 添加连接（内联代理或引用已保存代理配置） |
+| `dbx proxies list` | 列出 DBX **设置 > 隧道** 中已保存的代理配置 |
+| `dbx stats` | 从系统目录视图获取数据库状态概览（对应 MCP `dbx_get_database_stats`） |
+| `dbx report` | 完整数据库报告：摘要、表、列注释、索引（对应 MCP `dbx_get_database_report`） |
+
+### 添加连接 — 内联代理
+
+```bash
+dbx connections add --name prod --type postgres --host db.example.com --port 5432 \
+  --proxy --proxy-host 127.0.0.1 --proxy-port 1080
+```
+
+### 添加连接 — 引用已保存代理
+
+```bash
+dbx proxies list
+dbx connections add --name prod --type postgres --host db.example.com --port 5432 \
+  --proxy-profile-id "<uuid>"
+```
+
+内联 `proxy_*` 参数与 `--proxy-profile-id` / `--proxy-profile-name` **不可混用**。
+
+### 数据库状态概览
+
+```bash
+dbx stats my-postgres --schema public
+```
