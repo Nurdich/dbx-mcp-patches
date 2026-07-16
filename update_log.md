@@ -1,5 +1,46 @@
 # Update Log
 
+## 2026-07-17 — stats 摘要移除 SQL COUNT，改 JS 内存推导
+
+### 变更摘要
+
+`dbx stats` / `dbx report` 的 Database Summary 不再执行任何 `COUNT(*)` / `COUNT(DISTINCT ...)` 聚合 SQL；汇总计数改自主查询 `TABLES` / `sqlite_master` 结果在 JS 中推导。
+
+### 移除的 COUNT 查询（3 条）
+
+| 场景 | 原 SQL | 现方案 |
+|------|--------|--------|
+| MySQL 全库模式 | `COUNT(DISTINCT TABLE_SCHEMA)`, `COUNT(*)` on `information_schema.TABLES` | 主查询行数 → `table_count`；唯一 `database_name` → `database_count` |
+| PostgreSQL 全 schema 模式 | `COUNT(DISTINCT table_schema)`, `COUNT(*)` on `information_schema.tables` | 唯一 `schema_name` → `schema_count`；行数 → `table_count`；`database_name` 取自连接配置 |
+| SQLite | `COUNT(*)` on `sqlite_master` | 主查询行数 → `object_count`；`database_name` 固定 `main` |
+
+### 保留的非 COUNT 摘要 SQL
+
+- MySQL 指定库：`information_schema.SCHEMATA`（charset/collation）
+- PostgreSQL 指定 schema：`pg_database_size` + `current_database()`
+
+### 未改动
+
+- 主表目录查询仍用 `TABLE_ROWS` / `n_live_tup` / `pg_relation_size` 等目录元数据
+- MongoDB `collStats` 返回的 `count` 字段（服务端元数据，非 SQL COUNT）
+
+### 新增导出
+
+- `deriveCatalogSummaryFromStats()` — 从主查询 `QueryResult` 生成摘要文本
+
+### 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `packages/node-core/src/database-stats.ts` | 移除 COUNT 摘要 SQL；新增 JS 推导 |
+| `packages/node-core/src/database-report.ts` | 复用 `deriveCatalogSummaryFromStats` |
+| `packages/node-core/dist/database-stats.js` / `.d.ts` | 同步 |
+| `packages/node-core/dist/database-report.js` | 同步 |
+| `C:\usr\local\node_modules\@dbx-app\mcp-server\node_modules\@dbx-app\node-core\dist\` | 同步 |
+| `G:\usr\local\node_modules\@dbx-app\cli\node_modules\@dbx-app\node-core\dist\` | 同步 |
+
+---
+
 ## 2026-07-17 — 范围无跨度上限；15 = 默认并行并发数
 
 ### 语义变更

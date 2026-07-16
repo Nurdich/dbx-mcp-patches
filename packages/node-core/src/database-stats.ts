@@ -19,6 +19,7 @@ export interface DatabaseStatsOptions {
   database?: string;
   schema?: string;
   redisDb?: number;
+  timeoutMs?: number;
 }
 
 export interface CatalogStatsScope {
@@ -155,23 +156,64 @@ export function buildCatalogSummarySql(dbType: string, scope: CatalogStatsScope 
   const explicitSchema = scope.schema?.trim();
 
   if (MYSQL_STATS_TYPES.has(dbType)) {
-    if (!explicitDatabase) {
-      const systemDbs = sqlInList(MYSQL_SYSTEM_DATABASES);
-      return `SELECT COUNT(DISTINCT TABLE_SCHEMA) AS database_count, COUNT(*) AS table_count FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN (${systemDbs}) AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')`;
-    }
+    if (!explicitDatabase) return null;
     return `SELECT SCHEMA_NAME AS database_name, DEFAULT_CHARACTER_SET_NAME AS charset, DEFAULT_COLLATION_NAME AS collation FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ${sqlLiteral(explicitDatabase)}`;
   }
   if (POSTGRES_STATS_TYPES.has(dbType)) {
-    if (!explicitSchema) {
-      const systemSchemas = sqlInList(POSTGRES_SYSTEM_SCHEMAS);
-      return `SELECT current_database() AS database_name, COUNT(DISTINCT t.table_schema) AS schema_count, COUNT(*) AS table_count FROM information_schema.tables t WHERE t.table_schema NOT IN (${systemSchemas}) AND t.table_type IN ('BASE TABLE', 'VIEW')`;
-    }
+    if (!explicitSchema) return null;
     return `SELECT current_database() AS database_name, ${sqlLiteral(explicitSchema)} AS schema_name, pg_size_pretty(pg_database_size(current_database())) AS database_size`;
   }
-  if (SQLITE_STATS_TYPES.has(dbType)) {
-    return `SELECT 'main' AS database_name, COUNT(*) AS object_count FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'`;
-  }
   return null;
+}
+
+function uniqueNonEmptyFieldCount(rows: Record<string, unknown>[], field: string): number {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const value = row[field];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) seen.add(text);
+  }
+  return seen.size;
+}
+
+function formatSummaryKeyValues(entries: Array<[string, unknown]>): string {
+  return entries
+    .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== "")
+    .map(([key, value]) => `${key}: ${formatCell(value)}`)
+    .join("\n");
+}
+
+export function deriveCatalogSummaryFromStats(
+  dbType: string,
+  scope: CatalogStatsScope,
+  stats: QueryResult,
+  config?: ConnectionConfig,
+): string {
+  const explicitDatabase = scope.database?.trim();
+  const explicitSchema = scope.schema?.trim();
+  const tableCount = stats.rows.length;
+
+  if (MYSQL_STATS_TYPES.has(dbType) && !explicitDatabase) {
+    return formatSummaryKeyValues([
+      ["database_count", uniqueNonEmptyFieldCount(stats.rows, "database_name")],
+      ["table_count", tableCount],
+    ]);
+  }
+  if (POSTGRES_STATS_TYPES.has(dbType) && !explicitSchema) {
+    return formatSummaryKeyValues([
+      ["database_name", config?.database?.trim() ?? ""],
+      ["schema_count", uniqueNonEmptyFieldCount(stats.rows, "schema_name")],
+      ["table_count", tableCount],
+    ]);
+  }
+  if (SQLITE_STATS_TYPES.has(dbType)) {
+    return formatSummaryKeyValues([
+      ["database_name", "main"],
+      ["object_count", tableCount],
+    ]);
+  }
+  return "";
 }
 
 export function formatStatsOverviewTable(result: QueryResult): string {
@@ -349,18 +391,23 @@ export async function fetchDatabaseStats(backend: Backend, config: ConnectionCon
   }
 
   const parts: string[] = [];
+  const queryOptions = options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined;
+  let summaryText = "";
   const summarySql = buildCatalogSummarySql(dbType, catalogScope);
   if (summarySql) {
     try {
-      const summary = await backend.executeQuery(scopeValue.config, summarySql);
-      const summaryText = formatSummaryLines(summary);
-      if (summaryText) parts.push("Summary", summaryText);
+      const summary = await backend.executeQuery(scopeValue.config, summarySql, queryOptions);
+      summaryText = formatSummaryLines(summary);
     } catch {
       // Summary is optional; table catalog remains useful.
     }
   }
 
-  const stats = await backend.executeQuery(scopeValue.config, statsSql);
+  const stats = await backend.executeQuery(scopeValue.config, statsSql, queryOptions);
+  if (!summaryText) {
+    summaryText = deriveCatalogSummaryFromStats(dbType, catalogScope, stats, scopeValue.config);
+  }
+  if (summaryText) parts.push("Summary", summaryText);
   if (stats.rows.length === 0) {
     parts.push(parts.length > 0 ? "" : "", "No tables found in catalog.");
   } else {

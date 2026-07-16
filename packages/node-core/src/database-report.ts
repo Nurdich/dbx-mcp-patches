@@ -7,6 +7,7 @@ import {
   DatabaseStatsError,
   buildCatalogStatsSql,
   buildCatalogSummarySql,
+  deriveCatalogSummaryFromStats,
   fetchDatabaseStats,
   formatStatsOverviewTable,
   metadataScope,
@@ -206,19 +207,24 @@ export async function fetchDatabaseReport(backend: Backend, config: ConnectionCo
   }
 
   const parts: string[] = ["# Database Report", ""];
+  const queryOptions = options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : undefined;
 
+  let summaryText = "";
   const summarySql = buildCatalogSummarySql(dbType, catalogScope);
   if (summarySql) {
     try {
-      const summary = await backend.executeQuery(scopeValue.config, summarySql);
-      const summaryText = formatSummaryLines(summary);
-      if (summaryText) parts.push("## Database Summary", summaryText);
+      const summary = await backend.executeQuery(scopeValue.config, summarySql, queryOptions);
+      summaryText = formatSummaryLines(summary);
     } catch {
       // Summary is optional.
     }
   }
 
-  const stats = await backend.executeQuery(scopeValue.config, statsSql);
+  const stats = await backend.executeQuery(scopeValue.config, statsSql, queryOptions);
+  if (!summaryText) {
+    summaryText = deriveCatalogSummaryFromStats(dbType, catalogScope, stats, scopeValue.config);
+  }
+  if (summaryText) parts.push("## Database Summary", summaryText);
   if (stats.rows.length === 0) {
     parts.push("", "No tables found in catalog.");
   } else {
@@ -228,7 +234,7 @@ export async function fetchDatabaseReport(backend: Backend, config: ConnectionCo
   const columnCommentsSql = buildCatalogColumnCommentsSql(dbType, catalogScope);
   if (columnCommentsSql) {
     try {
-      const columnComments = await backend.executeQuery(scopeValue.config, columnCommentsSql);
+      const columnComments = await backend.executeQuery(scopeValue.config, columnCommentsSql, queryOptions);
       if (columnComments.rows.length > 0) {
         parts.push("", `## Column Comments (${columnComments.row_count})`, formatColumnCommentsTable(columnComments));
       }
@@ -240,7 +246,7 @@ export async function fetchDatabaseReport(backend: Backend, config: ConnectionCo
   const indexSql = buildCatalogIndexSql(dbType, catalogScope);
   if (indexSql) {
     try {
-      const indexes = await backend.executeQuery(scopeValue.config, indexSql);
+      const indexes = await backend.executeQuery(scopeValue.config, indexSql, queryOptions);
       if (indexes.rows.length > 0) {
         parts.push("", `## Indexes (${indexes.row_count})`, formatIndexTable(indexes, dbType));
       } else {
