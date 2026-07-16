@@ -27,6 +27,7 @@ import {
   cliConnectionLogOptions,
   pushConnectionLog,
   resolveConnectionRef,
+  resolveConnectionsByIndexRef,
   type Backend,
   type ConnectionConfig,
   type ProxyTunnelConfig,
@@ -34,6 +35,7 @@ import {
 import { connectionSummary, csvTable, errorPayload, formatCell, formatErrorMessage, mdTable } from "./cli-format.js";
 
 const FILE_CAPABLE_CONNECTION_TYPES = new Set(["sqlite", "duckdb", "access", "h2"]);
+const CONNECTION_BATCH_SEPARATOR = "\n---\n\n";
 const DEFAULT_PORTS: Record<string, number> = {
   kwdb: 26257,
   rqlite: 4001,
@@ -334,97 +336,168 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
     if (args[0] === "stats") {
       const usesDefaultConnection = !!env.DBX_CONNECTION && args.length === 1;
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx stats");
-      const connectionName = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
-      const config = await findConnectionOrThrow(backend, connectionName);
-      try {
-        const body = await fetchDatabaseStats(backend, config, {
-          database: flags.database,
-          schema: flags.schema,
-        });
-        if (flags.format === "json") {
-          return succeedJson({ connection: connectionName, database: flags.database, schema: flags.schema, stats: body });
+      const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const jsonResults: unknown[] = [];
+      const textParts: string[] = [];
+      for (let i = 0; i < configs.length; i++) {
+        const config = configs[i];
+        try {
+          const body = await fetchDatabaseStats(backend, config, {
+            database: flags.database,
+            schema: flags.schema,
+          });
+          if (flags.format === "json") {
+            jsonResults.push({
+              index: i + 1,
+              connection: config.name,
+              database: flags.database,
+              schema: flags.schema,
+              stats: body,
+            });
+          } else {
+            textParts.push(`${connectionBatchHeading(config, i + 1, configs.length)}${body}`);
+          }
+        } catch (error) {
+          if (error instanceof DatabaseStatsError) {
+            throw new CliError(error.code, error.message);
+          }
+          throw error;
         }
-        if (flags.format === "csv") {
-          throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx stats.");
-        }
-        return succeed(`${body}\n`);
-      } catch (error) {
-        if (error instanceof DatabaseStatsError) {
-          throw new CliError(error.code, error.message);
-        }
-        throw error;
       }
+      if (flags.format === "json") {
+        if (configs.length === 1) return succeedJson(jsonResults[0]);
+        return succeedJson({ connections: jsonResults });
+      }
+      if (flags.format === "csv") {
+        throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx stats.");
+      }
+      return succeed(`${joinBatchOutput(textParts)}\n`);
     }
 
     if (args[0] === "report") {
       const usesDefaultConnection = !!env.DBX_CONNECTION && args.length === 1;
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx report");
-      const connectionName = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
-      const config = await findConnectionOrThrow(backend, connectionName);
-      try {
-        const body = await fetchDatabaseReport(backend, config, {
-          database: flags.database,
-          schema: flags.schema,
-        });
-        if (flags.format === "json") {
-          return succeedJson({ connection: connectionName, database: flags.database, schema: flags.schema, report: body });
+      const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const jsonResults: unknown[] = [];
+      const textParts: string[] = [];
+      for (let i = 0; i < configs.length; i++) {
+        const config = configs[i];
+        try {
+          const body = await fetchDatabaseReport(backend, config, {
+            database: flags.database,
+            schema: flags.schema,
+          });
+          if (flags.format === "json") {
+            jsonResults.push({
+              index: i + 1,
+              connection: config.name,
+              database: flags.database,
+              schema: flags.schema,
+              report: body,
+            });
+          } else {
+            textParts.push(`${connectionBatchHeading(config, i + 1, configs.length)}${body}`);
+          }
+        } catch (error) {
+          if (error instanceof DatabaseStatsError) {
+            throw new CliError(error.code, error.message);
+          }
+          throw error;
         }
-        if (flags.format === "csv") {
-          throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx report.");
-        }
-        return succeed(`${body}\n`);
-      } catch (error) {
-        if (error instanceof DatabaseStatsError) {
-          throw new CliError(error.code, error.message);
-        }
-        throw error;
       }
+      if (flags.format === "json") {
+        if (configs.length === 1) return succeedJson(jsonResults[0]);
+        return succeedJson({ connections: jsonResults });
+      }
+      if (flags.format === "csv") {
+        throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx report.");
+      }
+      return succeed(`${joinBatchOutput(textParts)}\n`);
     }
 
     if (args[0] === "schema" && args[1] === "list") {
       ensureArgCount(args, 3, "dbx schema list");
-      const connectionName = required(args[2], "Connection name is required.");
-      const config = await findConnectionOrThrow(backend, connectionName);
-      const tables = await backend.listTables(config, flags.schema);
-      if (flags.format === "json") {
-        return succeedJson({
-          connection: connectionName,
-          schema: flags.schema,
-          tables: tables.map((table, index) => ({ index: index + 1, ...table })),
-        });
+      const connectionRef = required(args[2], "Connection name is required.");
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const jsonResults: unknown[] = [];
+      const textParts: string[] = [];
+      for (let i = 0; i < configs.length; i++) {
+        const config = configs[i];
+        const tables = await backend.listTables(config, flags.schema);
+        if (flags.format === "json") {
+          jsonResults.push({
+            index: i + 1,
+            connection: config.name,
+            schema: flags.schema,
+            tables: tables.map((table, index) => ({ index: index + 1, ...table })),
+          });
+        } else if (flags.format === "csv") {
+          throw new CliError("INVALID_OPTION", "CSV format is not supported for batch schema list.");
+        } else {
+          textParts.push(
+            `${connectionBatchHeading(config, i + 1, configs.length)}${mdTable(
+              ["#", "Table", "Type"],
+              tables.map((t, idx) => [String(idx + 1), t.name, t.type]),
+            )}`,
+          );
+        }
       }
-      if (flags.format === "csv") return succeed(csvTable(["index", "name", "type"], tables.map((table, index) => ({ index: index + 1, ...table }))));
-      return succeed(`${mdTable(["#", "Table", "Type"], tables.map((t, i) => [String(i + 1), t.name, t.type]))}\n`);
+      if (flags.format === "json") {
+        if (configs.length === 1) return succeedJson(jsonResults[0]);
+        return succeedJson({ connections: jsonResults });
+      }
+      if (flags.format === "csv") {
+        return succeed(csvTable(["index", "name", "type"], (await backend.listTables(configs[0], flags.schema)).map((table, index) => ({ index: index + 1, ...table }))));
+      }
+      return succeed(`${joinBatchOutput(textParts)}\n`);
     }
 
     if (args[0] === "schema" && args[1] === "describe") {
       ensureArgCount(args, 4, "dbx schema describe");
-      const connectionName = required(args[2], "Connection name is required.");
+      const connectionRef = required(args[2], "Connection name is required.");
       const table = required(args[3], "Table name is required.");
-      const config = await findConnectionOrThrow(backend, connectionName);
-      const columns = await backend.describeTable(config, table, flags.schema);
-      if (flags.format === "json") return succeedJson({ connection: connectionName, schema: flags.schema, table, columns });
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const jsonResults: unknown[] = [];
+      const textParts: string[] = [];
+      for (let i = 0; i < configs.length; i++) {
+        const config = configs[i];
+        const columns = await backend.describeTable(config, table, flags.schema);
+        if (flags.format === "json") {
+          jsonResults.push({ index: i + 1, connection: config.name, schema: flags.schema, table, columns });
+        } else if (flags.format === "csv") {
+          throw new CliError("INVALID_OPTION", "CSV format is not supported for batch schema describe.");
+        } else {
+          textParts.push(
+            `${connectionBatchHeading(config, i + 1, configs.length)}${mdTable(
+              ["Column", "Type", "Nullable", "Default", "Comment"],
+              columns.map((c) => [
+                c.is_primary_key ? `${c.name} (PK)` : c.name,
+                c.data_type,
+                c.is_nullable ? "YES" : "NO",
+                c.column_default ?? "",
+                c.comment ?? "",
+              ]),
+            )}`,
+          );
+        }
+      }
+      if (flags.format === "json") {
+        if (configs.length === 1) return succeedJson(jsonResults[0]);
+        return succeedJson({ connections: jsonResults });
+      }
       if (flags.format === "csv") {
+        const columns = await backend.describeTable(configs[0], table, flags.schema);
         return succeed(csvTable(["name", "data_type", "is_nullable", "is_primary_key", "column_default", "comment"], columns));
       }
-      return succeed(
-        `${mdTable(
-          ["Column", "Type", "Nullable", "Default", "Comment"],
-          columns.map((c) => [
-            c.is_primary_key ? `${c.name} (PK)` : c.name,
-            c.data_type,
-            c.is_nullable ? "YES" : "NO",
-            c.column_default ?? "",
-            c.comment ?? "",
-          ]),
-        )}\n`,
-      );
+      return succeed(`${joinBatchOutput(textParts)}\n`);
     }
 
     if (args[0] === "query") {
       const usesDefaultConnection = !!env.DBX_CONNECTION && args.length === (flags.file ? 1 : 2);
       ensureArgCount(args, usesDefaultConnection ? (flags.file ? 1 : 2) : flags.file ? 2 : 3, "dbx query");
-      const connectionName = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
+      const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
       if (flags.file && args[2]) {
         throw new CliError("INVALID_ARGUMENT", "Provide SQL either inline or with --file, not both.");
       }
@@ -440,54 +513,109 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       };
       const safety = evaluateSqlSafety(sql, safetyOptions);
       if (!safety.allowed) return failed("SQL_BLOCKED", safety.reason ?? "SQL blocked.", flags.json);
-      const config = await findConnectionOrThrow(backend, connectionName);
-      const result = await backend.executeQuery(config, sql, { maxRows: flags.maxRows, timeoutMs: flags.timeoutMs });
-      if (flags.format === "json") {
-        return succeedJson({ connection: connectionName, columns: result.columns, rows: result.rows, row_count: result.row_count });
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const jsonResults: unknown[] = [];
+      const textParts: string[] = [];
+      for (let i = 0; i < configs.length; i++) {
+        const config = configs[i];
+        const result = await backend.executeQuery(config, sql, { maxRows: flags.maxRows, timeoutMs: flags.timeoutMs });
+        if (flags.format === "json") {
+          jsonResults.push({
+            index: i + 1,
+            connection: config.name,
+            columns: result.columns,
+            rows: result.rows,
+            row_count: result.row_count,
+          });
+        } else if (flags.format === "csv") {
+          throw new CliError("INVALID_OPTION", "CSV format is not supported for batch query.");
+        } else if (result.columns.length === 0) {
+          textParts.push(`${connectionBatchHeading(config, i + 1, configs.length)}Query executed. ${result.row_count} row(s) affected.`);
+        } else {
+          textParts.push(
+            `${connectionBatchHeading(config, i + 1, configs.length)}${mdTable(
+              result.columns,
+              result.rows.map((row) => result.columns.map((column) => formatCell(row[column]))),
+            )}\n\n${result.row_count} row(s)`,
+          );
+        }
       }
-      if (flags.format === "csv") return succeed(csvTable(result.columns, result.rows));
-      if (result.columns.length === 0) return succeed(`Query executed. ${result.row_count} row(s) affected.\n`);
-      return succeed(
-        `${mdTable(
-          result.columns,
-          result.rows.map((row) => result.columns.map((column) => formatCell(row[column]))),
-        )}\n\n${result.row_count} row(s)\n`,
-      );
+      if (flags.format === "json") {
+        if (configs.length === 1) return succeedJson(jsonResults[0]);
+        return succeedJson({ connections: jsonResults });
+      }
+      if (flags.format === "csv") {
+        const result = await backend.executeQuery(configs[0], sql, { maxRows: flags.maxRows, timeoutMs: flags.timeoutMs });
+        return succeed(csvTable(result.columns, result.rows));
+      }
+      return succeed(`${joinBatchOutput(textParts)}\n`);
     }
 
     if (args[0] === "context") {
       const usesDefaultConnection = !!env.DBX_CONNECTION && args.length === 1;
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx context");
-      const connectionName = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
-      const config = await findConnectionOrThrow(backend, connectionName);
-      const context = await buildSchemaContext(backend, config, {
-        schema: flags.schema,
-        tables: flags.tables,
-        maxTables: flags.maxTables,
-      });
-      if (flags.format === "json") return succeedJson(context);
+      const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const jsonResults: unknown[] = [];
+      const textParts: string[] = [];
+      for (let i = 0; i < configs.length; i++) {
+        const config = configs[i];
+        const context = await buildSchemaContext(backend, config, {
+          schema: flags.schema,
+          tables: flags.tables,
+          maxTables: flags.maxTables,
+        });
+        if (flags.format === "json") {
+          jsonResults.push({ index: i + 1, ...context });
+        } else {
+          textParts.push(`${connectionBatchHeading(config, i + 1, configs.length)}${formatSchemaContext(context)}`);
+        }
+      }
+      if (flags.format === "json") {
+        if (configs.length === 1) return succeedJson(jsonResults[0]);
+        return succeedJson({ connections: jsonResults });
+      }
       if (flags.format === "csv") throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx context.");
-      return succeed(`${formatSchemaContext(context)}\n`);
+      return succeed(`${joinBatchOutput(textParts)}\n`);
     }
 
     if (args[0] === "open") {
       ensureArgCount(args, 3, "dbx open");
-      const connectionName = required(args[1], "Connection name is required.");
+      const connectionRef = required(args[1], "Connection name is required.");
       const table = required(args[2], "Table name is required.");
-      const response = await postBridge("/open-table", {
-        connection_name: connectionName,
-        table,
-        schema: flags.schema,
-        database: flags.database,
-      });
-      if (!response.ok) {
-        return failed("DBX_NOT_RUNNING", response.text || "DBX is not running. Please start DBX first.", flags.json);
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const jsonResults: unknown[] = [];
+      const textParts: string[] = [];
+      for (let i = 0; i < configs.length; i++) {
+        const config = configs[i];
+        const response = await postBridge("/open-table", {
+          connection_name: config.name,
+          table,
+          schema: flags.schema,
+          database: flags.database,
+        });
+        if (!response.ok) {
+          return failed("DBX_NOT_RUNNING", response.text || "DBX is not running. Please start DBX first.", flags.json);
+        }
+        if (flags.format === "json") {
+          jsonResults.push({
+            index: i + 1,
+            opened: true,
+            connection: config.name,
+            table,
+            schema: flags.schema,
+            database: flags.database,
+          });
+        } else {
+          textParts.push(`${connectionBatchHeading(config, i + 1, configs.length)}Opened ${table} in DBX`);
+        }
       }
       if (flags.format === "json") {
-        return succeedJson({ opened: true, connection: connectionName, table, schema: flags.schema, database: flags.database });
+        if (configs.length === 1) return succeedJson(jsonResults[0]);
+        return succeedJson({ connections: jsonResults });
       }
       if (flags.format === "csv") throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx open.");
-      return succeed(`Opened ${table} in DBX\n`);
+      return succeed(`${joinBatchOutput(textParts)}\n`);
     }
 
     return failed("USAGE", usage(), flags.json);
@@ -641,6 +769,29 @@ function splitCsv(value: string) {
     .filter(Boolean);
 }
 
+async function resolveConnectionsForCli(backend: Backend, ref: string): Promise<ConnectionConfig[]> {
+  const connections = await backend.loadConnections();
+  try {
+    const byIndex = resolveConnectionsByIndexRef(connections, ref);
+    if (byIndex !== undefined) return byIndex;
+    return [resolveConnectionRef(connections, ref)];
+  } catch (error) {
+    if (error instanceof ConnectionResolveError) {
+      throw new CliError(error.code, error.message);
+    }
+    throw error;
+  }
+}
+
+function connectionBatchHeading(config: ConnectionConfig, index: number, total: number): string {
+  if (total <= 1) return "";
+  return `## #${index} ${config.name}\n\n`;
+}
+
+function joinBatchOutput(parts: string[]): string {
+  return parts.join(CONNECTION_BATCH_SEPARATOR);
+}
+
 async function findConnectionOrThrow(backend: Backend, ref: string) {
   const connections = await backend.loadConnections();
   try {
@@ -681,13 +832,15 @@ function usage() {
     "      [--proxy] [--proxy-type socks5|http] [--proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]",
     "      [--proxy-profile-id id|# | --proxy-profile-name name|#] [--json]",
     "  dbx proxies list [--json]",
-    "  dbx stats <connection|#> [--schema name] [--database name] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx report <connection|#> [--schema name] [--database name] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx schema list <connection|#> [--schema name] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx schema describe <connection|#> <table> [--schema name] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx query <connection|#> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx context <connection|#> [--schema name] [--tables a,b] [--max-tables n] [--quiet|-q] [--verbose|-v] [--json]",
-    "  dbx open <connection|#> <table> [--schema name] [--database name] [--json]",
+    "  dbx stats <connection|#|range> [--schema name] [--database name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx report <connection|#|range> [--schema name] [--database name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx schema list <connection|#|range> [--schema name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx schema describe <connection|#|range> <table> [--schema name] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx query <connection|#|range> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx context <connection|#|range> [--schema name] [--tables a,b] [--max-tables n] [--quiet|-q] [--verbose|-v] [--json]",
+    "  dbx open <connection|#|range> <table> [--schema name] [--database name] [--json]",
+    "",
+    "Connection range (non-interactive CLI only): 1-15, 1..15, 1:15, #1-#15 — up to 15 connections, end index <= 15.",
   ].join("\n");
 }
 

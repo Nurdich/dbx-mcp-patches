@@ -48,6 +48,20 @@ dbx connections add --name prod --type postgres --host db.example.com --port 543
 
 Inline proxy flags and profile reference flags are **mutually exclusive**. Specify either `--proxy-profile-id` or `--proxy-profile-name`, not both.
 
+## Connection references
+
+List output includes a `#` column (1-based index). Use a single index or a **range** (CLI only, non-interactive):
+
+```bash
+dbx connections list
+dbx stats 1              # first connection
+dbx stats 1-15           # connections #1 through #15 (sequential)
+dbx report 3..5          # connections #3, #4, #5
+dbx query 2 "select 1"
+```
+
+Range syntax: `1-15`, `1..15`, `1:15`, `#1-#15`. Max 15 connections per range; end index ≤ 15.
+
 ## `dbx stats`
 
 Catalog-based overview (table metadata, size/row estimates) matching MCP `dbx_get_database_stats`:
@@ -118,6 +132,18 @@ dbx connections add --name prod --type postgres --host db.example.com --port 543
 ```
 
 内联 `proxy_*` 参数与 `--proxy-profile-id` / `--proxy-profile-name` **不可混用**。
+
+### 连接序号与范围（非交互 CLI）
+
+`dbx connections list` 的 `#` 列表示 1-based 序号。支持单个序号或范围批量：
+
+```bash
+dbx stats 1-15           # 依次对 #1–#15 执行 stats
+dbx report 3..5          # #3、#4、#5
+dbx query 1 "select 1"   # 单连接不变
+```
+
+范围语法：`1-15`、`1..15`、`1:15`、`#1-#15`。单次最多 15 个连接，结束序号 ≤ 15。
 
 ### 数据库状态概览
 

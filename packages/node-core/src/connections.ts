@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import { connectionLog, logResolvedConnection } from "./connection-log.js";
-import { parseListIndex, resolveConnectionByIndex } from "./list-index.js";
+import { ListIndexRangeError, parseListIndex, parseListIndexRange, resolveConnectionByIndex } from "./list-index.js";
 import { dbPath as defaultDbPath } from "./paths.js";
 
 export interface ConnectionConfig {
@@ -433,4 +433,34 @@ export function resolveConnectionRef(connections: readonly ConnectionConfig[], r
   }
 
   throw new ConnectionResolveError("CONNECTION_NOT_FOUND", `Connection "${ref}" not found.`);
+}
+
+/** Resolve one or more connections when ref is a list index or range (`1`, `1-15`, `1..15`, `1:15`, `#1-#15`). */
+export function resolveConnectionsByIndexRef(connections: readonly ConnectionConfig[], ref: string): ConnectionConfig[] | undefined {
+  let indices: number[];
+  try {
+    const parsed = parseListIndexRange(ref);
+    if (parsed === undefined) return undefined;
+    indices = parsed;
+  } catch (error) {
+    if (error instanceof ListIndexRangeError) {
+      throw new ConnectionResolveError(error.code, error.message);
+    }
+    throw error;
+  }
+
+  const configs: ConnectionConfig[] = [];
+  for (const index of indices) {
+    const config = resolveConnectionByIndex(connections, index);
+    if (!config) {
+      const hint = connections.length > 0 ? ` Valid range: 1-${connections.length}.` : "";
+      throw new ConnectionResolveError(
+        "CONNECTION_NOT_FOUND",
+        `Connection index #${index} not found. Run \`dbx connections list\`.${hint}`,
+      );
+    }
+    logResolvedConnection(config, indices.length === 1 ? ref.trim() : `#${index}`);
+    configs.push(config);
+  }
+  return configs;
 }

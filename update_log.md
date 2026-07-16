@@ -1,6 +1,72 @@
 # Update Log
 
-## 2026-07-16 — 修复 CLI 流逝输出非实时（批量延迟显示）
+## 2026-07-17 — CLI 连接序号范围批量（1–15）
+
+### 变更摘要
+
+CLI 非交互模式下，连接参数支持**序号范围**语法，一次命令按顺序对多个连接执行相同操作。MCP 仍仅支持单个序号（不变）。
+
+### 范围语法
+
+| 语法 | 示例 | 展开结果 |
+|------|------|----------|
+| 连字符 | `1-15` | 1, 2, …, 15 |
+| 双点 | `1..15` | 同上 |
+| 冒号 | `1:15` | 同上 |
+| 带 `#` | `#1-#15`、`#3-5` | 同上 |
+
+单个序号 `1`、`#2` 行为不变。
+
+### 范围限制
+
+| 规则 | 值 |
+|------|-----|
+| 起始序号 | ≥ 1 |
+| 结束序号 | ≤ 15 |
+| 单次批量连接数 | ≤ 15 |
+| 逆序范围 | 拒绝（如 `5-3`） |
+
+超出限制返回 `INVALID_LIST_INDEX_RANGE`。
+
+### 支持批量范围的 CLI 命令
+
+`stats`、`report`、`query`、`schema list`、`schema describe`、`context`、`open`
+
+- 按连接顺序依次执行
+- 文本输出：多连接时用 `## #N name` 标题 + `---` 分隔
+- `--json`：单连接保持原结构；多连接返回 `{ "connections": [ … ] }`
+- 进度日志仍即时写 stderr（每个连接解析/连接阶段独立输出）
+- **不**应用于交互式选择器；MCP 未扩展范围语法
+
+### node-core 新增/变更
+
+| 模块 | 导出 |
+|------|------|
+| `list-index.ts` | `parseListIndexRange`、`MAX_LIST_INDEX_RANGE_END`、`MAX_LIST_INDEX_RANGE_SIZE`、`ListIndexRangeError` |
+| `connections.ts` | `resolveConnectionsByIndexRef` |
+
+### 修改文件
+
+- `packages/node-core/src/list-index.ts`
+- `packages/node-core/src/connections.ts`
+- `packages/node-core/dist/list-index.js` / `.d.ts`
+- `packages/node-core/dist/connections.js` / `.d.ts`
+- `packages/cli/src/cli.ts`
+- `packages/cli/dist/cli.js`
+- `packages/cli/README.md`
+- `update_log.md`
+
+### 示例
+
+```bash
+dbx stats 1-15          # 连接 #1 到 #15 依次 stats
+dbx report 3-5          # 连接 #3、#4、#5
+dbx query 1 "select 1"  # 单连接不变
+dbx schema list 1..3
+```
+
+---
+
 
 ### 根因
 
