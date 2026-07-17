@@ -7,13 +7,16 @@ import { formatCell, mdTable } from "./format.js";
 import { appDataDir } from "./paths.js";
 import {
   DatabaseStatsError,
+  UNSUPPORTED_STATS_TYPES,
   buildCatalogStatsSql,
   buildCatalogSummarySql,
   deriveCatalogSummaryFromStats,
   fetchDatabaseStats,
   formatStatsOverviewTable,
+  isNonCatalogStatsType,
   metadataScope,
   resolveCatalogStatsScope,
+  unsupportedStatsOverviewMessage,
   type CatalogStatsScope,
   type DatabaseStatsOptions,
 } from "./database-stats.js";
@@ -21,7 +24,6 @@ import {
 const MYSQL_STATS_TYPES = new Set(["mysql", "doris", "starrocks", "manticoresearch"]);
 const POSTGRES_STATS_TYPES = new Set(["postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "dameng"]);
 const SQLITE_STATS_TYPES = new Set(["sqlite", "rqlite"]);
-const UNSUPPORTED_STATS_TYPES = new Set(["redis", "mongodb", "elasticsearch", "etcd", "neo4j", "cassandra", "milvus", "qdrant", "weaviate", "chromadb", "zookeeper"]);
 
 const MYSQL_SYSTEM_DATABASES = ["information_schema", "mysql", "performance_schema", "sys"] as const;
 const POSTGRES_SYSTEM_SCHEMAS = ["information_schema", "pg_catalog", "pg_toast"] as const;
@@ -180,14 +182,14 @@ export async function fetchDatabaseReport(backend: Backend, config: ConnectionCo
     const statsBody = await fetchDatabaseStats(backend, scopeValue.config, options);
     return ["# Database Report", "", statsBody].join("\n");
   }
+  if (isNonCatalogStatsType(dbType)) {
+    throw new DatabaseStatsError("UNSUPPORTED_DB_TYPE", unsupportedStatsOverviewMessage(dbType, "report"));
+  }
 
   const catalogScope = resolveCatalogStatsScope(dbType, options, scopeValue);
   const statsSql = buildCatalogStatsSql(dbType, catalogScope);
   if (!statsSql) {
-    throw new DatabaseStatsError(
-      "UNSUPPORTED_DB_TYPE",
-      `Database report is not supported for ${dbType}. Supported: MySQL/MariaDB family, PostgreSQL family, SQLite/rqlite, and other SQL engines with information_schema.`,
-    );
+    throw new DatabaseStatsError("UNSUPPORTED_DB_TYPE", unsupportedStatsOverviewMessage(dbType, "report"));
   }
 
   const parts: string[] = ["# Database Report", ""];

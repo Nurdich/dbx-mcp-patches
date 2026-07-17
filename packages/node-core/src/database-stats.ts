@@ -7,7 +7,34 @@ import { formatCell, mdTable } from "./format.js";
 const MYSQL_STATS_TYPES = new Set(["mysql", "doris", "starrocks", "manticoresearch"]);
 const POSTGRES_STATS_TYPES = new Set(["postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "dameng"]);
 const SQLITE_STATS_TYPES = new Set(["sqlite", "rqlite"]);
-const UNSUPPORTED_STATS_TYPES = new Set(["redis", "mongodb", "elasticsearch", "etcd", "neo4j", "cassandra", "milvus", "qdrant", "weaviate", "chromadb", "zookeeper"]);
+
+/** Non-SQL / non-Redis / non-Mongo types: fail fast for stats/report (do not call bridge). */
+export const NON_CATALOG_STATS_TYPES = new Set([
+  "elasticsearch",
+  "etcd",
+  "neo4j",
+  "cassandra",
+  "milvus",
+  "qdrant",
+  "weaviate",
+  "chromadb",
+  "zookeeper",
+  "mq",
+  "kafka",
+  "influxdb",
+]);
+
+/** Types that must not use information_schema catalog SQL builders (includes Redis/Mongo). */
+export const UNSUPPORTED_STATS_TYPES = new Set(["redis", "mongodb", ...NON_CATALOG_STATS_TYPES]);
+
+export function isNonCatalogStatsType(dbType: string): boolean {
+  return NON_CATALOG_STATS_TYPES.has(dbType);
+}
+
+export function unsupportedStatsOverviewMessage(dbType: string, kind: "stats" | "report" = "stats"): string {
+  const noun = kind === "report" ? "report" : "stats overview";
+  return `Database ${noun} is not supported for ${dbType}. Supported: Redis, MongoDB, MySQL/MariaDB family, PostgreSQL family, SQLite/rqlite, and other SQL engines with information_schema.`;
+}
 
 const MYSQL_SYSTEM_DATABASES = ["information_schema", "mysql", "performance_schema", "sys"] as const;
 const POSTGRES_SYSTEM_SCHEMAS = ["information_schema", "pg_catalog", "pg_toast"] as const;
@@ -397,14 +424,14 @@ export async function fetchDatabaseStats(backend: Backend, config: ConnectionCon
   if (dbType === "mongodb") {
     return fetchMongoDatabaseStats(backend, scopeValue.config, scopeValue.schema);
   }
+  if (isNonCatalogStatsType(dbType)) {
+    throw new DatabaseStatsError("UNSUPPORTED_DB_TYPE", unsupportedStatsOverviewMessage(dbType, "stats"));
+  }
 
   const catalogScope = resolveCatalogStatsScope(dbType, options, scopeValue);
   const statsSql = buildCatalogStatsSql(dbType, catalogScope);
   if (!statsSql) {
-    throw new DatabaseStatsError(
-      "UNSUPPORTED_DB_TYPE",
-      `Database stats overview is not supported for ${dbType}. Supported: MySQL/MariaDB family, PostgreSQL family, SQLite/rqlite, and other SQL engines with information_schema.`,
-    );
+    throw new DatabaseStatsError("UNSUPPORTED_DB_TYPE", unsupportedStatsOverviewMessage(dbType, "stats"));
   }
 
   const parts: string[] = [];

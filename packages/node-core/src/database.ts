@@ -1182,10 +1182,19 @@ async function executeRedisCommandDirect(config: ConnectionConfig, db: number, c
     });
 
     try {
+      connectionLog(`Redis auth: ${config.password ? "password set" : "no password stored"}`, { verboseOnly: true });
       await client.connect();
       connectionLog(`Executing Redis command: ${command}`);
       const value = await client.call(command, ...argv.slice(1));
       return { command, safety, value: redisValueToJson(value) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/NOAUTH/i.test(message) && !(config.password || "").trim()) {
+        throw new Error(
+          "NOAUTH Authentication required (no password stored for this connection; set the password in DBX and retry).",
+        );
+      }
+      throw error;
     } finally {
       client.disconnect();
     }

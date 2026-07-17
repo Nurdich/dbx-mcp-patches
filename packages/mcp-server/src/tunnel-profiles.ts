@@ -211,3 +211,35 @@ export function buildProxyProfileReferenceLayer(profile: TunnelProfile): Record<
     password: "",
   };
 }
+
+/**
+ * Replace any existing proxy layers with a saved-profile reference stub.
+ * Non-proxy layers (e.g. SSH) are preserved; legacy proxy_* fields are cleared.
+ */
+export function applyProxyProfileOverride<T extends { transport_layers?: unknown[] }>(
+  config: T,
+  profile: TunnelProfile,
+  layerId: string = randomUUID(),
+): T {
+  const existing = Array.isArray(config.transport_layers) ? config.transport_layers : [];
+  const kept = existing.filter((layer) => (layer as { type?: string }).type !== "proxy");
+  const stub = { ...buildProxyProfileReferenceLayer(profile), id: layerId };
+  const next = {
+    ...config,
+    transport_layers: [...kept, stub],
+  } as T & {
+    proxy_enabled?: boolean;
+    proxy_type?: string;
+    proxy_host?: string;
+    proxy_port?: number;
+    proxy_username?: string;
+    proxy_password?: string;
+  };
+  next.proxy_enabled = false;
+  delete next.proxy_type;
+  delete next.proxy_host;
+  delete next.proxy_port;
+  delete next.proxy_username;
+  delete next.proxy_password;
+  return next;
+}
