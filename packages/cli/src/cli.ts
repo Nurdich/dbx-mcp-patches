@@ -62,21 +62,51 @@ function batchErrorCode(error: Error): string {
   return "ERROR";
 }
 
+function isBatchSkipped(error: Error): boolean {
+  return error instanceof CliError && error.code === "SKIPPED_UNSUPPORTED";
+}
+
 function formatBatchErrorBody(config: ConnectionConfig, error: Error): string {
+  if (isBatchSkipped(error)) {
+    return `**Skipped** (${config.name}): ${error.message}`;
+  }
   const code = error instanceof CliError ? `[${error.code}] ` : "";
   return `**Error** (${config.name}): ${code}${error.message}`;
 }
 
 function batchExitCode(results: BatchItemResult<unknown>[]): number {
-  return results.some((r) => !r.ok) ? 1 : 0;
+  return results.some((r) => !r.ok && !isBatchSkipped(r.error)) ? 1 : 0;
 }
 
 function formatBatchSummary(results: BatchItemResult<unknown>[], configs: ConnectionConfig[]): string {
-  const failures = results.filter((r): r is Extract<BatchItemResult<unknown>, { ok: false }> => !r.ok);
-  if (failures.length === 0) return "";
-  const successes = results.length - failures.length;
-  const lines = failures.map((r) => `- #${r.index + 1} ${configs[r.index]!.name}: ${r.error.message}`);
-  return `\n---\n\nBatch: ${successes}/${results.length} succeeded\nFailures:\n${lines.join("\n")}\n`;
+  const skipped = results.filter((r): r is Extract<BatchItemResult<unknown>, { ok: false }> => !r.ok && isBatchSkipped(r.error));
+  const failures = results.filter((r): r is Extract<BatchItemResult<unknown>, { ok: false }> => !r.ok && !isBatchSkipped(r.error));
+  if (failures.length === 0 && skipped.length === 0) return "";
+  const successes = results.filter((r) => r.ok).length;
+  const parts = [`\n---\n\nBatch: ${successes}/${results.length} succeeded`];
+  if (skipped.length > 0) {
+    parts.push(
+      `Skipped (unsupported):`,
+      ...skipped.map((r) => `- #${r.index + 1} ${configs[r.index]!.name}: ${r.error.message}`),
+    );
+  }
+  if (failures.length > 0) {
+    parts.push(
+      `Failures:`,
+      ...failures.map((r) => `- #${r.index + 1} ${configs[r.index]!.name}: ${r.error.message}`),
+    );
+  }
+  return `${parts.join("\n")}\n`;
+}
+
+function mapStatsReportError(error: unknown, skipUnsupported: boolean): never {
+  if (error instanceof DatabaseStatsError) {
+    if (error.code === "UNSUPPORTED_DB_TYPE" && skipUnsupported) {
+      throw new CliError("SKIPPED_UNSUPPORTED", error.message);
+    }
+    throw new CliError(error.code, error.message);
+  }
+  throw error;
 }
 
 function finishBatchOutput(
@@ -153,6 +183,8 @@ interface ParsedFlags {
   quiet: boolean;
   verbose: boolean;
   parallel?: number;
+  /** Default true for stats/report: unsupported db types are skipped (not failed). */
+  skipUnsupported: boolean;
   noSave: boolean;
   output?: string;
 }
@@ -333,7 +365,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
           );
         }
         savedProxyLabel = profile.name?.trim() || profile.id;
-        baseConfig.transport_layers = [proxyProfileReferenceLayer(profile, randomUUID())];
+        Object.assign(baseConfig, applyProxyProfileOverride(baseConfig, profile));
       } else if (flags.proxy) {
         if (!flags.proxyHost?.trim()) {
           throw new CliError("INVALID_ARGUMENT", "--proxy-host is required when --proxy is set.");
@@ -400,10 +432,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
             timeoutMs: flags.timeoutMs,
           });
         } catch (error) {
-          if (error instanceof DatabaseStatsError) {
-            throw new CliError(error.code, error.message);
-          }
-          throw error;
+          mapStatsReportError(error, flags.skipUnsupported);
         }
       });
       const jsonResults = batchResults.map((r, i) => ({
@@ -413,7 +442,12 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         schema: flags.schema,
         ...(r.ok
           ? { ok: true as const, stats: r.value }
-          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
+          : {
+              ok: false as const,
+              error: r.error.message,
+              code: batchErrorCode(r.error),
+              ...(isBatchSkipped(r.error) ? { skipped: true as const } : {}),
+            }),
       }));
       const textParts = batchResults.map((r, i) =>
         `${connectionBatchHeading(configs[i], i + 1, configs.length)}${r.ok ? r.value : formatBatchErrorBody(configs[i], r.error)}`,
@@ -444,10 +478,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
             timeoutMs: flags.timeoutMs,
           });
         } catch (error) {
-          if (error instanceof DatabaseStatsError) {
-            throw new CliError(error.code, error.message);
-          }
-          throw error;
+          mapStatsReportError(error, flags.skipUnsupported);
         }
       });
       const jsonResults = batchResults.map((r, i) => ({
@@ -457,7 +488,12 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
         schema: flags.schema,
         ...(r.ok
           ? { ok: true as const, report: r.value }
-          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
+          : {
+              ok: false as const,
+              error: r.error.message,
+              code: batchErrorCode(r.error),
+              ...(isBatchSkipped(r.error) ? { skipped: true as const } : {}),
+            }),
       }));
       const textParts = batchResults.map((r, i) =>
         `${connectionBatchHeading(configs[i], i + 1, configs.length)}${r.ok ? r.value : formatBatchErrorBody(configs[i], r.error)}`,
@@ -582,7 +618,11 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       }
       const sqlArg = usesDefaultConnection ? args[1] : args[2];
       const sql = flags.file ? await readFile(flags.file, "utf-8") : required(sqlArg, "SQL string or --file is required.");
-      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const configs = await applyOptionalProxyProfileOverride(
+        backend,
+        await resolveConnectionsForCli(backend, connectionRef),
+        flags,
+      );
       const envSafety = sqlSafetyFromCliEnv(env);
       if (flags.allowDangerous && !flags.allowWrites && !envSafety.allowWrites) {
         throw new CliError("INVALID_OPTION", "--allow-dangerous-sql requires --allow-writes.");
@@ -739,6 +779,7 @@ function parseFlags(argv: string[]): ParsedFlags {
     version: false,
     quiet: false,
     verbose: false,
+    skipUnsupported: true,
     noSave: false,
   };
 
@@ -790,6 +831,8 @@ function parseFlags(argv: string[]): ParsedFlags {
     else if (arg === "--proxy-password") flags.proxyPassword = readOptionValue(argv, ++i, "--proxy-password");
     else if (arg === "--proxy-profile-id") flags.proxyProfileId = readOptionValue(argv, ++i, "--proxy-profile-id");
     else if (arg === "--proxy-profile-name") flags.proxyProfileName = readOptionValue(argv, ++i, "--proxy-profile-name");
+    else if (arg === "--skip-unsupported") flags.skipUnsupported = true;
+    else if (arg === "--no-skip-unsupported") flags.skipUnsupported = false;
     else if (arg === "--no-save" || arg === "-n") flags.noSave = true;
     else if (arg === "--output" || arg === "-o") flags.output = readOptionValue(argv, ++i, arg);
     else if (arg.startsWith("-")) throw new CliError("UNKNOWN_OPTION", `Unknown option: ${arg}`);
@@ -885,6 +928,52 @@ async function resolveConnectionsForCli(backend: Backend, ref: string): Promise<
     }
     throw error;
   }
+}
+
+/**
+ * One-shot proxy profile override for stats/report/query: replaces existing proxy
+ * layers on each resolved connection for this request only (does not persist).
+ */
+async function applyOptionalProxyProfileOverride(
+  backend: Backend,
+  configs: ConnectionConfig[],
+  flags: Pick<ParsedFlags, "proxyProfileId" | "proxyProfileName">,
+): Promise<ConnectionConfig[]> {
+  const profileRef = hasProxyProfileRef({
+    proxy_profile_id: flags.proxyProfileId,
+    proxy_profile_name: flags.proxyProfileName,
+  });
+  if (!profileRef) return configs;
+  if (flags.proxyProfileId?.trim() && flags.proxyProfileName?.trim()) {
+    throw new CliError("PROXY_CONFLICT", "Specify either --proxy-profile-id or --proxy-profile-name, not both.");
+  }
+  const profiles = await loadTunnelProfilesForBackend(backend);
+  const proxies = profiles.filter((profile) => profile.type === "proxy");
+  if (flags.proxyProfileName?.trim() && !flags.proxyProfileId?.trim()) {
+    const matches = findProxyProfilesByName(profiles, flags.proxyProfileName);
+    if (matches.length > 1) {
+      const lines = matches.map((item) => {
+        const proxyIdx = proxies.indexOf(item);
+        const num = proxyIdx >= 0 ? proxyIdx + 1 : "?";
+        return `- #${num} ${item.id}: ${proxyProfileSummary(item as { type: "proxy" } & ProxyTunnelConfig)}`;
+      });
+      throw new CliError(
+        "AMBIGUOUS_PROXY_PROFILE",
+        `Multiple proxy profiles named "${flags.proxyProfileName}". Specify --proxy-profile-id:\n${lines.join("\n")}`,
+      );
+    }
+  }
+  const profile = findProxyProfile(profiles, {
+    proxy_profile_id: flags.proxyProfileId,
+    proxy_profile_name: flags.proxyProfileName,
+  });
+  if (!profile || !isProxyTunnelProfile(profile)) {
+    throw new CliError(
+      "PROXY_PROFILE_NOT_FOUND",
+      "Proxy profile not found. Use `dbx proxies list` to see saved profiles from DBX Settings > Tunnels.",
+    );
+  }
+  return configs.map((config) => applyProxyProfileOverride(config, profile));
 }
 
 function batchConnectionLogOptions(
@@ -1081,8 +1170,8 @@ function usage() {
     "      [--proxy] [--proxy-type socks5|http] [-H, --proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]",
     "      [--proxy-profile-id id|# | --proxy-profile-name name|#] [-j, --json]",
     "  dbx proxies list [-j, --json]",
-    "  dbx stats <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
-    "  dbx report <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json] [-n, --no-save] [-o, --output path]",
+    "  dbx stats <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [-q, --quiet] [-v, --verbose] [-j, --json]",
+    "  dbx report <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [-q, --quiet] [-v, --verbose] [-j, --json] [-n, --no-save] [-o, --output path]",
     "  dbx schema list <connection|#|range> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
     "  dbx schema describe <connection|#|range> <table> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
     "  dbx query <connection|#|range> <sql> [--file path] [--limit n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
@@ -1100,6 +1189,8 @@ function usage() {
     "  -H, --proxy-host H   Proxy host (connections add)",
     "  -o, --output PATH    Report output file or batch directory (dbx report)",
     "  -n, --no-save        Skip saving report to file (dbx report)",
+    "  --skip-unsupported   stats/report: treat unsupported types as skipped (default)",
+    "  --no-skip-unsupported stats/report: treat unsupported types as failures",
     "",
     "Connection range (non-interactive CLI only): 1-15, 1..15, 1:15, #1-#15, 23-50 — any valid index range (no span cap).",
     `Parallel batch: -P or --parallel runs connections concurrently (default ${DEFAULT_PARALLEL_CONCURRENCY}); -P 3 limits to 3 at a time. Omit for sequential.`,
