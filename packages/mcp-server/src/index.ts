@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { z } from "zod";
 import {
   buildSchemaContext,
+  ConnectionResolveError,
   createBackend,
   evaluateRedisCommandSafety,
   evaluateMongoAggregateSafety,
@@ -22,6 +23,7 @@ import {
   postBridge,
   logSqlDiagnostic,
   resolveConnectionByIndex,
+  resolveConnectionsByIndexRef,
   sqlSafetyFromEnv,
   splitSqlStatements,
   supportsHashLineComments,
@@ -174,8 +176,43 @@ async function loadScopedConnections(backend: Backend, scope: McpScope): Promise
   return connections.filter((config) => connectionMatchesScope(config, scope));
 }
 
-async function resolveConnection(backend: Backend, scope: McpScope, requestedId?: string, requestedName?: string): Promise<{ config?: ConnectionConfig; error?: ReturnType<typeof toolError> }> {
+const MCP_BATCH_SEPARATOR = "\n---\n\n";
+const CONNECTION_REF_HINT = "Name, list index (#), or range (e.g. 1-15, 1..15) from dbx_list_connections";
+
+function connectionBatchHeading(config: ConnectionConfig, index: number, total: number): string {
+  if (total <= 1) return "";
+  return `### #${index} ${connectionIdentity(config)}\n\n`;
+}
+
+function formatMcpBatchSummary(successes: number, skipped: number, failures: number, total: number): string {
+  if (total <= 1 || (skipped === 0 && failures === 0)) return "";
+  const parts = [`\n---\n\nBatch: ${successes}/${total} succeeded`];
+  if (skipped > 0) parts.push(`Skipped (unsupported): ${skipped}`);
+  if (failures > 0) parts.push(`Failures: ${failures}`);
+  return `${parts.join("\n")}\n`;
+}
+
+/** Resolve one or more connections; supports list index ranges like CLI (`1-15`, `1..15`, `#1-#15`). */
+async function resolveConnections(
+  backend: Backend,
+  scope: McpScope,
+  requestedId?: string,
+  requestedName?: string,
+): Promise<{ configs?: ConnectionConfig[]; error?: ReturnType<typeof toolError> }> {
   const connections = await loadScopedConnections(backend, scope);
+
+  const tryIndexRange = (ref: string): { matched: boolean; configs?: ConnectionConfig[]; error?: ReturnType<typeof toolError> } => {
+    try {
+      const byIndex = resolveConnectionsByIndexRef(connections, ref);
+      if (byIndex === undefined) return { matched: false };
+      return { matched: true, configs: byIndex };
+    } catch (error) {
+      if (error instanceof ConnectionResolveError) {
+        return { matched: true, error: toolError(error.code, error.message) };
+      }
+      throw error;
+    }
+  };
 
   const resolveFromListIndex = (index: number, label: string) => {
     const config = resolveConnectionByIndex(connections, index);
@@ -183,16 +220,19 @@ async function resolveConnection(backend: Backend, scope: McpScope, requestedId?
       const hint = connections.length > 0 ? ` Valid range: 1-${connections.length}.` : "";
       return { error: toolError("CONNECTION_NOT_FOUND", `Connection index #${index} not found (${label}). Use dbx_list_connections to see available connections.${hint}`) };
     }
-    return { config };
+    return { configs: [config] };
   };
 
   // connection_id takes priority over connection_name when both are provided.
   if (requestedId?.trim()) {
     const trimmed = requestedId.trim();
     const config = connections.find((c) => c.id === trimmed);
-    if (config) return { config };
-    const listIndex = parseListIndex(trimmed);
-    if (listIndex !== undefined) return resolveFromListIndex(listIndex, `connection_id "${trimmed}"`);
+    if (config) return { configs: [config] };
+    const ranged = tryIndexRange(trimmed);
+    if (ranged.matched) {
+      if (ranged.error) return { error: ranged.error };
+      return { configs: ranged.configs };
+    }
     return { error: toolError("CONNECTION_NOT_FOUND", `Connection with id "${requestedId}" not found.`) };
   }
 
@@ -201,12 +241,15 @@ async function resolveConnection(backend: Backend, scope: McpScope, requestedId?
     const trimmed = requestedName.trim();
     const matching = connections.filter((c) => c.name.toLowerCase() === trimmed.toLowerCase());
     if (matching.length === 0) {
-      const listIndex = parseListIndex(trimmed);
-      if (listIndex !== undefined) return resolveFromListIndex(listIndex, `connection_name "${trimmed}"`);
+      const ranged = tryIndexRange(trimmed);
+      if (ranged.matched) {
+        if (ranged.error) return { error: ranged.error };
+        return { configs: ranged.configs };
+      }
       return { error: toolError("CONNECTION_NOT_FOUND", `Connection "${requestedName}" not found.`) };
     }
     if (matching.length > 1) {
-      const lines = matching.map((c, i) => {
+      const lines = matching.map((c) => {
         const idx = connections.indexOf(c);
         const num = idx >= 0 ? idx + 1 : "?";
         return `- #${num} ${c.id}: ${c.db_type} @ ${c.host}:${c.port}`;
@@ -215,7 +258,7 @@ async function resolveConnection(backend: Backend, scope: McpScope, requestedId?
         error: toolError("AMBIGUOUS_CONNECTION", `Multiple connections found with name "${requestedName}". Please specify connection_id or list index (#):\n${lines.join("\n")}`),
       };
     }
-    return { config: matching[0] };
+    return { configs: [matching[0]!] };
   }
 
   const [scopedConfig] = connections;
@@ -223,19 +266,46 @@ async function resolveConnection(backend: Backend, scope: McpScope, requestedId?
   if (requestedName?.trim()) {
     const trimmed = requestedName.trim();
     if (trimmed !== scopedConfig.name && trimmed !== scopedConfig.id) {
+      const ranged = tryIndexRange(trimmed);
+      if (ranged.matched) {
+        if (ranged.error) return { error: ranged.error };
+        if (ranged.configs?.length === 1 && ranged.configs[0] === scopedConfig) return { configs: [scopedConfig] };
+        if (ranged.configs?.length === 1 && connections.length === 1 && parseListIndex(trimmed) === 1) return { configs: [scopedConfig] };
+        return { error: toolError("CONNECTION_OUT_OF_SCOPE", `Connection range "${requestedName}" is outside this DBX AI session scope.`) };
+      }
       const listIndex = parseListIndex(trimmed);
-      if (listIndex === 1 && connections.length === 1) return { config: scopedConfig };
+      if (listIndex === 1 && connections.length === 1) return { configs: [scopedConfig] };
       if (listIndex !== undefined) return resolveFromListIndex(listIndex, `connection_name "${trimmed}"`);
       return { error: toolError("CONNECTION_OUT_OF_SCOPE", `Connection "${requestedName}" is outside this DBX AI session scope.`) };
     }
   }
-  return { config: scopedConfig };
+  return { configs: [scopedConfig] };
+}
+
+async function resolveConnection(
+  backend: Backend,
+  scope: McpScope,
+  requestedId?: string,
+  requestedName?: string,
+): Promise<{ config?: ConnectionConfig; error?: ReturnType<typeof toolError> }> {
+  const { configs, error } = await resolveConnections(backend, scope, requestedId, requestedName);
+  if (error) return { error };
+  if (!configs?.length) return { error: toolError("CONNECTION_NOT_FOUND", "Connection name is required.") };
+  if (configs.length > 1) {
+    return {
+      error: toolError(
+        "CONNECTION_RANGE",
+        `Connection range resolves to ${configs.length} connections. This tool accepts a single connection; use a single index/name, or a batch-capable tool (dbx_get_database_stats / dbx_get_database_report / dbx_execute_query / dbx_list_tables / dbx_describe_table / dbx_get_schema_context).`,
+      ),
+    };
+  }
+  return { config: configs[0] };
 }
 
 /**
  * One-shot proxy profile override: replaces existing proxy layers for this request only.
  */
-async function resolveConnectionWithProxyOverride(
+async function resolveConnectionsWithProxyOverride(
   backend: Backend,
   scope: McpScope,
   isWebMode: boolean,
@@ -245,10 +315,10 @@ async function resolveConnectionWithProxyOverride(
     proxy_profile_id?: string;
     proxy_profile_name?: string;
   },
-): Promise<{ config?: ConnectionConfig; error?: ReturnType<typeof toolError> }> {
-  const { config, error } = await resolveConnection(backend, scope, args.connection_id, args.connection_name);
+): Promise<{ configs?: ConnectionConfig[]; error?: ReturnType<typeof toolError> }> {
+  const { configs, error } = await resolveConnections(backend, scope, args.connection_id, args.connection_name);
   if (error) return { error };
-  if (!hasProxyProfileRef(args)) return { config };
+  if (!hasProxyProfileRef(args)) return { configs };
 
   if (args.proxy_profile_id?.trim() && args.proxy_profile_name?.trim()) {
     return { error: toolError("PROXY_CONFLICT", "Specify either proxy_profile_id or proxy_profile_name, not both.") };
@@ -284,7 +354,32 @@ async function resolveConnectionWithProxyOverride(
       ),
     };
   }
-  return { config: applyProxyProfileOverride(config!, profile) };
+  return { configs: configs!.map((config) => applyProxyProfileOverride(config, profile)) };
+}
+
+async function resolveConnectionWithProxyOverride(
+  backend: Backend,
+  scope: McpScope,
+  isWebMode: boolean,
+  args: {
+    connection_id?: string;
+    connection_name?: string;
+    proxy_profile_id?: string;
+    proxy_profile_name?: string;
+  },
+): Promise<{ config?: ConnectionConfig; error?: ReturnType<typeof toolError> }> {
+  const { configs, error } = await resolveConnectionsWithProxyOverride(backend, scope, isWebMode, args);
+  if (error) return { error };
+  if (!configs?.length) return { error: toolError("CONNECTION_NOT_FOUND", "Connection name is required.") };
+  if (configs.length > 1) {
+    return {
+      error: toolError(
+        "CONNECTION_RANGE",
+        `Connection range resolves to ${configs.length} connections. This tool accepts a single connection; use a batch-capable tool or a single index/name.`,
+      ),
+    };
+  }
+  return { config: configs[0] };
 }
 
 export function createDbxMcpServer(backend: Backend, options: { isWebMode?: boolean } = {}): McpServer {
@@ -325,193 +420,327 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
 
   server.tool(
     "dbx_list_tables",
-    "List tables and views for a database connection",
+    "List tables and views for a database connection. Accepts connection ranges (e.g. 1-15); runs sequentially.",
     {
-      connection_id: z.string().optional().describe("Unique ID of the DBX connection, or list index (#) from dbx_list_connections (e.g. 1 or #2)"),
-      connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
+      connection_id: z.string().optional().describe(`Unique ID of the DBX connection, or list index/range from dbx_list_connections (e.g. 1, #2, 1-15)`),
+      connection_name: z.string().optional().describe(CONNECTION_REF_HINT),
       database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
       schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, login user for Dameng)"),
     },
     async ({ connection_id, connection_name, database, schema }) => {
-      const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
+      const { configs, error } = await resolveConnections(backend, scope, connection_id, connection_name);
       if (error) return error;
-      const resolvedConfig = config!;
-      const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
-      const outcome = await runConnectingTool(resolvedConfig, () => backend.listTables(scopeValue.config, scopeValue.schema));
-      if ("error" in outcome) {
-        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        return toolErrorWithProgress("LIST_TABLES_ERROR", msg, outcome.progress);
+      const resolvedConfigs = configs!;
+      const parts: string[] = [];
+      let failures = 0;
+      for (let i = 0; i < resolvedConfigs.length; i++) {
+        const resolvedConfig = resolvedConfigs[i]!;
+        const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
+        const outcome = await runConnectingTool(resolvedConfig, () => backend.listTables(scopeValue.config, scopeValue.schema));
+        const heading = connectionBatchHeading(resolvedConfig, i + 1, resolvedConfigs.length);
+        if ("error" in outcome) {
+          failures++;
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          parts.push(prependConnectionProgress(`${heading}**Error** (${resolvedConfig.name}): LIST_TABLES_ERROR: ${msg}`, outcome.progress));
+          continue;
+        }
+        const tables = outcome.value;
+        const body =
+          tables.length === 0
+            ? "No tables found."
+            : mdTable(
+                ["#", "Table", "Type"],
+                tables.map((t, idx) => [String(idx + 1), t.name, t.type]),
+              );
+        parts.push(
+          resolvedConfigs.length === 1
+            ? labeledTextWithProgress(resolvedConfig, body, outcome.progress).content[0]!.text
+            : prependConnectionProgress(`${heading}${body}`, outcome.progress),
+        );
       }
-      const { value: tables, progress } = outcome;
-      if (tables.length === 0) return toolResultWithProgress(text("No tables found."), progress);
-      const rows = tables.map((t, i) => [String(i + 1), t.name, t.type]);
-      return labeledTextWithProgress(resolvedConfig, mdTable(["#", "Table", "Type"], rows), progress);
+      const summary = formatMcpBatchSummary(resolvedConfigs.length - failures, 0, failures, resolvedConfigs.length);
+      const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
+      return failures > 0 && resolvedConfigs.length > 1 ? { ...result, isError: true } : result;
     },
   );
 
   server.tool(
     "dbx_describe_table",
-    "Get column definitions for a table",
+    "Get column definitions for a table. Accepts connection ranges (e.g. 1-15); runs sequentially.",
     {
-      connection_id: z.string().optional().describe("Unique ID of the DBX connection, or list index (#) from dbx_list_connections (e.g. 1 or #2)"),
-      connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
+      connection_id: z.string().optional().describe(`Unique ID of the DBX connection, or list index/range from dbx_list_connections (e.g. 1, #2, 1-15)`),
+      connection_name: z.string().optional().describe(CONNECTION_REF_HINT),
       table: z.string().describe("Table name"),
       database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
       schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, login user for Dameng)"),
     },
     async ({ connection_id, connection_name, table, database, schema }) => {
-      const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
+      const { configs, error } = await resolveConnections(backend, scope, connection_id, connection_name);
       if (error) return error;
-      const resolvedConfig = config!;
-      const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
-      const outcome = await runConnectingTool(resolvedConfig, () => backend.describeTable(scopeValue.config, table, scopeValue.schema));
-      if ("error" in outcome) {
-        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        return toolErrorWithProgress("DESCRIBE_TABLE_ERROR", msg, outcome.progress);
+      const resolvedConfigs = configs!;
+      const parts: string[] = [];
+      let failures = 0;
+      for (let i = 0; i < resolvedConfigs.length; i++) {
+        const resolvedConfig = resolvedConfigs[i]!;
+        const scopeValue = metadataScope(resolvedConfig, database ?? scope.database, schema);
+        const outcome = await runConnectingTool(resolvedConfig, () => backend.describeTable(scopeValue.config, table, scopeValue.schema));
+        const heading = connectionBatchHeading(resolvedConfig, i + 1, resolvedConfigs.length);
+        if ("error" in outcome) {
+          failures++;
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          parts.push(prependConnectionProgress(`${heading}**Error** (${resolvedConfig.name}): DESCRIBE_TABLE_ERROR: ${msg}`, outcome.progress));
+          continue;
+        }
+        const columns = outcome.value;
+        const body =
+          columns.length === 0
+            ? "No columns found."
+            : mdTable(
+                ["Column", "Type", "Nullable", "Default", "Comment"],
+                columns.map((c) => [
+                  c.is_primary_key ? `${c.name} (PK)` : c.name,
+                  c.data_type,
+                  c.is_nullable ? "YES" : "NO",
+                  c.column_default ?? "",
+                  c.comment ?? "",
+                ]),
+              );
+        parts.push(
+          resolvedConfigs.length === 1
+            ? labeledTextWithProgress(resolvedConfig, body, outcome.progress).content[0]!.text
+            : prependConnectionProgress(`${heading}${body}`, outcome.progress),
+        );
       }
-      const { value: columns, progress } = outcome;
-      if (columns.length === 0) return toolResultWithProgress(text("No columns found."), progress);
-      const rows = columns.map((c) => [c.is_primary_key ? `${c.name} (PK)` : c.name, c.data_type, c.is_nullable ? "YES" : "NO", c.column_default ?? "", c.comment ?? ""]);
-      return labeledTextWithProgress(resolvedConfig, mdTable(["Column", "Type", "Nullable", "Default", "Comment"], rows), progress);
+      const summary = formatMcpBatchSummary(resolvedConfigs.length - failures, 0, failures, resolvedConfigs.length);
+      const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
+      return failures > 0 && resolvedConfigs.length > 1 ? { ...result, isError: true } : result;
     },
   );
 
   server.tool(
     "dbx_get_database_stats",
-    "Get database status overview from system catalog views (information_schema, pg_catalog, sqlite_master, etc.): table metadata, size estimates, and row estimates without manual COUNT queries",
+    "Get database status overview from system catalog views (information_schema, pg_catalog, sqlite_master, etc.): table metadata, size estimates, and row estimates without manual COUNT queries. Accepts connection ranges (e.g. 1-15); runs sequentially (no --parallel).",
     {
-      connection_id: z.string().optional().describe("Unique ID of the DBX connection, or list index (#) from dbx_list_connections (e.g. 1 or #2)"),
-      connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
+      connection_id: z.string().optional().describe(`Unique ID of the DBX connection, or list index/range from dbx_list_connections (e.g. 1, #2, 1-15)`),
+      connection_name: z.string().optional().describe(CONNECTION_REF_HINT),
       database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
       schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, dbo for SQL Server, login user for Dameng)"),
+      timeout_ms: z.number().int().min(1).optional().describe("Per-connection query timeout in milliseconds (aligned with CLI -t/--timeout)"),
+      skip_unsupported: z
+        .boolean()
+        .optional()
+        .describe("When true (default), unsupported db types return SKIPPED_UNSUPPORTED instead of hard error — aligned with CLI --skip-unsupported"),
       proxy_profile_id: z.string().optional().describe("One-shot: replace connection proxy with this saved profile ID or list index (#) for this request only"),
       proxy_profile_name: z.string().optional().describe("One-shot: replace connection proxy with this saved profile name or list index (#) for this request only"),
     },
-    async ({ connection_id, connection_name, database, schema, proxy_profile_id, proxy_profile_name }) => {
-      const { config, error } = await resolveConnectionWithProxyOverride(backend, scope, isWebMode, {
+    async ({ connection_id, connection_name, database, schema, timeout_ms, skip_unsupported, proxy_profile_id, proxy_profile_name }) => {
+      const { configs, error } = await resolveConnectionsWithProxyOverride(backend, scope, isWebMode, {
         connection_id,
         connection_name,
         proxy_profile_id,
         proxy_profile_name,
       });
       if (error) return error;
-      const resolvedConfig = config!;
-
-      const outcome = await runConnectingTool(resolvedConfig, () =>
-        fetchDatabaseStats(backend, resolvedConfig, {
-          database: database ?? scope.database,
-          schema,
-          redisDb: redisDbFromValue(database) ?? redisDbFromValue(scope.database),
-        }),
-      );
-      if ("error" in outcome) {
-        if (outcome.error instanceof DatabaseStatsError) {
-          return toolErrorWithProgress(outcome.error.code, outcome.error.message, outcome.progress);
+      const resolvedConfigs = configs!;
+      const skipUnsupported = skip_unsupported !== false;
+      const parts: string[] = [];
+      let successes = 0;
+      let skipped = 0;
+      let failures = 0;
+      for (let i = 0; i < resolvedConfigs.length; i++) {
+        const resolvedConfig = resolvedConfigs[i]!;
+        const outcome = await runConnectingTool(resolvedConfig, () =>
+          fetchDatabaseStats(backend, resolvedConfig, {
+            database: database ?? scope.database,
+            schema,
+            redisDb: redisDbFromValue(database) ?? redisDbFromValue(scope.database),
+            timeoutMs: timeout_ms,
+          }),
+        );
+        const heading = connectionBatchHeading(resolvedConfig, i + 1, resolvedConfigs.length);
+        if ("error" in outcome) {
+          if (outcome.error instanceof DatabaseStatsError && outcome.error.code === "UNSUPPORTED_DB_TYPE" && skipUnsupported) {
+            skipped++;
+            parts.push(
+              prependConnectionProgress(`${heading}**Skipped** (${resolvedConfig.name}): ${outcome.error.message}`, outcome.progress),
+            );
+            continue;
+          }
+          failures++;
+          if (resolvedConfigs.length === 1) {
+            if (outcome.error instanceof DatabaseStatsError) {
+              return toolErrorWithProgress(outcome.error.code, outcome.error.message, outcome.progress);
+            }
+            const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+            return toolErrorWithProgress("DATABASE_STATS_ERROR", msg, outcome.progress);
+          }
+          const code = outcome.error instanceof DatabaseStatsError ? outcome.error.code : "DATABASE_STATS_ERROR";
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          parts.push(prependConnectionProgress(`${heading}**Error** (${resolvedConfig.name}): ${code}: ${msg}`, outcome.progress));
+          continue;
         }
-        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        return toolErrorWithProgress("DATABASE_STATS_ERROR", msg, outcome.progress);
+        successes++;
+        parts.push(
+          resolvedConfigs.length === 1
+            ? labeledTextWithProgress(resolvedConfig, outcome.value, outcome.progress).content[0]!.text
+            : prependConnectionProgress(`${heading}${outcome.value}`, outcome.progress),
+        );
       }
-      return labeledTextWithProgress(resolvedConfig, outcome.value, outcome.progress);
+      const summary = formatMcpBatchSummary(successes, skipped, failures, resolvedConfigs.length);
+      const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
+      return failures > 0 ? { ...result, isError: true } : result;
     },
   );
 
   server.tool(
     "dbx_get_database_report",
-    "Get a comprehensive database report from system catalog views (information_schema, pg_catalog, sqlite_master): database summary, tables sorted by row estimate, column comments, and indexes — all instant catalog data, no COUNT queries. CLI `dbx report` saves under `{cwd}/reports/` by default; use --no-save for stdout-only, -o to override path.",
+    "Get a comprehensive database report from system catalog views (information_schema, pg_catalog, sqlite_master): database summary, tables sorted by row estimate, column comments, and indexes — all instant catalog data, no COUNT queries. MCP returns text only (does not write files). CLI `dbx report` saves under `{cwd}/reports/` by default; use --no-save for stdout-only, -o to override path. Accepts connection ranges (e.g. 1-15); runs sequentially.",
     {
-      connection_id: z.string().optional().describe("Unique ID of the DBX connection, or list index (#) from dbx_list_connections (e.g. 1 or #2)"),
-      connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
+      connection_id: z.string().optional().describe(`Unique ID of the DBX connection, or list index/range from dbx_list_connections (e.g. 1, #2, 1-15)`),
+      connection_name: z.string().optional().describe(CONNECTION_REF_HINT),
       database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
       schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, dbo for SQL Server, login user for Dameng)"),
+      timeout_ms: z.number().int().min(1).optional().describe("Per-connection query timeout in milliseconds (aligned with CLI -t/--timeout)"),
+      skip_unsupported: z
+        .boolean()
+        .optional()
+        .describe("When true (default), unsupported db types return SKIPPED_UNSUPPORTED instead of hard error — aligned with CLI --skip-unsupported"),
       proxy_profile_id: z.string().optional().describe("One-shot: replace connection proxy with this saved profile ID or list index (#) for this request only"),
       proxy_profile_name: z.string().optional().describe("One-shot: replace connection proxy with this saved profile name or list index (#) for this request only"),
     },
-    async ({ connection_id, connection_name, database, schema, proxy_profile_id, proxy_profile_name }) => {
-      const { config, error } = await resolveConnectionWithProxyOverride(backend, scope, isWebMode, {
+    async ({ connection_id, connection_name, database, schema, timeout_ms, skip_unsupported, proxy_profile_id, proxy_profile_name }) => {
+      const { configs, error } = await resolveConnectionsWithProxyOverride(backend, scope, isWebMode, {
         connection_id,
         connection_name,
         proxy_profile_id,
         proxy_profile_name,
       });
       if (error) return error;
-      const resolvedConfig = config!;
-
-      const outcome = await runConnectingTool(resolvedConfig, () =>
-        fetchDatabaseReport(backend, resolvedConfig, {
-          database: database ?? scope.database,
-          schema,
-          redisDb: redisDbFromValue(database) ?? redisDbFromValue(scope.database),
-        }),
-      );
-      if ("error" in outcome) {
-        if (outcome.error instanceof DatabaseStatsError) {
-          return toolErrorWithProgress(outcome.error.code, outcome.error.message, outcome.progress);
+      const resolvedConfigs = configs!;
+      const skipUnsupported = skip_unsupported !== false;
+      const parts: string[] = [];
+      let successes = 0;
+      let skipped = 0;
+      let failures = 0;
+      for (let i = 0; i < resolvedConfigs.length; i++) {
+        const resolvedConfig = resolvedConfigs[i]!;
+        const outcome = await runConnectingTool(resolvedConfig, () =>
+          fetchDatabaseReport(backend, resolvedConfig, {
+            database: database ?? scope.database,
+            schema,
+            redisDb: redisDbFromValue(database) ?? redisDbFromValue(scope.database),
+            timeoutMs: timeout_ms,
+          }),
+        );
+        const heading = connectionBatchHeading(resolvedConfig, i + 1, resolvedConfigs.length);
+        if ("error" in outcome) {
+          if (outcome.error instanceof DatabaseStatsError && outcome.error.code === "UNSUPPORTED_DB_TYPE" && skipUnsupported) {
+            skipped++;
+            parts.push(
+              prependConnectionProgress(`${heading}**Skipped** (${resolvedConfig.name}): ${outcome.error.message}`, outcome.progress),
+            );
+            continue;
+          }
+          failures++;
+          if (resolvedConfigs.length === 1) {
+            if (outcome.error instanceof DatabaseStatsError) {
+              return toolErrorWithProgress(outcome.error.code, outcome.error.message, outcome.progress);
+            }
+            const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+            return toolErrorWithProgress("DATABASE_REPORT_ERROR", msg, outcome.progress);
+          }
+          const code = outcome.error instanceof DatabaseStatsError ? outcome.error.code : "DATABASE_REPORT_ERROR";
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          parts.push(prependConnectionProgress(`${heading}**Error** (${resolvedConfig.name}): ${code}: ${msg}`, outcome.progress));
+          continue;
         }
-        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        return toolErrorWithProgress("DATABASE_REPORT_ERROR", msg, outcome.progress);
+        successes++;
+        parts.push(
+          resolvedConfigs.length === 1
+            ? labeledTextWithProgress(resolvedConfig, outcome.value, outcome.progress).content[0]!.text
+            : prependConnectionProgress(`${heading}${outcome.value}`, outcome.progress),
+        );
       }
-      return labeledTextWithProgress(resolvedConfig, outcome.value, outcome.progress);
+      const summary = formatMcpBatchSummary(successes, skipped, failures, resolvedConfigs.length);
+      const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
+      return failures > 0 ? { ...result, isError: true } : result;
     },
   );
 
   server.tool(
     "dbx_execute_query",
-    "Execute a SQL query on a database connection (max 100 rows returned)",
+    "Execute a SQL query on a database connection (max 100 rows returned). Accepts connection ranges (e.g. 1-15); runs sequentially.",
     {
-      connection_id: z.string().optional().describe("Unique ID of the DBX connection, or list index (#) from dbx_list_connections (e.g. 1 or #2)"),
-      connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
+      connection_id: z.string().optional().describe(`Unique ID of the DBX connection, or list index/range from dbx_list_connections (e.g. 1, #2, 1-15)`),
+      connection_name: z.string().optional().describe(CONNECTION_REF_HINT),
       database: z.string().optional().describe("Database name"),
       sql: z.string().describe("SQL query to execute"),
+      timeout_ms: z.number().int().min(1).optional().describe("Query timeout in milliseconds (aligned with CLI -t/--timeout)"),
       proxy_profile_id: z.string().optional().describe("One-shot: replace connection proxy with this saved profile ID or list index (#) for this request only"),
       proxy_profile_name: z.string().optional().describe("One-shot: replace connection proxy with this saved profile name or list index (#) for this request only"),
     },
-    async ({ connection_id, connection_name, database, sql, proxy_profile_id, proxy_profile_name }) => {
+    async ({ connection_id, connection_name, database, sql, timeout_ms, proxy_profile_id, proxy_profile_name }) => {
       logSqlDiagnostic("dbx_execute_query", sql, { connection_id, connection_name, database });
-      const { config, error } = await resolveConnectionWithProxyOverride(backend, scope, isWebMode, {
+      const { configs, error } = await resolveConnectionsWithProxyOverride(backend, scope, isWebMode, {
         connection_id,
         connection_name,
         proxy_profile_id,
         proxy_profile_name,
       });
       if (error) return error;
-      const scopedConfig = config!;
-      if (scopedConfig.db_type === "redis") {
+      const resolvedConfigs = configs!;
+      if (resolvedConfigs.some((c) => c.db_type === "redis")) {
         return toolError("REDIS_COMMAND_REQUIRED", "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command with a Redis command such as GET key or INFO.");
       }
-      if (scopedConfig.db_type !== "mongodb") {
-        const hashLineComments = supportsHashLineComments(scopedConfig.db_type);
-        const safety = evaluateSqlSafety(sql, { ...sqlSafetyFromEnv(), allowMultipleStatements: true, hashLineComments });
-        if (!safety.allowed) return toolError("SQL_BLOCKED", safety.reason ?? "SQL blocked.");
-        const production = assessProductionSql(sql, scopedConfig, database ?? scope.database ?? scopedConfig.database);
-        if (production.active && production.isMutation) {
-          return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database. Return the SQL for a user to review and run in DBX.");
+      const hashLineComments = resolvedConfigs.some((c) => supportsHashLineComments(c.db_type));
+      const safetyOptions = { ...sqlSafetyFromEnv(), allowMultipleStatements: true, hashLineComments };
+      for (const scopedConfig of resolvedConfigs) {
+        if (scopedConfig.db_type !== "mongodb") {
+          const safety = evaluateSqlSafety(sql, { ...safetyOptions, hashLineComments: supportsHashLineComments(scopedConfig.db_type) });
+          if (!safety.allowed) return toolError("SQL_BLOCKED", safety.reason ?? "SQL blocked.");
+          const production = assessProductionSql(sql, scopedConfig, database ?? scope.database ?? scopedConfig.database);
+          if (production.active && production.isMutation) {
+            return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database. Return the SQL for a user to review and run in DBX.");
+          }
+        } else if (isProductionDatabase(scopedConfig, database ?? scope.database ?? scopedConfig.database) && isLikelyMongoMutation(sql)) {
+          return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database. Return the command for a user to review and run in DBX.");
         }
-      } else if (isProductionDatabase(scopedConfig, database ?? scope.database ?? scopedConfig.database) && isLikelyMongoMutation(sql)) {
-        return toolError("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database. Return the command for a user to review and run in DBX.");
       }
-      // MongoDB shell commands don't fit the SQL safety evaluator; the backend
-      // (node-core executeQuery) applies command-aware read/write gating.
-      const outcome = await runConnectingTool(scopedConfig, async () => {
-        const statements = scopedConfig.db_type === "mongodb" ? [sql] : splitSqlStatements(sql, { hashLineComments: supportsHashLineComments(scopedConfig.db_type) });
-        const results: QueryResult[] = [];
-        for (const statement of statements) {
-          results.push(await backend.executeQuery(withDatabase(scopedConfig, database ?? scope.database), statement));
+      const parts: string[] = [];
+      let failures = 0;
+      for (let i = 0; i < resolvedConfigs.length; i++) {
+        const scopedConfig = resolvedConfigs[i]!;
+        const outcome = await runConnectingTool(scopedConfig, async () => {
+          const statements = scopedConfig.db_type === "mongodb" ? [sql] : splitSqlStatements(sql, { hashLineComments: supportsHashLineComments(scopedConfig.db_type) });
+          const results: QueryResult[] = [];
+          const queryOptions = timeout_ms !== undefined ? { timeoutMs: timeout_ms } : undefined;
+          for (const statement of statements) {
+            results.push(await backend.executeQuery(withDatabase(scopedConfig, database ?? scope.database), statement, queryOptions));
+          }
+          return results;
+        });
+        const heading = connectionBatchHeading(scopedConfig, i + 1, resolvedConfigs.length);
+        if ("error" in outcome) {
+          failures++;
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          if (resolvedConfigs.length === 1) return toolErrorWithProgress("QUERY_ERROR", msg, outcome.progress);
+          parts.push(prependConnectionProgress(`${heading}**Error** (${scopedConfig.name}): QUERY_ERROR: ${msg}`, outcome.progress));
+          continue;
         }
-        return results;
-      });
-      if ("error" in outcome) {
-        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        return toolErrorWithProgress("QUERY_ERROR", msg, outcome.progress);
+        const { value: results, progress } = outcome;
+        const body =
+          results.length === 1
+            ? formatQueryToolResult(results[0]!).content[0]!.text
+            : results.map((result, index) => formatQueryToolResult(result, `Statement ${index + 1}`).content[0]!.text).join("\n\n");
+        parts.push(
+          resolvedConfigs.length === 1
+            ? labeledTextWithProgress(scopedConfig, body, progress).content[0]!.text
+            : prependConnectionProgress(`${heading}${body}`, progress),
+        );
       }
-      const { value: results, progress } = outcome;
-      if (results.length === 1) {
-        return labeledTextWithProgress(scopedConfig, formatQueryToolResult(results[0]).content[0].text, progress);
-      }
-      return labeledTextWithProgress(
-        scopedConfig,
-        results.map((result, index) => formatQueryToolResult(result, `Statement ${index + 1}`).content[0].text).join("\n\n"),
-        progress,
-      );
+      const summary = formatMcpBatchSummary(resolvedConfigs.length - failures, 0, failures, resolvedConfigs.length);
+      const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
+      return failures > 0 ? { ...result, isError: true } : result;
     },
   );
 
@@ -554,33 +783,49 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
 
   server.tool(
     "dbx_get_schema_context",
-    "Get compact table and column context for writing SQL",
+    "Get compact table and column context for writing SQL. Accepts connection ranges (e.g. 1-15); runs sequentially.",
     {
-      connection_id: z.string().optional().describe("Unique ID of the DBX connection, or list index (#) from dbx_list_connections (e.g. 1 or #2)"),
-      connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
+      connection_id: z.string().optional().describe(`Unique ID of the DBX connection, or list index/range from dbx_list_connections (e.g. 1, #2, 1-15)`),
+      connection_name: z.string().optional().describe(CONNECTION_REF_HINT),
       database: z.string().optional().describe("Database name"),
       schema: z.string().optional().describe("Schema name (default: public for PostgreSQL)"),
       tables: z.array(z.string()).optional().describe("Specific table names to include"),
       max_tables: z.number().int().min(1).max(20).default(8).describe("Maximum number of tables to include"),
     },
     async ({ connection_id, connection_name, database, schema, tables, max_tables }) => {
-      const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
+      const { configs, error } = await resolveConnections(backend, scope, connection_id, connection_name);
       if (error) return error;
-      const resolvedConfig = config!;
-      const outcome = await runConnectingTool(resolvedConfig, () =>
-        buildSchemaContext(backend, withDatabase(resolvedConfig, database ?? scope.database), {
-          schema,
-          tables,
-          maxTables: max_tables,
-        }),
-      );
-      if ("error" in outcome) {
-        const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
-        return toolErrorWithProgress("SCHEMA_CONTEXT_ERROR", msg, outcome.progress);
+      const resolvedConfigs = configs!;
+      const parts: string[] = [];
+      let failures = 0;
+      for (let i = 0; i < resolvedConfigs.length; i++) {
+        const resolvedConfig = resolvedConfigs[i]!;
+        const outcome = await runConnectingTool(resolvedConfig, () =>
+          buildSchemaContext(backend, withDatabase(resolvedConfig, database ?? scope.database), {
+            schema,
+            tables,
+            maxTables: max_tables,
+          }),
+        );
+        const heading = connectionBatchHeading(resolvedConfig, i + 1, resolvedConfigs.length);
+        if ("error" in outcome) {
+          failures++;
+          const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+          if (resolvedConfigs.length === 1) return toolErrorWithProgress("SCHEMA_CONTEXT_ERROR", msg, outcome.progress);
+          parts.push(prependConnectionProgress(`${heading}**Error** (${resolvedConfig.name}): SCHEMA_CONTEXT_ERROR: ${msg}`, outcome.progress));
+          continue;
+        }
+        const { value: context, progress } = outcome;
+        const body = context.tables.length === 0 ? "No matching tables found." : formatSchemaContext(context);
+        parts.push(
+          resolvedConfigs.length === 1
+            ? labeledTextWithProgress(resolvedConfig, body, progress).content[0]!.text
+            : prependConnectionProgress(`${heading}${body}`, progress),
+        );
       }
-      const { value: context, progress } = outcome;
-      if (context.tables.length === 0) return toolResultWithProgress(text("No matching tables found."), progress);
-      return labeledTextWithProgress(resolvedConfig, formatSchemaContext(context), progress);
+      const summary = formatMcpBatchSummary(resolvedConfigs.length - failures, 0, failures, resolvedConfigs.length);
+      const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
+      return failures > 0 ? { ...result, isError: true } : result;
     },
   );
 

@@ -8,6 +8,7 @@ import {
   createBackend,
   DatabaseStatsError,
   DIRECT_QUERY_TYPES,
+  evaluateRedisCommandSafety,
   evaluateSqlSafety,
   fetchDatabaseStats,
   fetchDatabaseReport,
@@ -387,6 +388,38 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       return succeed(`Connection "${config.name}" added (id: ${config.id})${proxyNote}.\n`);
     }
 
+    if (args[0] === "connections" && args[1] === "remove") {
+      ensureArgCount(args, 3, "dbx connections remove");
+      const connectionRef = required(args[2], "Connection name or list index is required.");
+      const connections = await backend.loadConnections();
+      let target: ConnectionConfig;
+      try {
+        const byIndex = resolveConnectionsByIndexRef(connections, connectionRef);
+        if (byIndex !== undefined) {
+          if (byIndex.length > 1) {
+            throw new CliError("INVALID_ARGUMENT", "connections remove accepts a single connection, not a range.");
+          }
+          target = byIndex[0]!;
+        } else {
+          target = resolveConnectionRef(connections, connectionRef);
+        }
+      } catch (error) {
+        if (error instanceof ConnectionResolveError) throw new CliError(error.code, error.message);
+        throw error;
+      }
+      if (backend.removeConnectionById) {
+        const removed = await backend.removeConnectionById(target.id);
+        if (!removed) throw new CliError("CONNECTION_NOT_FOUND", `Connection with id "${target.id}" not found.`);
+      } else {
+        const removed = await backend.removeConnection(target.name);
+        if (!removed) throw new CliError("CONNECTION_NOT_FOUND", `Connection "${target.name}" could not be removed.`);
+      }
+      await notifyReload().catch(() => {});
+      const payload = { id: target.id, name: target.name };
+      if (flags.format === "json") return succeedJson({ removed: payload });
+      return succeed(`Connection "${target.name}" (id: ${target.id}) removed.\n`);
+    }
+
     if (args[0] === "proxies" && args[1] === "list") {
       ensureArgCount(args, 2, "dbx proxies list");
       const profiles = await loadTunnelProfilesForBackend(backend);
@@ -709,6 +742,75 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
     }
 
+    if (args[0] === "redis") {
+      ensureArgCount(args, 2, "dbx redis");
+      let connectionRef: string;
+      let command: string;
+      if (args.length === 2) {
+        connectionRef = required(env.DBX_CONNECTION, "Connection name is required (or set DBX_CONNECTION).");
+        command = required(args[1], "Redis command is required.");
+      } else if (env.DBX_CONNECTION) {
+        try {
+          await resolveConnectionsForCli(backend, args[1]!);
+          connectionRef = args[1]!;
+          command = args.slice(2).join(" ");
+        } catch {
+          connectionRef = env.DBX_CONNECTION;
+          command = args.slice(1).join(" ");
+        }
+      } else {
+        connectionRef = required(args[1], "Connection name is required.");
+        command = args.slice(2).join(" ");
+      }
+      if (!command.trim()) throw new CliError("INVALID_ARGUMENT", "Redis command is required.");
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const envSafety = sqlSafetyFromCliEnv(env);
+      if (flags.allowDangerous && !flags.allowWrites && !envSafety.allowWrites) {
+        throw new CliError("INVALID_OPTION", "--allow-dangerous-sql requires --allow-writes.");
+      }
+      const safety = evaluateRedisCommandSafety(command, {
+        allowWrites: flags.allowWrites || envSafety.allowWrites,
+        allowDangerous: flags.allowDangerous || envSafety.allowDangerous,
+      });
+      if (!safety.allowed) return failed("REDIS_COMMAND_BLOCKED", safety.reason ?? "Redis command blocked.", flags.json);
+      const redisDb = redisDbFromCliFlags(flags);
+      const batchResults = await runConnectionBatch(configs, flags, async (config) => {
+        if (config.db_type !== "redis") {
+          throw new CliError("INVALID_CONNECTION_TYPE", `Connection "${config.name}" is ${config.db_type}, not Redis.`);
+        }
+        if (!backend.executeRedisCommand) {
+          throw new CliError("UNSUPPORTED_BACKEND", "This DBX backend does not support Redis command execution.");
+        }
+        return backend.executeRedisCommand(config, redisDb, command, {
+          skipSafetyCheck: safety.skipSafetyCheck,
+          timeoutMs: flags.timeoutMs,
+        });
+      });
+      const jsonResults = batchResults.map((r, i) => ({
+        index: i + 1,
+        connection: configs[i]!.name,
+        db: redisDb,
+        ...(r.ok
+          ? { ok: true as const, command: r.value.command, safety: r.value.safety, value: r.value.value }
+          : { ok: false as const, error: r.error.message, code: batchErrorCode(r.error) }),
+      }));
+      const textParts = batchResults.map((r, i) => {
+        const heading = connectionBatchHeading(configs[i]!, i + 1, configs.length);
+        if (!r.ok) return `${heading}${formatBatchErrorBody(configs[i]!, r.error)}`;
+        const valueText = typeof r.value.value === "string" ? r.value.value : JSON.stringify(r.value.value, null, 2);
+        return `${heading}Command: ${r.value.command}\nSafety: ${r.value.safety}\n\n${valueText ?? String(r.value.value)}`;
+      });
+      if (flags.format === "json") {
+        if (configs.length === 1) {
+          if (batchResults[0]!.ok) return succeedJson(jsonResults[0]);
+          return finishBatchOutput(`${JSON.stringify(jsonResults[0], null, 2)}\n`, batchResults, configs);
+        }
+        return finishBatchOutput(`${JSON.stringify({ connections: jsonResults }, null, 2)}\n`, batchResults, configs);
+      }
+      if (flags.format === "csv") throw new CliError("INVALID_OPTION", "CSV format is not supported for dbx redis.");
+      return finishBatchOutput(`${joinBatchOutput(textParts)}\n`, batchResults, configs);
+    }
+
     if (args[0] === "open") {
       ensureArgCount(args, 3, "dbx open");
       const connectionRef = required(args[1], "Connection name is required.");
@@ -907,6 +1009,15 @@ function sqlSafetyFromCliEnv(env: NodeJS.ProcessEnv) {
     allowWrites: parseBooleanEnv(env.DBX_MCP_ALLOW_WRITES),
     allowDangerous: parseBooleanEnv(env.DBX_MCP_ALLOW_DANGEROUS_SQL),
   };
+}
+
+function redisDbFromCliFlags(flags: Pick<ParsedFlags, "database">): number {
+  if (flags.database === undefined || flags.database.trim() === "") return 0;
+  const db = Number(flags.database.trim());
+  if (!Number.isInteger(db) || db < 0) {
+    throw new CliError("INVALID_OPTION", "--database for redis must be a non-negative integer (logical DB index).");
+  }
+  return db;
 }
 
 function splitCsv(value: string) {
@@ -1176,12 +1287,14 @@ function usage() {
     "  dbx connections add --name <name> --type <db_type> --host <host> [--port n] [--username u] [--password p] [-d, --database db] [--ssl] [--driver-profile x]",
     "      [--proxy] [--proxy-type socks5|http] [-H, --proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]",
     "      [--proxy-profile-id id|# | --proxy-profile-name name|#] [-j, --json]",
+    "  dbx connections remove <connection|#> [-j, --json]",
     "  dbx proxies list [-j, --json]",
     "  dbx stats <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [-q, --quiet] [-v, --verbose] [-j, --json]",
     "  dbx report <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [-q, --quiet] [-v, --verbose] [-j, --json] [-n, --no-save] [-o, --output path]",
     "  dbx schema list <connection|#|range> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
     "  dbx schema describe <connection|#|range> <table> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
     "  dbx query <connection|#|range> <sql> [--file path] [--limit n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
+    "  dbx redis <connection|#|range> <command...> [-d, --database n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
     "  dbx context <connection|#|range> [-s, --schema name] [--tables a,b] [--max-tables n] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]",
     "  dbx open <connection|#|range> <table> [-s, --schema name] [-d, --database name] [-P, --parallel [n]] [-j, --json]",
     "",

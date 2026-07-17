@@ -1,5 +1,51 @@
 # Update Log
 
+## 2026-07-18 — CLI ↔ MCP 能力对齐（parity）
+
+### 目标
+
+审计 CLI 与 MCP 工具面，补齐合理重叠能力，避免单侧独有功能（桌面专用除外）。
+
+### 对账矩阵（摘要）
+
+| 能力 | CLI | MCP | 状态 |
+|------|-----|-----|------|
+| connections list/add/remove | ✅ / ✅ / **新增** | ✅ | 已对齐 |
+| proxies list | ✅ | ✅ | 已有 |
+| schema list/describe / context | ✅ | ✅ | 已有；MCP 支持范围批量 |
+| query | ✅ | ✅ | MCP 支持范围 + `timeout_ms` |
+| redis | **新增 `dbx redis`** | ✅ | 已对齐 |
+| stats / report | ✅ | ✅ | MCP：范围、`skip_unsupported`、`timeout_ms` |
+| proxy-profile 覆盖 | ✅ | ✅ | 已有 |
+| 范围 `1-15` | ✅ + `--parallel` | **新增顺序批量** | 已对齐（MCP 无 parallel） |
+| open / execute-and-show | open ✅ | 桌面端 | 刻意差异 |
+| report 落盘 | `{cwd}/reports/` | 仅文本 | 刻意差异 |
+| doctor / capabilities | ✅ | — | 刻意差异（CLI 诊断） |
+
+### 代码变更
+
+1. **MCP** `packages/mcp-server/src/index.ts`
+   - `resolveConnections` / `resolveConnectionsWithProxyOverride`：支持 `1-15`、`1..15` 等范围
+   - stats/report/query/list_tables/describe/context：顺序批量 + 摘要
+   - stats/report：`skip_unsupported`（默认 true）、`timeout_ms`
+   - query：`timeout_ms`；单连接工具对范围返回 `CONNECTION_RANGE`
+2. **CLI** `packages/cli/src/cli.ts`
+   - `dbx connections remove <connection|#>`
+   - `dbx redis <connection|#|range> <command...>`（`-d` 为 Redis DB 序号）
+3. **README** cli / mcp-server 中英文对照表与参数说明
+
+### 刻意保留的差异
+
+- MCP **不**默认写 `{cwd}/reports/`（无 cwd 写文件语义）
+- MCP **无** `--parallel`（工具调用顺序批量即可）
+- `dbx_execute_and_show`、doctor/capabilities 仅单侧有意义
+
+### dist 同步
+
+- 补丁包 `packages/{mcp-server,cli}/dist` → 已安装 `@dbx-app/mcp-server`、`@dbx-app/cli`（手动同步，未编译运行测试）
+
+---
+
 ## 2026-07-18 — `dbx report` 默认保存到运行目录 `./reports/`
 
 ### 变更摘要

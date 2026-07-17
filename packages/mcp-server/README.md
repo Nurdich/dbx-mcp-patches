@@ -101,13 +101,31 @@ You can pass that index instead of a UUID or name:
 | Input examples | Resolves to |
 | -------------- | ----------- |
 | `1`, `#2` | Item at row 1 or 2 from the latest list of that category |
+| `1-15`, `1..15`, `1:15`, `#1-#15` | Inclusive index range (batch-capable tools; sequential) |
 | Exact UUID / name | Still preferred when present (checked before index) |
 
-**MCP:** use `connection_id`, `connection_name`, `proxy_profile_id`, or `proxy_profile_name` with a numeric value.
+**MCP:** use `connection_id`, `connection_name`, `proxy_profile_id`, or `proxy_profile_name` with a numeric value or range.
 
-**CLI:** use the connection argument positionally, e.g. `dbx stats 1`, `dbx query 2 "select 1"`, or `--proxy-profile-id 1`.
+**CLI:** use the connection argument positionally, e.g. `dbx stats 1`, `dbx stats 1-15`, `dbx query 2 "select 1"`, or `--proxy-profile-id 1`.
 
 Lists reload data on each call; index `N` always means “the Nth row in the current list,” not a persisted database ID.
+
+## CLI ↔ MCP parity
+
+| Capability | CLI | MCP |
+|------------|-----|-----|
+| Connections list/add/remove | `connections *` | `dbx_list/add/remove_connection` |
+| Proxies list | `proxies list` | `dbx_list_proxies` |
+| Schema list/describe/context | `schema *` / `context` | `dbx_list_tables` / `dbx_describe_table` / `dbx_get_schema_context` |
+| Query / Redis | `query` / `redis` | `dbx_execute_query` / `dbx_execute_redis_command` |
+| Stats / report | `stats` / `report` | `dbx_get_database_stats` / `dbx_get_database_report` |
+| Proxy profile override | `--proxy-profile-id/name` | `proxy_profile_id` / `proxy_profile_name` |
+| Connection range `1-15` | yes (+ `--parallel`) | yes (sequential batch) |
+| `--skip-unsupported` | stats/report (default on) | `skip_unsupported` (default true) |
+| Timeout | `-t/--timeout` | `timeout_ms` on stats/report/query |
+| Report file save | `{cwd}/reports/` default | text only (no cwd write) |
+| Open table / execute-and-show | `open` / — | `dbx_open_table` / `dbx_execute_and_show` (desktop) |
+| doctor / capabilities | yes | CLI-only |
 
 ## Tools
 
@@ -165,10 +183,12 @@ Returns a compact markdown overview suitable for AI agents. All metrics come fro
 
 | Parameter         | Type   | Required | Description                                              |
 | ----------------- | ------ | -------- | -------------------------------------------------------- |
-| `connection_id`   | string | no       | Connection UUID, or list index `#` from `dbx_list_connections` |
-| `connection_name` | string | no       | Connection name, or list index `#` from `dbx_list_connections` |
+| `connection_id`   | string | no       | Connection UUID, list index `#`, or range (`1-15`) from `dbx_list_connections` |
+| `connection_name` | string | no       | Connection name, list index `#`, or range (`1-15`) from `dbx_list_connections` |
 | `database`        | string | no       | Database name (Dameng: also accepted as schema alias)  |
 | `schema`          | string | no       | Schema name (default: `public` for PostgreSQL, `dbo` for SQL Server) |
+| `timeout_ms`      | number | no       | Per-connection query timeout in ms (CLI `-t/--timeout`) |
+| `skip_unsupported`| boolean| no       | Default `true`: unsupported types → skipped (CLI `--skip-unsupported`) |
 | `proxy_profile_id` | string | no | One-shot: replace connection proxy with this saved profile for this request only |
 | `proxy_profile_name` | string | no | One-shot alternative to `proxy_profile_id` |
 
@@ -191,11 +211,14 @@ Returns a structured markdown report for AI agents and humans. All data comes fr
 
 | Parameter         | Type   | Required | Description                                              |
 | ----------------- | ------ | -------- | -------------------------------------------------------- |
-| `connection_id`   | string | no       | Connection UUID, or list index `#` from `dbx_list_connections` |
-| `connection_name` | string | no       | Connection name, or list index `#` from `dbx_list_connections` |
+| `connection_id`   | string | no       | Connection UUID, list index `#`, or range (`1-15`) from `dbx_list_connections` |
+| `connection_name` | string | no       | Connection name, list index `#`, or range (`1-15`) from `dbx_list_connections` |
 | `database`        | string | no       | Database name (Dameng: also accepted as schema alias)  |
 | `schema`          | string | no       | Schema name (default: `public` for PostgreSQL, `dbo` for SQL Server) |
+| `timeout_ms` / `skip_unsupported` | number / boolean | no | Same semantics as `dbx_get_database_stats` |
 | `proxy_profile_id` / `proxy_profile_name` | string | no | One-shot proxy profile override (replaces existing proxy for this request) |
+
+**Note:** MCP returns report text only (does not write under `{cwd}/reports/`). Use CLI `dbx report` when you need the default file save.
 
 **Report sections:**
 
@@ -391,13 +414,31 @@ dbx query local "select 1" --json
 | 输入示例 | 含义 |
 | -------- | ---- |
 | `1`、`#2` | 对应类别最新列表中的第 1 / 2 行 |
+| `1-15`、`1..15` | 序号范围（支持批量的工具；顺序执行） |
 | 精确 UUID / 名称 | 仍优先匹配（先于序号解析） |
 
-**MCP：** 在 `connection_id`、`connection_name`、`proxy_profile_id`、`proxy_profile_name` 中传入数字。
+**MCP：** 在 `connection_id`、`connection_name`、`proxy_profile_id`、`proxy_profile_name` 中传入数字或范围。
 
-**CLI：** 在连接参数位置使用，例如 `dbx stats 1`、`dbx query 2 "select 1"`、`--proxy-profile-id 1`。
+**CLI：** 在连接参数位置使用，例如 `dbx stats 1`、`dbx stats 1-15`、`dbx query 2 "select 1"`、`--proxy-profile-id 1`。
 
 每次 list 都会重新加载数据；序号 `N` 表示「当前列表第 N 行」，不是持久化 ID。
+
+### CLI ↔ MCP 能力对照
+
+| 能力 | CLI | MCP |
+|------|-----|-----|
+| 连接 list/add/remove | `connections *` | `dbx_list/add/remove_connection` |
+| 代理 list | `proxies list` | `dbx_list_proxies` |
+| schema / context | `schema *` / `context` | `dbx_list_tables` / `dbx_describe_table` / `dbx_get_schema_context` |
+| query / redis | `query` / `redis` | `dbx_execute_query` / `dbx_execute_redis_command` |
+| stats / report | `stats` / `report` | `dbx_get_database_stats` / `dbx_get_database_report` |
+| 代理覆盖 | `--proxy-profile-id/name` | `proxy_profile_id` / `proxy_profile_name` |
+| 范围 `1-15` | 是（可 `--parallel`） | 是（顺序批量） |
+| skip-unsupported | stats/report 默认开 | `skip_unsupported` 默认 true |
+| timeout | `-t/--timeout` | `timeout_ms` |
+| report 落盘 | 默认 `{cwd}/reports/` | 仅返回文本 |
+| open / execute-and-show | `open` / — | 桌面端工具 |
+| doctor / capabilities | 有 | 仅 CLI |
 
 ### 工具列表
 
