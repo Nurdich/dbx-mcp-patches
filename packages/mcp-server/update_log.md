@@ -1,5 +1,11 @@
 # Update Log
 
+## 2026-07-18 — CLI ↔ MCP 能力对齐（parity）
+
+见仓库根目录 `update_log.md` 同日条目（连接范围、skip_unsupported、CLI remove/redis 等）。
+
+---
+
 ## 2026-07-18 — `dbx report` 默认保存到运行目录 `./reports/`
 
 ### 变更摘要
