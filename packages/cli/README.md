@@ -48,6 +48,8 @@ dbx connections add --name prod --type postgres --host db.example.com --port 543
 
 Inline proxy flags and profile reference flags are **mutually exclusive**. Specify either `--proxy-profile-id` or `--proxy-profile-name`, not both.
 
+**Proxy precedence:** `--proxy-profile-id` / `--proxy-profile-name` **replaces** any existing proxy on the connection (does not stack). Persisted on `connections add`; one-shot override on `stats` / `report` / `query` for that request only.
+
 ## Connection references
 
 List output includes a `#` column (1-based index). Use a single index or a **range** (CLI only, non-interactive):
@@ -176,6 +178,8 @@ dbx connections add --name prod --type postgres --host db.example.com --port 543
 
 内联 `proxy_*` 参数与 `--proxy-profile-id` / `--proxy-profile-name` **不可混用**。
 
+**代理配置优先级：** 指定 `--proxy-profile-id` / `--proxy-profile-name` 时，**替换**连接上已有代理（不叠加）。`connections add` 会持久化；`stats` / `report` / `query` 支持一次性覆盖（仅本次请求）。
+
 ### 连接序号与范围（非交互 CLI）
 
 `dbx connections list` 的 `#` 列表示 1-based 序号。支持单个序号或范围批量：
@@ -196,8 +200,10 @@ dbx query 1 "select 1"   # 单连接不变
 
 ```bash
 dbx stats my-postgres -s public
+dbx stats 1 --proxy-profile-id 2    # 本次请求改用 #2 代理配置，不写回连接
 dbx report 1 -j -n
 dbx report 23-50 -P 3 -o ./reports/batch/
+dbx query 1 "select 1" --proxy-profile-name "Office SOCKS5"
 ```
 
 ### 短选项

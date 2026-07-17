@@ -155,6 +155,8 @@ Lists reload data on each call; index `N` always means “the Nth row in the cur
 
 You cannot mix inline proxy settings with `proxy_profile_id` / `proxy_profile_name`. Specify only one lookup key for saved profiles (ID or name, not both). Use `dbx_list_proxies` to discover available profiles.
 
+**Proxy profile precedence (replace, do not stack):** When `proxy_profile_id` / `proxy_profile_name` is provided, any existing proxy layers on the connection (inline `proxy_*` or a previous profile stub) are **removed** and replaced with the new profile reference. SSH layers are preserved. This applies to `dbx_add_connection` (persisted) and one-shot overrides on `dbx_get_database_stats` / `dbx_get_database_report` / `dbx_execute_query` (request only, not saved).
+
 SSH tunnel parameters are not yet exposed by this MCP tool.
 
 ### `dbx_get_database_stats`
@@ -167,6 +169,8 @@ Returns a compact markdown overview suitable for AI agents. All metrics come fro
 | `connection_name` | string | no       | Connection name, or list index `#` from `dbx_list_connections` |
 | `database`        | string | no       | Database name (Dameng: also accepted as schema alias)  |
 | `schema`          | string | no       | Schema name (default: `public` for PostgreSQL, `dbo` for SQL Server) |
+| `proxy_profile_id` | string | no | One-shot: replace connection proxy with this saved profile for this request only |
+| `proxy_profile_name` | string | no | One-shot alternative to `proxy_profile_id` |
 
 **Query strategy by database type:**
 
@@ -191,6 +195,7 @@ Returns a structured markdown report for AI agents and humans. All data comes fr
 | `connection_name` | string | no       | Connection name, or list index `#` from `dbx_list_connections` |
 | `database`        | string | no       | Database name (Dameng: also accepted as schema alias)  |
 | `schema`          | string | no       | Schema name (default: `public` for PostgreSQL, `dbo` for SQL Server) |
+| `proxy_profile_id` / `proxy_profile_name` | string | no | One-shot proxy profile override (replaces existing proxy for this request) |
 
 **Report sections:**
 
@@ -440,6 +445,8 @@ dbx query local "select 1" --json
 
 不可同时使用内联代理参数与 `proxy_profile_id` / `proxy_profile_name`。引用已保存配置时只能指定 ID 或名称之一。可用 `dbx_list_proxies` 查看可用配置。
 
+**代理配置优先级（替换，不叠加）：** 传入 `proxy_profile_id` / `proxy_profile_name` 时，会**移除**连接上已有的代理层（内联 `proxy_*` 或旧的 profile 引用桩），再写入新的 profile 引用。SSH 层保留。适用于 `dbx_add_connection`（持久化）以及 `dbx_get_database_stats` / `dbx_get_database_report` / `dbx_execute_query` 的一次性覆盖（仅本次请求，不写回连接）。
+
 SSH 隧道参数暂未在此 MCP 工具中暴露。
 
 ### `dbx_get_database_stats`
@@ -452,6 +459,8 @@ SSH 隧道参数暂未在此 MCP 工具中暴露。
 | `connection_name` | string | 否   | 连接名称，或 `dbx_list_connections` 中的序号 `#`             |
 | `database`        | string | 否   | 数据库名（Dameng 也可作为 schema 别名）                      |
 | `schema`          | string | 否   | Schema 名（PostgreSQL 默认 `public`，SQL Server 默认 `dbo`） |
+| `proxy_profile_id` | string | 否 | 一次性：用该已保存代理配置替换连接现有代理（仅本次请求） |
+| `proxy_profile_name` | string | 否 | 同上，名称方式（与 id 二选一） |
 
 **各数据库类型的查询策略：**
 
@@ -476,6 +485,7 @@ SSH 隧道参数暂未在此 MCP 工具中暴露。
 | `connection_name` | string | 否   | 连接名称，或 `dbx_list_connections` 中的序号 `#`             |
 | `database`        | string | 否   | 数据库名（Dameng 也可作为 schema 别名）                      |
 | `schema`          | string | 否   | Schema 名（PostgreSQL 默认 `public`，SQL Server 默认 `dbo`） |
+| `proxy_profile_id` / `proxy_profile_name` | string | 否 | 一次性代理覆盖（替换连接现有代理，仅本次请求） |
 
 **报告章节：**
 

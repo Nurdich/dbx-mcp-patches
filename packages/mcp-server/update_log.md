@@ -1,5 +1,39 @@
 # Update Log
 
+## 2026-07-18 — 代理配置文件覆盖（替换已有代理，不叠加）
+
+### 变更摘要
+
+当连接已配置代理（内联 `proxy_*` 或 `transport_layers` 中的 proxy / profile 引用）时，若 CLI/MCP **另传** `proxy_profile_id` / `proxy_profile_name`（或 `--proxy-profile-id` / `--proxy-profile-name`），则**替换**现有代理层，写入新的 profile 引用桩，**不叠加**第二条代理。
+
+### 优先级规则
+
+1. 调用方传入 `proxy_profile_id` 或 `proxy_profile_name` → 生效
+2. `applyProxyProfileOverride(config, profile)`：删除所有 `type === "proxy"` 层，保留 SSH 等非代理层，插入带 `profile_id` 的引用桩，并清除遗留 `proxy_*` 字段
+3. 与内联代理参数仍互斥（`PROXY_CONFLICT`）；id 与 name 不可同时指定
+
+### 支持范围
+
+| 场景 | CLI | MCP | 是否持久化 |
+|------|-----|-----|-----------|
+| 添加连接 | `dbx connections add --proxy-profile-*` | `dbx_add_connection` | 是 |
+| 一次性覆盖 | `dbx stats` / `report` / `query --proxy-profile-*` | `dbx_get_database_stats` / `dbx_get_database_report` / `dbx_execute_query` | 否（仅本次请求） |
+
+### 修改文件
+
+- `packages/node-core/src/tunnel-profiles.ts` — `applyProxyProfileOverride`
+- `packages/cli/src/cli.ts` — add 使用 helper；stats/report/query 一次性覆盖
+- `packages/mcp-server/src/tunnel-profiles.ts`、`src/index.ts` — 同上
+- README（cli / mcp-server）
+
+### 已安装 dist 同步
+
+- `packages/*/dist` 手动同步
+- `G:\usr\local\node_modules\@dbx-app\cli`
+- `C:\usr\local\node_modules\@dbx-app\mcp-server`
+
+---
+
 ## 2026-07-16 — 数据库完整报告 `dbx report` / `dbx_get_database_report`
 
 ### 变更摘要
