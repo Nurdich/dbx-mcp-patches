@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/cli",
-  "version": "0.4.29",
+  "version": "0.4.31",
   "description": "Command line interface for DBX database connections, schema, and safe queries",
   "keywords": [
     "ai-agent",
@@ -27,6 +27,12 @@
     "dist"
   ],
   "type": "module",
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "test": "pnpm --filter @dbx-app/node-core build && vitest run --config vitest.config.ts",
+    "build": "pnpm --filter @dbx-app/node-core build && tsc",
+    "prepublishOnly": "tsc"
+  },
   "dependencies": {
     "@dbx-app/node-core": "workspace:^"
   },
@@ -37,10 +43,5 @@
   },
   "engines": {
     "node": ">=22.13.0"
-  },
-  "scripts": {
-    "start": "tsx src/cli.ts",
-    "test": "pnpm --filter @dbx-app/node-core build && vitest run --config vitest.config.ts",
-    "build": "pnpm --filter @dbx-app/node-core build && tsc"
   }
 }

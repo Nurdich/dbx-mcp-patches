@@ -80,6 +80,8 @@ interface PoolEntry {
   timer: ReturnType<typeof setTimeout>;
 }
 
+type PostgresSslMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
+
 interface RqliteResult {
   columns?: string[];
   values?: unknown[][];
@@ -148,7 +150,7 @@ export async function closeDatabaseResources(): Promise<void> {
   );
 }
 
-async function getPgPool(config: ConnectionConfig): Promise<import("pg").Pool> {
+async function getPgPool(config: ConnectionConfig, sslModeOverride?: PostgresSslMode): Promise<import("pg").Pool> {
   const key = poolKey(config);
   const existing = pools.get(key);
   if (existing?.type === "pg") {
@@ -168,10 +170,14 @@ async function getPgPool(config: ConnectionConfig): Promise<import("pg").Pool> {
 
     const pg = await import("pg");
     const endpoint = await connectionEndpoint(config);
+    const sslMode = sslModeOverride ?? postgresSslMode(config);
     connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
     try {
       const pool = new pg.default.Pool({
-        connectionString: buildConnectionUrl(config, endpoint),
+        // pg-connection-string lets URL SSL parameters override the explicit ssl
+        // object. Keep all TLS policy in one place so DBX modes cannot conflict.
+        connectionString: withoutPostgresSslUrlParams(buildConnectionUrl(config, endpoint)),
+        ssl: await postgresSslOptions(config, sslMode),
         max: 3,
         idleTimeoutMillis: 30_000,
         connectionTimeoutMillis: 10_000,
@@ -193,6 +199,69 @@ async function getPgPool(config: ConnectionConfig): Promise<import("pg").Pool> {
   } finally {
     if (poolInflight.get(key) === create) poolInflight.delete(key);
   }
+}
+
+function postgresSslMode(config: ConnectionConfig): PostgresSslMode {
+  const normalized = normalizePostgresUrlParams(config.url_params || "", config.ssl);
+  for (const part of normalized.split("&")) {
+    if (!urlParamKeyIs(part, "sslmode")) continue;
+    const [, rawValue] = splitUrlParam(part);
+    const value = decodeUrlParamPart(rawValue).toLowerCase();
+    if (value === "disable" || value === "prefer" || value === "require" || value === "verify-ca" || value === "verify-full") {
+      return value;
+    }
+  }
+  // TLS is opt-in in the DBX connection form; only an explicit prefer mode may downgrade.
+  return config.ssl ? "require" : "disable";
+}
+
+function postgresSslFilePaths(config: ConnectionConfig): { ca?: string; cert?: string; key?: string } {
+  const paths: { ca?: string; cert?: string; key?: string } = {
+    ca: config.ca_cert_path?.trim() || undefined,
+    cert: config.client_cert_path?.trim() || undefined,
+    key: config.client_key_path?.trim() || undefined,
+  };
+  const normalized = normalizePostgresUrlParams(config.url_params || "", config.ssl);
+  for (const part of normalized.split("&")) {
+    const [rawKey, rawValue] = splitUrlParam(part);
+    const key = decodeUrlParamPart(rawKey).toLowerCase();
+    const value = decodeUrlParamPart(rawValue).trim();
+    if (!value) continue;
+    if (key === "sslrootcert") paths.ca = value;
+    else if (key === "sslcert") paths.cert = value;
+    else if (key === "sslkey") paths.key = value;
+  }
+  return paths;
+}
+
+async function postgresSslOptions(config: ConnectionConfig, mode: PostgresSslMode): Promise<import("pg").PoolConfig["ssl"]> {
+  if (mode === "disable") return false;
+
+  const paths = postgresSslFilePaths(config);
+  const ssl: Exclude<import("pg").PoolConfig["ssl"], boolean | undefined> = {};
+  if (paths.ca) ssl.ca = await readFile(paths.ca);
+  if (paths.cert) ssl.cert = await readFile(paths.cert);
+  if (paths.key) ssl.key = await readFile(paths.key);
+
+  if (mode === "prefer" || mode === "require") {
+    ssl.rejectUnauthorized = false;
+  } else if (mode === "verify-ca") {
+    ssl.checkServerIdentity = () => undefined;
+  }
+  return ssl;
+}
+
+function withoutPostgresSslUrlParams(connectionString: string): string {
+  const url = new URL(connectionString);
+  const sslKeys = new Set(["ssl", "sslmode", "ssl-mode", "sslcert", "sslkey", "sslrootcert", "uselibpqcompat"]);
+  for (const key of [...url.searchParams.keys()]) {
+    if (sslKeys.has(key.toLowerCase())) url.searchParams.delete(key);
+  }
+  return url.toString();
+}
+
+function postgresServerRejectedSsl(error: unknown): boolean {
+  return error instanceof Error && error.message === "The server does not support SSL connections";
 }
 
 async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/promise").Pool> {
@@ -334,13 +403,14 @@ function normalizePostgresUrlParams(value: string, forceTls: boolean): string {
       if (decoded) searchPath = decoded;
       continue;
     }
-    if (lowerKey === "ssl-mode") {
+    if (lowerKey === "ssl-mode" || lowerKey === "sslmode") {
       const value = decodeUrlParamPart(rawValue).toLowerCase().replaceAll("_", "-");
       if (value === "require" || value === "required") parts.push("sslmode=require");
       else if (value === "prefer" || value === "preferred") parts.push("sslmode=prefer");
       else if (value === "disable" || value === "disabled") parts.push("sslmode=disable");
       else if (value === "verify-ca") parts.push("sslmode=verify-ca");
       else if (value === "verify-full" || value === "verify-identity") parts.push("sslmode=verify-full");
+      else if (lowerKey === "sslmode") parts.push(part);
       continue;
     }
     if (lowerKey === "charset" || lowerKey === "require_ssl" || lowerKey === "verify_ca" || lowerKey === "verify_identity") {
@@ -848,11 +918,28 @@ async function queryWithRetry(config: ConnectionConfig, fn: () => Promise<QueryR
 }
 
 async function pgQuery(config: ConnectionConfig, sql: string, params?: unknown[], options?: QueryOptions): Promise<QueryResult> {
+  const sslMode = postgresSslMode(config);
+  let usePlaintextFallback = false;
   return queryWithRetry(
     config,
     async () => {
-      const pool = await getPgPool(config);
-      const result = await pool.query(sql, params);
+      const pool = await getPgPool(config, usePlaintextFallback ? "disable" : undefined);
+      let result: import("pg").QueryResult;
+      try {
+        result = await pool.query(sql, params);
+      } catch (error) {
+        if (sslMode !== "prefer" || usePlaintextFallback || !postgresServerRejectedSsl(error)) throw error;
+
+        // Prefer may downgrade only when PostgreSQL rejects the SSLRequest
+        // itself. Certificate, authentication, and pg_hba failures stay fatal.
+        usePlaintextFallback = true;
+        const key = poolKey(config);
+        const entry = pools.get(key);
+        // A concurrent query may already have replaced the rejected TLS pool.
+        // Never evict that newer plaintext pool from a late TLS failure.
+        if (entry?.pool === pool) evictPool(key, entry);
+        result = await (await getPgPool(config, "disable")).query(sql, params);
+      }
       const rows = (result.rows || []).slice(0, resolveMaxRows(options));
       return { columns: result.fields?.map((f) => f.name) ?? [], rows, row_count: rows.length };
     },
@@ -988,8 +1075,13 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     if (aggregate) {
       const safety = evaluateMongoAggregateSafety(aggregate, sqlSafetyFromEnv());
       if (!safety.allowed) throw new Error(safety.reason);
-      const result = await withTimeout(mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options)), resolveTimeoutMs(options));
+      const result = await withTimeout(mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options), aggregate.options), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
+    }
+    const distinct = parseMongoDistinctCommand(sql);
+    if (distinct) {
+      const result = await withTimeout(mongoDistinct(config, distinct.collection, distinct.field, distinct.filter), resolveTimeoutMs(options));
+      return mongoDistinctToQueryResult(distinct.field, result.documents.slice(0, resolveMaxRows(options)));
     }
     const getIndexes = parseMongoGetIndexesCommand(sql);
     if (getIndexes) {
@@ -1324,7 +1416,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
   return { affectedRows: result.affected_rows };
 }
 
-async function mongoAggregateDocuments(config: ConnectionConfig, collection: string, pipelineJson: string, maxRows: number): Promise<MongoDocumentResult> {
+async function mongoAggregateDocuments(config: ConnectionConfig, collection: string, pipelineJson: string, maxRows: number, optionsJson?: string): Promise<MongoDocumentResult> {
   return bridgeDataRequest<MongoDocumentResult>("/data/mongo/aggregate-documents", {
     connection_id: config.id,
     connection_name: config.name,
@@ -1332,8 +1424,26 @@ async function mongoAggregateDocuments(config: ConnectionConfig, collection: str
     collection,
     pipeline_json: pipelineJson,
     max_rows: maxRows,
+    ...(optionsJson ? { options_json: optionsJson } : {}),
   });
 }
+
+async function mongoDistinct(config: ConnectionConfig, collection: string, field: string, filter?: string): Promise<MongoDocumentResult> {
+  return bridgeDataRequest<MongoDocumentResult>("/data/mongo/distinct", {
+    connection_id: config.id,
+    connection_name: config.name,
+    database: config.database || "",
+    collection,
+    field,
+    ...(filter ? { filter } : {}),
+  });
+}
+
+export function mongoDistinctToQueryResult(field: string, values: unknown[]): QueryResult {
+  const rows = values.map((value) => ({ [field]: toCellValue(value) }));
+  return { columns: [field], rows, row_count: rows.length };
+}
+
 
 export function mongoCollectionStatsToQueryResult(metric: MongoCollectionStatsMetric, stats: Record<string, unknown>): QueryResult {
   if (metric === "stats") {
@@ -1414,9 +1524,16 @@ interface MongoCountDocumentsCommand {
   mode: "accurate" | "legacy";
 }
 
+interface MongoDistinctCommand {
+  collection: string;
+  field: string;
+  filter?: string;
+}
+
 interface MongoAggregateCommand {
   collection: string;
   pipeline: string;
+  options?: string;
 }
 
 interface MongoGetIndexesCommand {
@@ -1508,6 +1625,29 @@ function parseFindCountCommand(source: string): MongoCountDocumentsCommand | nul
   const filter = normalizeJsonArgument(findArgs[0] || "{}");
   return filter ? { collection: target.collection, filter, mode: "legacy" } : null;
 }
+
+export function parseMongoDistinctCommand(input: string): MongoDistinctCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const target = parseCollectionMethodTarget(source, "distinct");
+  if (!target) return null;
+  const args = parseMethodArgs(source, target.methodCallIndex);
+  if (!args || args.length < 1 || args.length > 2) return null;
+
+  const fieldJson = normalizeJsonArgument(args[0] ?? "");
+  if (!fieldJson) return null;
+  let field: unknown;
+  try {
+    field = JSON.parse(fieldJson);
+  } catch {
+    return null;
+  }
+  if (typeof field !== "string" || !field.trim()) return null;
+
+  if (args.length === 1) return { collection: target.collection, field };
+  const filter = normalizeJsonArgument(args[1] ?? "");
+  return filter ? { collection: target.collection, field, filter } : null;
+}
+
 
 export function parseMongoAggregateCommand(input: string): MongoAggregateCommand | null {
   const source = input.trim().replace(/;$/, "").trim();

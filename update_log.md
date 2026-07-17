@@ -1,5 +1,41 @@
 # Update Log
 
+## 2026-07-18 — 合并上游 packages 0.4.31
+
+### 上游基线
+
+| 项 | 值 |
+|----|-----|
+| 上游仓库 | https://github.com/t8y2/dbx |
+| 合并提交 | `5206750` — chore(packages): release 0.4.31 |
+| 标签 | `packages-v0.4.31` |
+| npm 版本 | `@dbx-app/{mcp-server,cli,node-core}@0.4.31` |
+| 原基线 | `e226a56` / 本地补丁 0.4.29 |
+
+### 合并策略
+
+以 upstream `main@5206750` 为底，保留本地补丁功能后手工并入上游增量（未整仓 rebase，避免大文件整文件冲突）。
+
+### 已并入的上游改动
+
+- PostgreSQL SSL mode 对齐（`prefer` 降级、URL ssl 参数剥离、证书路径）
+- MongoDB `distinct` / aggregate `options` 支持（web-backend + database）
+- SQL 诊断日志 `logSqlDiagnostic`、`supportsHashLineComments`（MCP / CLI）
+- `sql-diagnostics` / `sql-risk` / `sql-safety` / `production-safety` 更新
+- 包版本升至 **0.4.31**
+
+### 保留的本地功能
+
+代理参数与 profile、`dbx_list_proxies` / `proxies list`、库表 stats/report、数字序号引用、并行批量、连接流式进度、report 默认落盘、短参数别名、COUNT 移除、stats 作用域、batch 遇错继续等。
+
+### 说明
+
+- 未引入未发布的 `@dbx-app/mongo-shell` workspace 依赖；Mongo 解析仍使用本地内联实现，并叠加了上游 distinct/options 能力。
+- `dist/` 已手工同步关键上游改动；`database.js` 的 SSL 逻辑以 **src 为准**，完整 dist 重建留给用户本地编译。
+- 已同步到安装目录：`C:\usr\local\node_modules\@dbx-app\mcp-server`、`G:\usr\local\node_modules\@dbx-app\cli` 及其嵌套 `node-core`。
+
+---
+
 ## 2026-07-17 — CLI 参数短别名
 
 常用长选项增加单字母短别名，`dbx help` 与 README 统一为 `-x, --long` 格式。

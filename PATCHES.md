@@ -1,4 +1,4 @@
-# DBX MCP / CLI Patches (2026-07-16)
+# DBX MCP / CLI Patches (2026-07-18)
 
 This fork branch contains **local enhancements** on top of upstream [t8y2/dbx](https://github.com/t8y2/dbx).
 
@@ -7,7 +7,9 @@ This fork branch contains **local enhancements** on top of upstream [t8y2/dbx](h
 | Item | Value |
 |------|-------|
 | Upstream repo | https://github.com/t8y2/dbx |
-| Base commit | `e226a56` — fix(navigator): preserve table identity when opening objects |
+| Base commit | `5206750` — chore(packages): release 0.4.31 (`packages-v0.4.31`) |
+| Package version | `0.4.31` |
+| Previous baseline | `e226a56` / local patches on `0.4.29` |
 | Patched packages | `packages/mcp-server`, `packages/cli`, `packages/node-core` |
 
 ## What we patched (not in upstream)

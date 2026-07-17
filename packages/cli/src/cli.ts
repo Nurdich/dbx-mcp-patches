@@ -41,6 +41,7 @@ import {
   type Backend,
   type ConnectionConfig,
   type ProxyTunnelConfig,
+  supportsHashLineComments,
 } from "@dbx-app/node-core";
 import { connectionSummary, csvTable, errorPayload, formatCell, formatErrorMessage, mdTable } from "./cli-format.js";
 
@@ -581,6 +582,7 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       }
       const sqlArg = usesDefaultConnection ? args[1] : args[2];
       const sql = flags.file ? await readFile(flags.file, "utf-8") : required(sqlArg, "SQL string or --file is required.");
+      const configs = await resolveConnectionsForCli(backend, connectionRef);
       const envSafety = sqlSafetyFromCliEnv(env);
       if (flags.allowDangerous && !flags.allowWrites && !envSafety.allowWrites) {
         throw new CliError("INVALID_OPTION", "--allow-dangerous-sql requires --allow-writes.");
@@ -588,10 +590,10 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const safetyOptions = {
         allowWrites: flags.allowWrites || envSafety.allowWrites,
         allowDangerous: flags.allowDangerous || envSafety.allowDangerous,
+        hashLineComments: configs.some((config) => supportsHashLineComments(config.db_type)),
       };
       const safety = evaluateSqlSafety(sql, safetyOptions);
       if (!safety.allowed) return failed("SQL_BLOCKED", safety.reason ?? "SQL blocked.", flags.json);
-      const configs = await resolveConnectionsForCli(backend, connectionRef);
       const batchResults = await runConnectionBatch(configs, flags, async (config) =>
         backend.executeQuery(config, sql, { maxRows: flags.maxRows, timeoutMs: flags.timeoutMs }),
       );
