@@ -1,4 +1,4 @@
-﻿# Update Log
+# Update Log
 
 ## 2026-07-18 — 合并上游 packages 0.4.31
 
@@ -35,7 +35,7 @@
 - 已同步到安装目录：`C:\usr\local\node_modules\@dbx-app\mcp-server`、`G:\usr\local\node_modules\@dbx-app\cli` 及其嵌套 `node-core`。
 
 
-### 合并后补回（同日）
+
 
 合并过程中曾短暂覆盖的本地增强已补回并推送：
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 import {
@@ -16,6 +15,7 @@ import {
   buildBatchReportSavePath,
   buildReportSavePath,
   reportTimestamp,
+  applyProxyProfileOverride,
   findProxyProfile,
   findProxyProfilesByName,
   formatSchemaContext,
@@ -27,7 +27,6 @@ import {
   loadTunnelProfiles,
   notifyReload,
   postBridge,
-  proxyProfileReferenceLayer,
   proxyProfileSummary,
   cliConnectionLogOptions,
   pushConnectionLog,
@@ -423,7 +422,11 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const usesDefaultConnection = !!env.DBX_CONNECTION && args.length === 1;
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx stats");
       const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
-      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const configs = await applyOptionalProxyProfileOverride(
+        backend,
+        await resolveConnectionsForCli(backend, connectionRef),
+        flags,
+      );
       const batchResults = await runConnectionBatch(configs, flags, async (config) => {
         try {
           return await fetchDatabaseStats(backend, config, {
@@ -469,7 +472,11 @@ export async function runCli(argv: string[], options: CliRunOptions = {}): Promi
       const usesDefaultConnection = !!env.DBX_CONNECTION && args.length === 1;
       ensureArgCount(args, usesDefaultConnection ? 1 : 2, "dbx report");
       const connectionRef = usesDefaultConnection ? env.DBX_CONNECTION! : required(args[1], "Connection name is required.");
-      const configs = await resolveConnectionsForCli(backend, connectionRef);
+      const configs = await applyOptionalProxyProfileOverride(
+        backend,
+        await resolveConnectionsForCli(backend, connectionRef),
+        flags,
+      );
       const batchResults = await runConnectionBatch(configs, flags, async (config) => {
         try {
           return await fetchDatabaseReport(backend, config, {
