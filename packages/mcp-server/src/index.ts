@@ -460,7 +460,7 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       }
       const summary = formatMcpBatchSummary(resolvedConfigs.length - failures, 0, failures, resolvedConfigs.length);
       const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
-      return failures > 0 && resolvedConfigs.length > 1 ? { ...result, isError: true } : result;
+      return failures > 0 ? { ...result, isError: true } : result;
     },
   );
 
@@ -513,7 +513,7 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       }
       const summary = formatMcpBatchSummary(resolvedConfigs.length - failures, 0, failures, resolvedConfigs.length);
       const result = text(`${parts.join(MCP_BATCH_SEPARATOR)}${summary}`);
-      return failures > 0 && resolvedConfigs.length > 1 ? { ...result, isError: true } : result;
+      return failures > 0 ? { ...result, isError: true } : result;
     },
   );
 
