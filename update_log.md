@@ -30,8 +30,9 @@
 
 ### 合并后补回（同日）
 
-- \pplyProxyProfileOverride\（node-core / MCP / CLI connections add）
-- stats/report 对非目录型引擎的跳过与 \SKIPPED_UNSUPPORTED\ 批量摘要
+- `applyProxyProfileOverride`（node-core / MCP / CLI connections add）
+- MCP 工具一次性 `proxy_profile_*` 覆盖（`resolveConnectionWithProxyOverride`）
+- stats/report 对非目录型引擎的跳过与 `SKIPPED_UNSUPPORTED` 批量摘要
 - Redis NOAUTH 无密码提示
 
 ### 说明
@@ -39,6 +40,7 @@
 - 未引入未发布的 `@dbx-app/mongo-shell` workspace 依赖；Mongo 解析仍使用本地内联实现，并叠加了上游 distinct/options 能力。
 - `dist/` 已手工同步关键上游改动；`database.js` 的 SSL 逻辑以 **src 为准**，完整 dist 重建留给用户本地编译。
 - 已同步到安装目录：`C:\usr\local\node_modules\@dbx-app\mcp-server`、`G:\usr\local\node_modules\@dbx-app\cli` 及其嵌套 `node-core`。
+
 ---
 
 ## 2026-07-17 — CLI 参数短别名

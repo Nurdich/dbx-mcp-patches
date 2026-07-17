@@ -37,7 +37,7 @@ import {
   type RedisCommandResult,
 } from "@dbx-app/node-core";
 import {
-  buildProxyProfileReferenceLayer,
+  applyProxyProfileOverride,
   findProxyProfile,
   findProxyProfilesByName,
   hasInlineProxyParams,
@@ -232,6 +232,61 @@ async function resolveConnection(backend: Backend, scope: McpScope, requestedId?
   return { config: scopedConfig };
 }
 
+/**
+ * One-shot proxy profile override: replaces existing proxy layers for this request only.
+ */
+async function resolveConnectionWithProxyOverride(
+  backend: Backend,
+  scope: McpScope,
+  isWebMode: boolean,
+  args: {
+    connection_id?: string;
+    connection_name?: string;
+    proxy_profile_id?: string;
+    proxy_profile_name?: string;
+  },
+): Promise<{ config?: ConnectionConfig; error?: ReturnType<typeof toolError> }> {
+  const { config, error } = await resolveConnection(backend, scope, args.connection_id, args.connection_name);
+  if (error) return { error };
+  if (!hasProxyProfileRef(args)) return { config };
+
+  if (args.proxy_profile_id?.trim() && args.proxy_profile_name?.trim()) {
+    return { error: toolError("PROXY_CONFLICT", "Specify either proxy_profile_id or proxy_profile_name, not both.") };
+  }
+
+  const profiles = await loadTunnelProfiles(isWebMode);
+  const proxies = profiles.filter((profile) => profile.type === "proxy");
+  if (args.proxy_profile_name?.trim() && !args.proxy_profile_id?.trim()) {
+    const matches = findProxyProfilesByName(profiles, args.proxy_profile_name);
+    if (matches.length > 1) {
+      const lines = matches.map((item) => {
+        const proxyIdx = proxies.indexOf(item);
+        const num = proxyIdx >= 0 ? proxyIdx + 1 : "?";
+        return `- #${num} ${item.id}: ${proxyProfileSummary(item)}`;
+      });
+      return {
+        error: toolError(
+          "AMBIGUOUS_PROXY_PROFILE",
+          `Multiple proxy profiles named "${args.proxy_profile_name}". Specify proxy_profile_id or list index (#):\n${lines.join("\n")}`,
+        ),
+      };
+    }
+  }
+  const profile = findProxyProfile(profiles, {
+    proxy_profile_id: args.proxy_profile_id,
+    proxy_profile_name: args.proxy_profile_name,
+  });
+  if (!profile || profile.type !== "proxy") {
+    return {
+      error: toolError(
+        "PROXY_PROFILE_NOT_FOUND",
+        "Proxy profile not found. Use dbx_list_proxies to see saved profiles from DBX Settings > Tunnels.",
+      ),
+    };
+  }
+  return { config: applyProxyProfileOverride(config!, profile) };
+}
+
 export function createDbxMcpServer(backend: Backend, options: { isWebMode?: boolean } = {}): McpServer {
   const isWebMode = options.isWebMode ?? !!process.env.DBX_WEB_URL;
   const scope = mcpScopeFromEnv();
@@ -329,9 +384,16 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
       database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
       schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, dbo for SQL Server, login user for Dameng)"),
+      proxy_profile_id: z.string().optional().describe("One-shot: replace connection proxy with this saved profile ID or list index (#) for this request only"),
+      proxy_profile_name: z.string().optional().describe("One-shot: replace connection proxy with this saved profile name or list index (#) for this request only"),
     },
-    async ({ connection_id, connection_name, database, schema }) => {
-      const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
+    async ({ connection_id, connection_name, database, schema, proxy_profile_id, proxy_profile_name }) => {
+      const { config, error } = await resolveConnectionWithProxyOverride(backend, scope, isWebMode, {
+        connection_id,
+        connection_name,
+        proxy_profile_id,
+        proxy_profile_name,
+      });
       if (error) return error;
       const resolvedConfig = config!;
 
@@ -361,9 +423,16 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
       database: z.string().optional().describe("Database name; for Dameng this is also accepted as a schema alias"),
       schema: z.string().optional().describe("Schema name (default: public for PostgreSQL, dbo for SQL Server, login user for Dameng)"),
+      proxy_profile_id: z.string().optional().describe("One-shot: replace connection proxy with this saved profile ID or list index (#) for this request only"),
+      proxy_profile_name: z.string().optional().describe("One-shot: replace connection proxy with this saved profile name or list index (#) for this request only"),
     },
-    async ({ connection_id, connection_name, database, schema }) => {
-      const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
+    async ({ connection_id, connection_name, database, schema, proxy_profile_id, proxy_profile_name }) => {
+      const { config, error } = await resolveConnectionWithProxyOverride(backend, scope, isWebMode, {
+        connection_id,
+        connection_name,
+        proxy_profile_id,
+        proxy_profile_name,
+      });
       if (error) return error;
       const resolvedConfig = config!;
 
@@ -393,10 +462,17 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
       connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),
       database: z.string().optional().describe("Database name"),
       sql: z.string().describe("SQL query to execute"),
+      proxy_profile_id: z.string().optional().describe("One-shot: replace connection proxy with this saved profile ID or list index (#) for this request only"),
+      proxy_profile_name: z.string().optional().describe("One-shot: replace connection proxy with this saved profile name or list index (#) for this request only"),
     },
-    async ({ connection_id, connection_name, database, sql }) => {
+    async ({ connection_id, connection_name, database, sql, proxy_profile_id, proxy_profile_name }) => {
       logSqlDiagnostic("dbx_execute_query", sql, { connection_id, connection_name, database });
-      const { config, error } = await resolveConnection(backend, scope, connection_id, connection_name);
+      const { config, error } = await resolveConnectionWithProxyOverride(backend, scope, isWebMode, {
+        connection_id,
+        connection_name,
+        proxy_profile_id,
+        proxy_profile_name,
+      });
       if (error) return error;
       const scopedConfig = config!;
       if (scopedConfig.db_type === "redis") {
@@ -609,7 +685,7 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
             return toolError("PROXY_PROFILE_NOT_FOUND", "Proxy profile not found. Use dbx_list_proxies to see saved profiles from DBX Settings > Tunnels.");
           }
           savedProxyLabel = profile.name?.trim() || profile.id;
-          baseConfig.transport_layers = [buildProxyProfileReferenceLayer(profile)];
+          Object.assign(baseConfig, applyProxyProfileOverride(baseConfig, profile));
         } else if (proxy_enabled) {
           if (!proxy_host?.trim()) return text("proxy_host is required when proxy_enabled is true.");
           Object.assign(baseConfig, {
