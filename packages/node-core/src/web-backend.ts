@@ -1,4 +1,5 @@
 import type { ConnectionConfig } from "./connections.js";
+import { connectionLog, describeConnectionTarget, logTransportLayers, withConnectionStage } from "./connection-log.js";
 import type { TableInfo, ColumnInfo, QueryOptions, QueryResult } from "./database.js";
 import {
   collectionListToTableInfos,
@@ -131,6 +132,11 @@ export async function loadConnections(): Promise<ConnectionConfig[]> {
   return res.json();
 }
 
+export async function loadTunnelProfiles(): Promise<import("./tunnel-profiles.js").TunnelProfile[]> {
+  const res = await apiFetch("/api/tunnel-profiles/list");
+  return res.json();
+}
+
 export async function findConnection(name: string): Promise<ConnectionConfig | undefined> {
   const connections = await loadConnections();
   return connections.find((c) => c.name.toLowerCase() === name.toLowerCase());
@@ -160,10 +166,14 @@ export async function removeConnectionById(id: string): Promise<boolean> {
 }
 
 async function ensureConnected(config: ConnectionConfig): Promise<void> {
-  await apiFetch("/api/connection/connect", {
-    method: "POST",
-    body: JSON.stringify({ config }),
+  logTransportLayers(config);
+  await withConnectionStage(`Connecting to ${describeConnectionTarget(config)} via DBX Web API`, async () => {
+    await apiFetch("/api/connection/connect", {
+      method: "POST",
+      body: JSON.stringify({ config }),
+    });
   });
+  connectionLog("DBX Web API connection ready");
 }
 
 export async function listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]> {
@@ -263,8 +273,8 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
           database: config.database || "",
           collection: aggregate.collection,
           pipelineJson: aggregate.pipeline,
-          maxRows: options?.maxRows ?? 100,
           ...(aggregate.options ? { optionsJson: aggregate.options } : {}),
+          maxRows: options?.maxRows ?? 100,
         }),
       });
       const result = (await res.json()) as { documents: unknown[]; total: number };
@@ -328,7 +338,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.aggregate([]), db.projects.aggregate([], {explain:true}), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
+      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.aggregate([]), db.projects.distinct("status"), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
     );
   }
   const res = await apiFetch("/api/query/execute", {

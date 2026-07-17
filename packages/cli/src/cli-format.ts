@@ -1,17 +1,11 @@
-import { formatCell, mdTable, type ConnectionConfig } from "@dbx-app/node-core";
+import { formatCell, mdTable } from "@dbx-app/node-core";
+import type { ConnectionConfig } from "@dbx-app/node-core";
 
 export { formatCell, mdTable };
 
-export interface ConnectionSummary {
-  name: string;
-  type: string;
-  host: string;
-  port: number;
-  database?: string;
-}
-
-export function connectionSummary(connection: ConnectionConfig): ConnectionSummary {
+export function connectionSummary(connection: ConnectionConfig) {
   return {
+    id: connection.id,
     name: connection.name,
     type: connection.db_type,
     host: connection.host,
@@ -20,20 +14,12 @@ export function connectionSummary(connection: ConnectionConfig): ConnectionSumma
   };
 }
 
-export interface ErrorPayload {
-  error: {
-    code: string;
-    message: string;
-    hint?: string;
-  };
-}
-
-export function errorPayload(code: string, message: string): ErrorPayload {
+export function errorPayload(code: string, message: string) {
   const hint = errorHint(code, message);
   return { error: hint ? { code, message, hint } : { code, message } };
 }
 
-export function formatErrorMessage(code: string, message: string): string {
+export function formatErrorMessage(code: string, message: string) {
   const hint = errorHint(code, message);
   return hint ? `${message}\n\nHint: ${hint}` : message;
 }
@@ -45,7 +31,7 @@ function errorHint(code: string, message: string): string | undefined {
   return undefined;
 }
 
-export function csvTable<T extends object>(headers: string[], rows: T[]): string {
+export function csvTable<T extends Record<string, unknown>>(headers: string[], rows: T[] | Record<string, unknown>[]) {
   const lines = [headers.map(csvCell).join(",")];
   for (const row of rows) {
     const values = row as Record<string, unknown>;
@@ -54,7 +40,7 @@ export function csvTable<T extends object>(headers: string[], rows: T[]): string
   return `${lines.join("\n")}\n`;
 }
 
-function csvCell(value: unknown): string {
+function csvCell(value: unknown) {
   if (value === null || value === undefined) return "";
   const text = typeof value === "object" ? JSON.stringify(value) : String(value);
   if (/[",\r\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;

@@ -1,4 +1,5 @@
 import { addConnection as desktopAddConnection, findConnection as desktopFindConnection, loadConnections as desktopLoadConnections, removeConnection as desktopRemoveConnection, removeConnectionById as desktopRemoveConnectionById } from "./connections.js";
+import { loadTunnelProfiles as desktopLoadTunnelProfiles } from "./tunnel-profiles.js";
 import { closeDatabaseResources as desktopCloseDatabaseResources, describeTable as desktopDescribeTable, executeQuery as desktopExecuteQuery, executeRedisCommand as desktopExecuteRedisCommand, listTables as desktopListTables } from "./database.js";
 import type { ConnectionConfig } from "./connections.js";
 import type { ColumnInfo, QueryOptions, QueryResult, TableInfo } from "./database.js";
@@ -6,6 +7,7 @@ import type { RedisCommandOptions, RedisCommandResult } from "./redis-command.js
 
 export interface Backend {
   loadConnections(): Promise<ConnectionConfig[]>;
+  loadTunnelProfiles?(): Promise<import("./tunnel-profiles.js").TunnelProfile[]>;
   findConnection(name: string): Promise<ConnectionConfig | undefined>;
   addConnection(config: Omit<ConnectionConfig, "id">): Promise<ConnectionConfig>;
   removeConnection(name: string): Promise<boolean>;
@@ -24,6 +26,7 @@ export async function createBackend(env: NodeJS.ProcessEnv = process.env): Promi
 
   return {
     loadConnections: desktopLoadConnections,
+    loadTunnelProfiles: desktopLoadTunnelProfiles,
     findConnection: desktopFindConnection,
     addConnection: desktopAddConnection,
     removeConnection: desktopRemoveConnection,

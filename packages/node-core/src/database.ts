@@ -5,28 +5,18 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import {
+  connectionLog,
+  connectionStageError,
+  describeConnectionTarget,
+  logQuerySql,
+  logTransportLayers,
+  withConnectionStage,
+} from "./connection-log.js";
 import { sqlSafetyFromEnv } from "./sql-safety.js";
 import { isDirectQueryType } from "./diagnostics.js";
 import { bridgePortFilePath } from "./paths.js";
 import { parseRedisCommandArgv, classifyRedisCommand, type RedisCommandOptions, type RedisCommandResult, type RedisCommandSafety } from "./redis-command.js";
-import {
-  chainedMethodCallPattern,
-  describeMongoCommandParseFailure,
-  findChainedMethodCallIndex,
-  findMatchingParen,
-  normalizeJsonArgument,
-  parseCollectionMethodTarget,
-  parseMongoAggregateCommand,
-  splitTopLevel,
-  type MongoAggregateCommand,
-} from "@dbx-app/mongo-shell";
-
-export {
-  describeMongoCommandParseFailure,
-  parseMongoAggregateCommand,
-  MONGO_SHELL_COMMAND_HINT,
-} from "@dbx-app/mongo-shell";
-export type { MongoAggregateCommand } from "@dbx-app/mongo-shell";
 
 export interface TableInfo {
   name: string;
@@ -71,6 +61,19 @@ const MAX_ROWS = 100;
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const QUERY_TIMEOUT_MS = 30_000;
 
+function parseDurationMsEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const match = raw.match(/^(\d+)(ms|s|m)?$/);
+  if (!match) return undefined;
+  const amount = Number(match[1]);
+  if (!Number.isInteger(amount) || amount < 1) return undefined;
+  const unit = match[2] ?? "ms";
+  if (unit === "ms") return amount;
+  if (unit === "s") return amount * 1000;
+  return amount * 60_000;
+}
+
 interface PoolEntry {
   type: "pg" | "mysql";
   pool: unknown;
@@ -91,10 +94,18 @@ interface RqliteResponse {
 }
 
 const pools = new Map<string, PoolEntry>();
+const poolInflight = new Map<string, Promise<import("pg").Pool | import("mysql2/promise").Pool>>();
 const proxyTunnels = new Map<string, { server: Server; port: number; sockets: Set<Socket> }>();
 
 function poolKey(config: ConnectionConfig): string {
-  return `${config.id}:${config.database || ""}`;
+  return [
+    config.id,
+    config.db_type,
+    config.host,
+    String(config.port),
+    config.username || "",
+    config.database || "",
+  ].join(":");
 }
 
 function evictPool(key: string, entry: PoolEntry) {
@@ -147,23 +158,47 @@ async function getPgPool(config: ConnectionConfig, sslModeOverride?: PostgresSsl
     return existing.pool as import("pg").Pool;
   }
 
-  const pg = await import("pg");
-  const endpoint = await connectionEndpoint(config);
-  const sslMode = sslModeOverride ?? postgresSslMode(config);
-  const pool = new pg.default.Pool({
-    // pg-connection-string lets URL SSL parameters override the explicit ssl
-    // object. Keep all TLS policy in one place so DBX modes cannot conflict.
-    connectionString: withoutPostgresSslUrlParams(buildConnectionUrl(config, endpoint)),
-    ssl: await postgresSslOptions(config, sslMode),
-    max: 3,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
-  });
-  pool.on("error", () => {});
-  const entry: PoolEntry = { type: "pg", pool, timer: setTimeout(() => {}, 0) };
-  pools.set(key, entry);
-  resetIdleTimer(key, entry);
-  return pool;
+  const inflight = poolInflight.get(key) as Promise<import("pg").Pool> | undefined;
+  if (inflight) return inflight;
+
+  const create = (async () => {
+    const cached = pools.get(key);
+    if (cached?.type === "pg") {
+      resetIdleTimer(key, cached);
+      return cached.pool as import("pg").Pool;
+    }
+
+    const pg = await import("pg");
+    const endpoint = await connectionEndpoint(config);
+    const sslMode = sslModeOverride ?? postgresSslMode(config);
+    connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+    try {
+      const pool = new pg.default.Pool({
+        // pg-connection-string lets URL SSL parameters override the explicit ssl
+        // object. Keep all TLS policy in one place so DBX modes cannot conflict.
+        connectionString: withoutPostgresSslUrlParams(buildConnectionUrl(config, endpoint)),
+        ssl: await postgresSslOptions(config, sslMode),
+        max: 3,
+        idleTimeoutMillis: 30_000,
+        connectionTimeoutMillis: 10_000,
+      });
+      pool.on("error", () => {});
+      const entry: PoolEntry = { type: "pg", pool, timer: setTimeout(() => {}, 0) };
+      pools.set(key, entry);
+      resetIdleTimer(key, entry);
+      connectionLog("Database connection pool ready");
+      return pool;
+    } catch (error) {
+      throw connectionStageError("Database connection", error);
+    }
+  })();
+
+  poolInflight.set(key, create);
+  try {
+    return await create;
+  } finally {
+    if (poolInflight.get(key) === create) poolInflight.delete(key);
+  }
 }
 
 function postgresSslMode(config: ConnectionConfig): PostgresSslMode {
@@ -237,21 +272,45 @@ async function getMysqlPool(config: ConnectionConfig): Promise<import("mysql2/pr
     return existing.pool as import("mysql2/promise").Pool;
   }
 
-  const mysql = await import("mysql2/promise");
-  const endpoint = await connectionEndpoint(config);
-  const poolOptions: import("mysql2/promise").PoolOptions = {
-    uri: buildConnectionUrl(config, endpoint),
-    connectionLimit: 3,
-    idleTimeout: 30_000,
-    connectTimeout: 10_000,
-  };
-  const tls = await mysqlTlsOptions(config);
-  if (tls) poolOptions.ssl = tls;
-  const pool = mysql.default.createPool(poolOptions);
-  const entry: PoolEntry = { type: "mysql", pool, timer: setTimeout(() => {}, 0) };
-  pools.set(key, entry);
-  resetIdleTimer(key, entry);
-  return pool;
+  const inflight = poolInflight.get(key) as Promise<import("mysql2/promise").Pool> | undefined;
+  if (inflight) return inflight;
+
+  const create = (async () => {
+    const cached = pools.get(key);
+    if (cached?.type === "mysql") {
+      resetIdleTimer(key, cached);
+      return cached.pool as import("mysql2/promise").Pool;
+    }
+
+    const mysql = await import("mysql2/promise");
+    const endpoint = await connectionEndpoint(config);
+    connectionLog(`Connecting to database ${describeConnectionTarget(config)} (via ${endpoint.host}:${endpoint.port})`);
+    try {
+      const poolOptions: import("mysql2/promise").PoolOptions = {
+        uri: buildConnectionUrl(config, endpoint),
+        connectionLimit: 3,
+        idleTimeout: 30_000,
+        connectTimeout: 10_000,
+      };
+      const tls = await mysqlTlsOptions(config);
+      if (tls) poolOptions.ssl = tls;
+      const pool = mysql.default.createPool(poolOptions);
+      const entry: PoolEntry = { type: "mysql", pool, timer: setTimeout(() => {}, 0) };
+      pools.set(key, entry);
+      resetIdleTimer(key, entry);
+      connectionLog("Database connection pool ready");
+      return pool;
+    } catch (error) {
+      throw connectionStageError("Database connection", error);
+    }
+  })();
+
+  poolInflight.set(key, create);
+  try {
+    return await create;
+  } finally {
+    if (poolInflight.get(key) === create) poolInflight.delete(key);
+  }
 }
 
 type ProxyLayer = { type: "proxy" } & ProxyTunnelConfig;
@@ -270,34 +329,44 @@ function hasDirectRedisSupport(config: ConnectionConfig): boolean {
 }
 
 async function connectionEndpoint(config: ConnectionConfig): Promise<{ host: string; port: number }> {
+  logTransportLayers(config);
   const proxy = firstProxyLayer(config);
   if (!proxy) return { host: config.host, port: config.port };
   const existing = proxyTunnels.get(config.id);
-  if (existing) return { host: "127.0.0.1", port: existing.port };
+  if (existing) {
+    connectionLog(`Reusing proxy tunnel on 127.0.0.1:${existing.port}`, { verboseOnly: true });
+    return { host: "127.0.0.1", port: existing.port };
+  }
 
-  const sockets = new Set<Socket>();
-  const server = createServer((inbound) => {
-    sockets.add(inbound);
-    inbound.once("close", () => sockets.delete(inbound));
-    connectViaProxy(config, proxy)
-      .then((outbound) => {
-        sockets.add(outbound);
-        outbound.once("close", () => sockets.delete(outbound));
-        inbound.pipe(outbound);
-        outbound.pipe(inbound);
-      })
-      .catch(() => inbound.destroy());
-  });
-  const port = await new Promise<number>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (address && typeof address === "object") resolve(address.port);
-      else reject(new Error("Failed to bind proxy tunnel"));
+  connectionLog(`Starting local proxy tunnel to ${config.host}:${config.port}...`);
+  try {
+    const sockets = new Set<Socket>();
+    const server = createServer((inbound) => {
+      sockets.add(inbound);
+      inbound.once("close", () => sockets.delete(inbound));
+      connectViaProxy(config, proxy)
+        .then((outbound) => {
+          sockets.add(outbound);
+          outbound.once("close", () => sockets.delete(outbound));
+          inbound.pipe(outbound);
+          outbound.pipe(inbound);
+        })
+        .catch(() => inbound.destroy());
     });
-  });
-  proxyTunnels.set(config.id, { server, port, sockets });
-  return { host: "127.0.0.1", port };
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (address && typeof address === "object") resolve(address.port);
+        else reject(new Error("Failed to bind proxy tunnel"));
+      });
+    });
+    proxyTunnels.set(config.id, { server, port, sockets });
+    connectionLog(`Proxy tunnel ready on 127.0.0.1:${port}`);
+    return { host: "127.0.0.1", port };
+  } catch (error) {
+    throw connectionStageError("Proxy connection", error);
+  }
 }
 
 export function buildConnectionUrl(config: ConnectionConfig, endpoint: { host: string; port: number }): string {
@@ -776,30 +845,33 @@ interface MongoDocumentResult {
 }
 
 async function bridgeDataRequest<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  let bridgeUrl: string;
-  try {
-    const port = (await readFile(bridgePortFilePath(), "utf-8")).trim();
-    bridgeUrl = `http://127.0.0.1:${port}`;
-  } catch {
-    throw new Error("DBX desktop app is not running. This database type requires DBX to be running for query execution.");
-  }
-  const res = await fetch(`${bridgeUrl}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errBody = await res.text().catch(() => "");
-    let errorMsg: string;
+  return withConnectionStage("Connecting to DBX desktop bridge", async () => {
+    let bridgeUrl: string;
     try {
-      const parsed = JSON.parse(errBody);
-      errorMsg = parsed.error || errBody;
+      const port = (await readFile(bridgePortFilePath(), "utf-8")).trim();
+      bridgeUrl = `http://127.0.0.1:${port}`;
+      connectionLog(`Bridge endpoint: ${bridgeUrl}`, { verboseOnly: true });
     } catch {
-      errorMsg = errBody;
+      throw new Error("DBX desktop app is not running. This database type requires DBX to be running for query execution.");
     }
-    throw new Error(errorMsg || `Bridge request failed: ${res.status}`);
-  }
-  return res.json() as Promise<T>;
+    const res = await fetch(`${bridgeUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      let errorMsg: string;
+      try {
+        const parsed = JSON.parse(errBody);
+        errorMsg = parsed.error || errBody;
+      } catch {
+        errorMsg = errBody;
+      }
+      throw new Error(errorMsg || `Bridge request failed: ${res.status}`);
+    }
+    return res.json() as Promise<T>;
+  });
 }
 
 function resolveMaxRows(options?: QueryOptions): number {
@@ -807,7 +879,7 @@ function resolveMaxRows(options?: QueryOptions): number {
 }
 
 function resolveTimeoutMs(options?: QueryOptions): number {
-  return options?.timeoutMs ?? QUERY_TIMEOUT_MS;
+  return options?.timeoutMs ?? parseDurationMsEnv("DBX_QUERY_TIMEOUT") ?? QUERY_TIMEOUT_MS;
 }
 
 function convertBridgeQueryResult(result: BridgeQueryResult, options?: QueryOptions): QueryResult {
@@ -910,7 +982,9 @@ function quoteSqliteIdentifier(identifier: string): string {
 }
 
 function sqliteQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): QueryResult {
-  const db = new Database(sqlitePath(config), { readonly: !sqlSafetyFromEnv().allowWrites });
+  const path = sqlitePath(config);
+  connectionLog(`Opening SQLite database ${path}`);
+  const db = new Database(path, { readonly: !sqlSafetyFromEnv().allowWrites });
   try {
     const stmt = db.prepare(sql);
     if (stmt.reader) {
@@ -966,19 +1040,22 @@ async function rqliteRequest(config: ConnectionConfig, endpoint: "/db/query" | "
 }
 
 export async function executeQuery(config: ConnectionConfig, sql: string, options?: QueryOptions): Promise<QueryResult> {
-  if (hasActiveSshLayer(config)) {
-    const result = await withTimeout(
-      bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
-        connection_id: config.id,
-        connection_name: config.name,
-        database: config.database || "",
-        sql,
-      }),
-      resolveTimeoutMs(options),
-    );
-    return convertBridgeQueryResult(result, options);
-  }
-  if (config.db_type === "mongodb") {
+  return withConnectionStage("Executing query", async () => {
+    logQuerySql(sql);
+    if (hasActiveSshLayer(config)) {
+      connectionLog("SSH tunnel active; routing query via DBX desktop bridge");
+      const result = await withTimeout(
+        bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+          connection_id: config.id,
+          connection_name: config.name,
+          database: config.database || "",
+          sql,
+        }),
+        resolveTimeoutMs(options),
+      );
+      return convertBridgeQueryResult(result, options);
+    }
+    if (config.db_type === "mongodb") {
     const version = parseMongoVersionCommand(sql);
     if (version) {
       const result = await withTimeout(mongoServerVersion(config), resolveTimeoutMs(options));
@@ -1037,21 +1114,24 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       }
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
-    throw new Error(describeMongoCommandParseFailure(sql));
-  }
-  if (isDirectQueryType(config.db_type)) {
-    return query(config, sql, undefined, options);
-  }
-  const result = await withTimeout(
-    bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
-      connection_id: config.id,
-      connection_name: config.name,
-      database: config.database || "",
-      sql,
-    }),
-    resolveTimeoutMs(options),
-  );
-  return convertBridgeQueryResult(result, options);
+    throw new Error(
+      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
+    );
+    }
+    if (isDirectQueryType(config.db_type)) {
+      return query(config, sql, undefined, options);
+    }
+    const result = await withTimeout(
+      bridgeDataRequest<BridgeQueryResult>("/data/execute-query", {
+        connection_id: config.id,
+        connection_name: config.name,
+        database: config.database || "",
+        sql,
+      }),
+      resolveTimeoutMs(options),
+    );
+    return convertBridgeQueryResult(result, options);
+  });
 }
 
 export async function executeRedisCommand(config: ConnectionConfig, db: number, command: string, options?: RedisCommandOptions): Promise<RedisCommandResult> {
@@ -1074,38 +1154,42 @@ export async function executeRedisCommand(config: ConnectionConfig, db: number, 
 }
 
 async function executeRedisCommandDirect(config: ConnectionConfig, db: number, commandText: string, options?: RedisCommandOptions): Promise<RedisCommandResult> {
-  const argv = parseRedisCommandArgv(commandText);
-  const command = argv[0].toUpperCase();
-  const safety = classifyRedisCommand(command) as RedisCommandSafety;
-  if (!options?.skipSafetyCheck && safety === "blocked") {
-    throw new Error("Redis command is blocked for safety. Enable dangerous commands with DBX_MCP_ALLOW_DANGEROUS_SQL=1.");
-  }
+  return withConnectionStage("Connecting to Redis", async () => {
+    const argv = parseRedisCommandArgv(commandText);
+    const command = argv[0].toUpperCase();
+    const safety = classifyRedisCommand(command) as RedisCommandSafety;
+    if (!options?.skipSafetyCheck && safety === "blocked") {
+      throw new Error(`Redis command is blocked for safety: ${command}`);
+    }
 
-  const { Redis } = await import("ioredis");
-  const endpoint = await connectionEndpoint(config);
-  const tls = await redisTlsOptions(config);
-  const client = new Redis({
-    host: endpoint.host,
-    port: endpoint.port,
-    username: config.username || undefined,
-    password: config.password || undefined,
-    db,
-    tls,
-    lazyConnect: true,
-    enableReadyCheck: false,
-    maxRetriesPerRequest: 0,
-    enableOfflineQueue: false,
-    connectTimeout: Math.min(resolveTimeoutMs(options), 10_000),
-    commandTimeout: resolveTimeoutMs(options),
+    const { Redis } = await import("ioredis");
+    const endpoint = await connectionEndpoint(config);
+    connectionLog(`Connecting to Redis @ ${endpoint.host}:${endpoint.port} (db ${db})`);
+    const tls = await redisTlsOptions(config);
+    const client = new Redis({
+      host: endpoint.host,
+      port: endpoint.port,
+      username: config.username || undefined,
+      password: config.password || undefined,
+      db,
+      tls,
+      lazyConnect: true,
+      enableReadyCheck: false,
+      maxRetriesPerRequest: 0,
+      enableOfflineQueue: false,
+      connectTimeout: Math.min(resolveTimeoutMs(options), 10_000),
+      commandTimeout: resolveTimeoutMs(options),
+    });
+
+    try {
+      await client.connect();
+      connectionLog(`Executing Redis command: ${command}`);
+      const value = await client.call(command, ...argv.slice(1));
+      return { command, safety, value: redisValueToJson(value) };
+    } finally {
+      client.disconnect();
+    }
   });
-
-  try {
-    await client.connect();
-    const value = await client.call(command, ...argv.slice(1));
-    return { command, safety, value: redisValueToJson(value) };
-  } finally {
-    client.disconnect();
-  }
 }
 
 async function redisTlsOptions(config: ConnectionConfig): Promise<import("node:tls").ConnectionOptions | undefined> {
@@ -1146,7 +1230,8 @@ function redisTextToJson(value: string): unknown {
 }
 
 export async function listTables(config: ConnectionConfig, schema?: string): Promise<TableInfo[]> {
-  if (config.db_type === "mongodb") {
+  return withConnectionStage("Listing tables", async () => {
+    if (config.db_type === "mongodb") {
     const collections = await bridgeDataRequest<CollectionListEntry[]>("/data/mongo/list-collections", {
       connection_id: config.id,
       connection_name: config.name,
@@ -1175,10 +1260,12 @@ export async function listTables(config: ConnectionConfig, schema?: string): Pro
     result = await query(config, `SELECT table_name AS name, table_type AS type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`, [schema || "public"]);
   }
   return result.rows.map((r) => ({ name: String(r.name || r.NAME), type: String(r.type || r.TYPE || "TABLE") }));
+  });
 }
 
 export async function describeTable(config: ConnectionConfig, table: string, schema?: string): Promise<ColumnInfo[]> {
-  if (config.db_type === "mongodb") {
+  return withConnectionStage(`Describing table ${table}`, async () => {
+    if (config.db_type === "mongodb") {
     const result = await mongoFindDocuments(config, table, 0, 20, "{}");
     return inferMongoColumns(result.documents);
   }
@@ -1217,6 +1304,7 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
     result = await query(config, POSTGRES_DESCRIBE_TABLE_COMPAT_SQL, [schema || "public", table]);
   }
   return result.rows.map((row) => mapDescribeTableColumn(row, normalizeEnumValues(row.enum_values)));
+  });
 }
 
 async function mongoFindDocuments(config: ConnectionConfig, collection: string, skip: number, limit: number, filter: string, projection?: string, sort?: string): Promise<MongoDocumentResult> {
@@ -1347,18 +1435,15 @@ async function mongoDistinct(config: ConnectionConfig, collection: string, field
     database: config.database || "",
     collection,
     field,
-    filter,
+    ...(filter ? { filter } : {}),
   });
 }
 
-/** distinct returns bare values, so the single column is named after the field. */
 export function mongoDistinctToQueryResult(field: string, values: unknown[]): QueryResult {
-  return {
-    columns: [field],
-    rows: values.map((value) => ({ [field]: toCellValue(value) })),
-    row_count: values.length,
-  };
+  const rows = values.map((value) => ({ [field]: toCellValue(value) }));
+  return { columns: [field], rows, row_count: rows.length };
 }
+
 
 export function mongoCollectionStatsToQueryResult(metric: MongoCollectionStatsMetric, stats: Record<string, unknown>): QueryResult {
   if (metric === "stats") {
@@ -1443,6 +1528,12 @@ interface MongoDistinctCommand {
   collection: string;
   field: string;
   filter?: string;
+}
+
+interface MongoAggregateCommand {
+  collection: string;
+  pipeline: string;
+  options?: string;
 }
 
 interface MongoGetIndexesCommand {
@@ -1555,6 +1646,18 @@ export function parseMongoDistinctCommand(input: string): MongoDistinctCommand |
   if (args.length === 1) return { collection: target.collection, field };
   const filter = normalizeJsonArgument(args[1] ?? "");
   return filter ? { collection: target.collection, field, filter } : null;
+}
+
+
+export function parseMongoAggregateCommand(input: string): MongoAggregateCommand | null {
+  const source = input.trim().replace(/;$/, "").trim();
+  const target = parseCollectionMethodTarget(source, "aggregate");
+  if (!target) return null;
+  const args = parseMethodArgs(source, target.methodCallIndex);
+  if (!args || args.length !== 1) return null;
+  const pipeline = normalizeJsonArgument(args[0]);
+  if (!pipeline) return null;
+  return Array.isArray(JSON.parse(pipeline)) ? { collection: target.collection, pipeline } : null;
 }
 
 export function parseMongoGetIndexesCommand(input: string): MongoGetIndexesCommand | null {
@@ -1723,6 +1826,15 @@ export function evaluateMongoAggregateSafety(command: MongoAggregateCommand, opt
   return { allowed: true };
 }
 
+function parseCollectionMethodTarget(source: string, method: string): { collection: string; methodCallIndex: number } | null {
+  const escapedMethod = escapeRegExp(method);
+  const direct = new RegExp(`^db\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
+  if (direct) return { collection: direct[1], methodCallIndex: findChainedMethodCallIndex(source, method) };
+  const quoted = new RegExp(`^db\\s*\\.\\s*getCollection\\s*\\(\\s*(['"])([^'"]+)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
+  if (quoted) return { collection: quoted[2], methodCallIndex: findChainedMethodCallIndex(source, method) };
+  return null;
+}
+
 function parseMethodArgs(source: string, methodCallIndex: number): string[] | null {
   const openIndex = source.indexOf("(", methodCallIndex);
   const closeIndex = findMatchingParen(source, openIndex);
@@ -1747,11 +1859,33 @@ function hasSingleEmptyChainedCall(chain: string, method: string): boolean {
   return closeIndex >= 0 && !trimmed.slice(openIndex + 1, closeIndex).trim() && !trimmed.slice(closeIndex + 1).trim();
 }
 
+function findChainedMethodCallIndex(source: string, method: string): number {
+  return chainedMethodCallPattern(method).exec(source)?.index ?? -1;
+}
+
+function chainedMethodCallPattern(method: string): RegExp {
+  return new RegExp(`\\.\\s*${escapeRegExp(method)}\\s*\\(`, "g");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function readChainedIntegerArgument(chain: string, method: string, fallback: number): number | null {
   const arg = readChainedCallArgument(chain, method);
   if (arg === undefined) return fallback;
   if (!/^\d+$/.test(arg.trim())) return null;
   return Number(arg.trim());
+}
+
+function normalizeJsonArgument(arg: string): string | null {
+  const value = quoteUnquotedObjectKeys(convertSingleQuotedStrings((arg.trim() || "{}").replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')));
+  try {
+    JSON.parse(value);
+    return value;
+  } catch {
+    return null;
+  }
 }
 
 function parseMongoDropIndexArgument(args: string[]): string | null {
@@ -1784,6 +1918,98 @@ function parseMongoCollectionStatsScale(args: string[]): number | undefined | nu
   return scale;
 }
 
+function convertSingleQuotedStrings(source: string): string {
+  let result = "";
+  let copiedUntil = 0;
+  let quote: string | null = null;
+  let start = 0;
+  let value = "";
+  let escaped = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (!quote) {
+      if (char === "'") {
+        quote = char;
+        start = i;
+        value = "";
+        escaped = false;
+      } else if (char === '"') {
+        quote = char;
+      }
+      continue;
+    }
+
+    if (quote === '"') {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quote = null;
+      continue;
+    }
+
+    if (escaped) {
+      value += char;
+      escaped = false;
+    } else if (char === "\\") {
+      escaped = true;
+    } else if (char === "'") {
+      result += source.slice(copiedUntil, start) + JSON.stringify(value);
+      copiedUntil = i + 1;
+      quote = null;
+    } else {
+      value += char;
+    }
+  }
+
+  return quote === "'" ? source : result + source.slice(copiedUntil);
+}
+
+function quoteUnquotedObjectKeys(source: string): string {
+  let result = "";
+  let quote: string | null = null;
+  let escaped = false;
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (quote) {
+      result += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      result += char;
+      continue;
+    }
+
+    if (/[A-Za-z_$]/.test(char) && shouldQuoteObjectKey(source, i)) {
+      let end = i + 1;
+      while (/[\w$]/.test(source[end] || "")) end += 1;
+      result += `"${source.slice(i, end)}"`;
+      i = end - 1;
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function shouldQuoteObjectKey(source: string, index: number): boolean {
+  let before = index - 1;
+  while (/\s/.test(source[before] || "")) before -= 1;
+  if (source[before] !== "{" && source[before] !== ",") return false;
+
+  let after = index + 1;
+  while (/[\w$]/.test(source[after] || "")) after += 1;
+  while (/\s/.test(source[after] || "")) after += 1;
+  return source[after] === ":";
+}
+
 function parseNormalizedJson(json: string): unknown {
   try {
     return JSON.parse(json);
@@ -1811,6 +2037,51 @@ function mongoDropIndexesRequiresDangerous(command: MongoWriteCommand): boolean 
   const parsed = parseNormalizedJson(command.indexes);
   if (parsed === "*") return true;
   return Array.isArray(parsed) && parsed.length > 1;
+}
+
+function splitTopLevel(source: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote) {
+      if (ch === "\\" && i + 1 < source.length) i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === "{" || ch === "[" || ch === "(") depth += 1;
+    else if (ch === "}" || ch === "]" || ch === ")") depth -= 1;
+    else if (ch === "," && depth === 0) {
+      parts.push(source.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function findMatchingParen(source: string, openIndex: number): number {
+  if (openIndex < 0 || source[openIndex] !== "(") return -1;
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = openIndex; i < source.length; i += 1) {
+    const ch = source[i];
+    if (quote) {
+      if (ch === "\\" && i + 1 < source.length) i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === "(") depth += 1;
+    else if (ch === ")") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

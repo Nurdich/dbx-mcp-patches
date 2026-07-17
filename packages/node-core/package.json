@@ -22,15 +22,19 @@
     "./schema-context": "./dist/schema-context.js",
     "./sql-diagnostics": "./dist/sql-diagnostics.js",
     "./sql-risk": "./dist/sql-risk.js",
-    "./sql-safety": "./dist/sql-safety.js"
+    "./sql-safety": "./dist/sql-safety.js",
+    "./database-stats": "./dist/database-stats.js",
+    "./database-report": "./dist/database-report.js",
+    "./tunnel-profiles": "./dist/tunnel-profiles.js",
+    "./list-index": "./dist/list-index.js",
+    "./connection-log": "./dist/connection-log.js"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
-    "build": "pnpm --filter @dbx-app/mongo-shell build && tsc",
-    "prepublishOnly": "pnpm run build"
+    "build": "tsc",
+    "prepublishOnly": "tsc"
   },
   "dependencies": {
-    "@dbx-app/mongo-shell": "workspace:^",
     "better-sqlite3": "^12.9.0",
     "ioredis": "^5.11.1",
     "keytar": "^7.9.0",

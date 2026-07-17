@@ -2,6 +2,8 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
+import { connectionLog, logResolvedConnection } from "./connection-log.js";
+import { ListIndexRangeError, parseListIndex, parseListIndexRange, resolveConnectionByIndex } from "./list-index.js";
 import { dbPath as defaultDbPath } from "./paths.js";
 
 export interface ConnectionConfig {
@@ -41,6 +43,7 @@ export interface SshTunnelConfig {
   id: string;
   name?: string;
   enabled?: boolean;
+  profile_id?: string;
   host: string;
   port: number;
   user: string;
@@ -57,6 +60,7 @@ export interface ProxyTunnelConfig {
   id: string;
   name?: string;
   enabled?: boolean;
+  profile_id?: string;
   proxy_type?: "socks5" | "http";
   host: string;
   port: number;
@@ -373,4 +377,90 @@ export async function removeConnectionById(id: string): Promise<boolean> {
   const deleted = remove();
   db.close();
   return deleted;
+}
+
+export class ConnectionResolveError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "ConnectionResolveError";
+  }
+}
+
+export function resolveConnectionRef(connections: readonly ConnectionConfig[], ref: string): ConnectionConfig {
+  const trimmed = ref.trim();
+  if (!trimmed) throw new ConnectionResolveError("CONNECTION_NOT_FOUND", "Connection reference is required.");
+
+  connectionLog(`Resolving connection: ${trimmed}`);
+
+  const byId = connections.find((connection) => connection.id === trimmed);
+  if (byId) {
+    logResolvedConnection(byId, ref);
+    return byId;
+  }
+
+  const matching = connections.filter((connection) => connection.name.toLowerCase() === trimmed.toLowerCase());
+  if (matching.length > 1) {
+    const lines = matching.map((connection) => {
+      const idx = connections.indexOf(connection);
+      const num = idx >= 0 ? idx + 1 : "?";
+      return `- #${num} ${connection.id}: ${connection.db_type} @ ${connection.host}:${connection.port}`;
+    });
+    throw new ConnectionResolveError(
+      "AMBIGUOUS_CONNECTION",
+      `Multiple connections found with name "${ref}". Specify connection id or list index (#):\n${lines.join("\n")}`,
+    );
+  }
+  if (matching.length === 1) {
+    logResolvedConnection(matching[0], ref);
+    return matching[0];
+  }
+
+  const listIndex = parseListIndex(trimmed);
+  if (listIndex !== undefined) {
+    const config = resolveConnectionByIndex(connections, listIndex);
+    if (!config) {
+      const hint = connections.length > 0 ? ` Valid range: 1-${connections.length}.` : "";
+      throw new ConnectionResolveError(
+        "CONNECTION_NOT_FOUND",
+        `Connection index #${listIndex} not found. Run \`dbx connections list\`.${hint}`,
+      );
+    }
+    logResolvedConnection(config, ref);
+    return config;
+  }
+
+  throw new ConnectionResolveError("CONNECTION_NOT_FOUND", `Connection "${ref}" not found.`);
+}
+
+/** Resolve one or more connections when ref is a list index or range (`1`, `1-15`, `1..15`, `1:15`, `#1-#15`). */
+export function resolveConnectionsByIndexRef(connections: readonly ConnectionConfig[], ref: string): ConnectionConfig[] | undefined {
+  let indices: number[];
+  try {
+    const parsed = parseListIndexRange(ref);
+    if (parsed === undefined) return undefined;
+    indices = parsed;
+  } catch (error) {
+    if (error instanceof ListIndexRangeError) {
+      throw new ConnectionResolveError(error.code, error.message);
+    }
+    throw error;
+  }
+
+  const configs: ConnectionConfig[] = [];
+  for (const index of indices) {
+    const config = resolveConnectionByIndex(connections, index);
+    if (!config) {
+      const hint = connections.length > 0 ? ` Valid range: 1-${connections.length}.` : "";
+      throw new ConnectionResolveError(
+        "CONNECTION_NOT_FOUND",
+        `Connection index #${index} not found. Run \`dbx connections list\`.${hint}`,
+      );
+    }
+    logResolvedConnection(config, indices.length === 1 ? ref.trim() : `#${index}`);
+    configs.push(config);
+  }
+  return configs;
 }
