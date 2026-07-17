@@ -28,21 +28,17 @@
 
 代理参数与 profile、`dbx_list_proxies` / `proxies list`、库表 stats/report、数字序号引用、并行批量、连接流式进度、report 默认落盘、短参数别名、COUNT 移除、stats 作用域、batch 遇错继续等。
 
+### 合并后补回（同日）
+
+- \pplyProxyProfileOverride\（node-core / MCP / CLI connections add）
+- stats/report 对非目录型引擎的跳过与 \SKIPPED_UNSUPPORTED\ 批量摘要
+- Redis NOAUTH 无密码提示
+
 ### 说明
 
 - 未引入未发布的 `@dbx-app/mongo-shell` workspace 依赖；Mongo 解析仍使用本地内联实现，并叠加了上游 distinct/options 能力。
 - `dist/` 已手工同步关键上游改动；`database.js` 的 SSL 逻辑以 **src 为准**，完整 dist 重建留给用户本地编译。
 - 已同步到安装目录：`C:\usr\local\node_modules\@dbx-app\mcp-server`、`G:\usr\local\node_modules\@dbx-app\cli` 及其嵌套 `node-core`。
-
-
-
-
-合并过程中曾短暂覆盖的本地增强已补回并推送：
-
-- pplyProxyProfileOverride（node-core / MCP / CLI connections add）
-- stats/report 对非目录型引擎的跳过与 SKIPPED_UNSUPPORTED 批量摘要
-- Redis NOAUTH 无密码提示
-
 ---
 
 ## 2026-07-17 — CLI 参数短别名
@@ -275,15 +271,6 @@ dbx stats 23-50 --parallel   # 并行，默认 15 并发
 dbx stats 23-50 -P 3         # 并行，3 并发
 ```
 
-
-### 合并后补回（同日）
-
-合并过程中曾短暂覆盖的本地增强已补回并推送：
-
-- pplyProxyProfileOverride（node-core / MCP / CLI connections add）
-- stats/report 对非目录型引擎的跳过与 SKIPPED_UNSUPPORTED 批量摘要
-- Redis NOAUTH 无密码提示
-
 ---
 
 ## 2026-07-17 — CLI 批量范围并行执行（`--parallel` / `-P`）
@@ -422,15 +409,6 @@ file:///G:/usr/local/node_modules/@dbx-app/cli/node_modules/@dbx-app/node-core/d
 dbx connections list
 # exit 0 — 成功列出 52 条连接
 ```
-
-
-### 合并后补回（同日）
-
-合并过程中曾短暂覆盖的本地增强已补回并推送：
-
-- pplyProxyProfileOverride（node-core / MCP / CLI connections add）
-- stats/report 对非目录型引擎的跳过与 SKIPPED_UNSUPPORTED 批量摘要
-- Redis NOAUTH 无密码提示
 
 ---
 
