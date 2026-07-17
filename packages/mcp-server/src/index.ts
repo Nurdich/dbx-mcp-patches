@@ -417,7 +417,7 @@ export function createDbxMcpServer(backend: Backend, options: { isWebMode?: bool
 
   server.tool(
     "dbx_get_database_report",
-    "Get a comprehensive database report from system catalog views (information_schema, pg_catalog, sqlite_master): database summary, tables sorted by row estimate, column comments, and indexes — all instant catalog data, no COUNT queries. CLI `dbx report` saves to file by default; use --no-save for stdout-only.",
+    "Get a comprehensive database report from system catalog views (information_schema, pg_catalog, sqlite_master): database summary, tables sorted by row estimate, column comments, and indexes — all instant catalog data, no COUNT queries. CLI `dbx report` saves under `{cwd}/reports/` by default; use --no-save for stdout-only, -o to override path.",
     {
       connection_id: z.string().optional().describe("Unique ID of the DBX connection, or list index (#) from dbx_list_connections (e.g. 1 or #2)"),
       connection_name: z.string().optional().describe("Name of the DBX connection, or list index (#) from dbx_list_connections"),

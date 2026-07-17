@@ -1,5 +1,40 @@
 # Update Log
 
+## 2026-07-18 — `dbx report` 默认保存到运行目录 `./reports/`
+
+### 变更摘要
+
+`dbx report` 默认保存路径从 DBX AppData（`%APPDATA%\com.dbx.app\reports\`）改为**当前工作目录**下的 `reports/`（`process.cwd()/reports`）。`-o` / `--output` 仍可覆盖；`-n` / `--no-save` 仍跳过写入。
+
+### 新默认路径
+
+| 模式 | 路径 |
+|------|------|
+| 单连接 | `{cwd}/reports/dbx-report-{connection}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
+| 批量 | `{cwd}/reports/dbx-report-batch-{timestamp}/dbx-report-{connection}-{scope}.md` |
+
+示例（在 `F:\zucp\ziliao\xieyi\0716` 下执行）：
+
+```text
+cd F:\zucp\ziliao\xieyi\0716
+dbx report 1
+# [dbx] Report saved: F:\zucp\ziliao\xieyi\0716\reports\dbx-report-{连接名}-{scope}-{时间戳}.md
+```
+
+### 修改文件
+
+- `packages/node-core/src/database-report.ts` — `defaultReportsDir()` → `join(process.cwd(), "reports")`
+- `packages/cli/README.md` — 中英文路径说明
+- `packages/mcp-server/src/index.ts` — 工具描述同步
+- dist 手动同步（未编译）
+
+### 已安装 dist 同步
+
+- `G:\usr\local\node_modules\@dbx-app\cli\node_modules\@dbx-app\node-core`
+- `C:\usr\local\node_modules\@dbx-app\mcp-server`（update_log / 工具描述）
+
+---
+
 ## 2026-07-18 — stats/report 失败分类与本地修复
 
 ### 失败分类（`dbx stats` / `dbx report 75-101`）

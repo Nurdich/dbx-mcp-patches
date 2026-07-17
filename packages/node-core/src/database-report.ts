@@ -4,7 +4,6 @@ import type { ConnectionConfig } from "./connections.js";
 import type { QueryResult } from "./database.js";
 import { withConnectionStage } from "./connection-log.js";
 import { formatCell, mdTable } from "./format.js";
-import { appDataDir } from "./paths.js";
 import {
   DatabaseStatsError,
   UNSUPPORTED_STATS_TYPES,
@@ -272,7 +271,7 @@ export function reportTimestamp(date = new Date()): string {
 }
 
 export function defaultReportsDir(): string {
-  return join(appDataDir(), "reports");
+  return join(process.cwd(), "reports");
 }
 
 export function reportScopeLabel(database?: string, schema?: string): string {

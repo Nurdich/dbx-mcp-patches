@@ -99,11 +99,11 @@ Report sections: Database Summary, Tables (sorted by row estimate), Column Comme
 
 | Mode | Default path |
 |------|----------------|
-| Single connection | `{DBX app data}/reports/dbx-report-{connection}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
-| Batch (`1-15`, `23-50`, …) | `{DBX app data}/reports/dbx-report-batch-{timestamp}/dbx-report-{connection}-{scope}.md` (one file per successful connection) |
+| Single connection | `{cwd}/reports/dbx-report-{connection}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
+| Batch (`1-15`, `23-50`, …) | `{cwd}/reports/dbx-report-batch-{timestamp}/dbx-report-{connection}-{scope}.md` (one file per successful connection) |
 | `--json` | Same pattern with `.json` extension |
 
-`DBX app data` is the DBX data directory (`dbx doctor` → App data directory; override with `DBX_DATA_DIR`).
+`{cwd}` is the process current working directory (`process.cwd()`), i.e. the directory from which you run `dbx`.
 
 | Flag | Description |
 |------|-------------|
@@ -236,9 +236,11 @@ dbx report my-postgres -o ./out.md  # 自定义输出路径
 
 | 模式 | 默认路径 |
 |------|----------|
-| 单连接 | `{DBX 数据目录}/reports/dbx-report-{连接名}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
-| 批量 | `{DBX 数据目录}/reports/dbx-report-batch-{时间戳}/dbx-report-{连接名}-{scope}.md`（每个成功连接一个文件） |
+| 单连接 | `{cwd}/reports/dbx-report-{连接名}-{database\|schema}-{YYYYMMDD-HHMMSS}.md` |
+| 批量 | `{cwd}/reports/dbx-report-batch-{时间戳}/dbx-report-{连接名}-{scope}.md`（每个成功连接一个文件） |
 | `--json` | 同上，扩展名为 `.json` |
+
+`{cwd}` 为运行 `dbx` 时的当前工作目录（`process.cwd()`），不是 AppData。
 
 | 标志 | 说明 |
 |------|------|

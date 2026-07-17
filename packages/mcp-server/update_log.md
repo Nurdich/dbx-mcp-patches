@@ -1,5 +1,19 @@
 # Update Log
 
+## 2026-07-18 — `dbx report` 默认保存到运行目录 `./reports/`
+
+### 变更摘要
+
+CLI `dbx report` 默认保存目录改为 `{cwd}/reports/`（`process.cwd()`），不再写入 AppData。`-o` 覆盖路径，`-n` 不保存。
+
+### 修改文件
+
+- `packages/node-core/src/database-report.ts` — `defaultReportsDir()`
+- `packages/cli/README.md`、`packages/mcp-server` 工具描述
+- 已安装 `@dbx-app/cli` 的 `node-core` dist 已手动同步
+
+---
+
 ## 2026-07-18 — 代理配置文件覆盖（替换已有代理，不叠加）
 
 ### 变更摘要
