@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import type { ProxyTunnelConfig, TransportLayerConfig } from "./connections.js";
@@ -119,4 +120,39 @@ export function proxyProfileReferenceLayer(profile: { type: "proxy" } & ProxyTun
     username: "",
     password: "",
   };
+}
+
+type LegacyProxyFields = {
+  proxy_enabled?: boolean;
+  proxy_type?: "socks5" | "http";
+  proxy_host?: string;
+  proxy_port?: number;
+  proxy_username?: string;
+  proxy_password?: string;
+};
+
+/**
+ * Replace any existing proxy (inline or profile stub) with a saved-profile reference.
+ * Non-proxy layers (e.g. SSH) are preserved. Legacy proxy_* fields are cleared so
+ * they cannot reintroduce a stacked proxy via normalizeTransportLayers.
+ * Does not persist — callers decide whether to save or use for one request.
+ */
+export function applyProxyProfileOverride<T extends { transport_layers?: TransportLayerConfig[] }>(
+  config: T,
+  profile: { type: "proxy" } & ProxyTunnelConfig,
+  layerId: string = randomUUID(),
+): T {
+  const existing = Array.isArray(config.transport_layers) ? config.transport_layers : [];
+  const kept = existing.filter((layer) => layer.type !== "proxy");
+  const next = {
+    ...config,
+    transport_layers: [...kept, proxyProfileReferenceLayer(profile, layerId)],
+  } as T & LegacyProxyFields;
+  next.proxy_enabled = false;
+  delete next.proxy_type;
+  delete next.proxy_host;
+  delete next.proxy_port;
+  delete next.proxy_username;
+  delete next.proxy_password;
+  return next;
 }
