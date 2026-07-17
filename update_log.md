@@ -1,5 +1,37 @@
 # Update Log
 
+## 2026-07-18 — stats/report 失败分类与本地修复
+
+### 失败分类（`dbx stats` / `dbx report 75-101`）
+
+| 类型 | 例子 | 结论 |
+|------|------|------|
+| elasticsearch / mq | es-hw、kafka-qq-test | **本地可改**：此前 mq 会走 bridge；现已早跳过并标为 Skipped |
+| Redis NOAUTH | redis-04/05 | **非 SOCKS 丢密码**：查库 `connection_secrets` 无 password；同主机另一连接有密码 |
+| Redis Connection closed | redis-06/07* | **环境/代理**：07 有密码仍断连；06 无密码 |
+| Mongo DNS/10054 | mongo-001… | **环境**：bridge/DNS/代理关闭，非 CLI 未传密 |
+| MySQL Connection lost | conn_013/020 | **环境/网络** |
+
+### 代码变更
+
+1. **`NON_CATALOG_STATS_TYPES`**：含 `elasticsearch`、`mq`、`kafka`、`influxdb`、向量库等；`fetchDatabaseStats`/`fetchDatabaseReport` 早失败，不调 bridge
+2. **CLI `--skip-unsupported`（默认 ON）**：不支持类型记为 `SKIPPED_UNSUPPORTED`，批次摘要分 **Skipped** / **Failures**；仅真实失败影响 exit code
+3. **Redis NOAUTH**：无存储密码时给出明确提示（非隧道丢密）
+4. **已同步 dist** → 安装的 `@dbx-app/cli` 与 `@dbx-app/mcp-server` 的 `node-core`
+
+### 建议重试
+
+```bash
+# 在 DBX 桌面端为 redis-04/05/06 补全密码后：
+dbx stats redis-04-var-common-1 -v
+dbx report 78,82,88,91 -v
+
+# 批量（ES/mq 会进 Skipped，不再刷 Failures）
+dbx stats 75-101
+```
+
+---
+
 ## 2026-07-18 — 合并上游 packages 0.4.31
 
 ### 上游基线
