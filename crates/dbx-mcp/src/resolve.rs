@@ -8,8 +8,7 @@ use crate::backend::DbxBackend;
 use crate::list_index::{parse_list_index, parse_list_index_range};
 use crate::server::McpScope;
 use crate::tunnel_profiles::{
-    apply_proxy_profile_override, find_proxy_profile, find_proxy_profiles_by_name, has_proxy_profile_ref,
-    ProxyProfileRefArgs,
+    apply_proxy_profiles_failover, has_proxy_profile_ref, resolve_proxy_profiles, ProxyProfileRefArgs,
 };
 
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
@@ -152,48 +151,73 @@ pub async fn apply_proxy_override_if_requested(
     proxy_profile_id: Option<String>,
     proxy_profile_name: Option<String>,
 ) -> Result<ConnectionConfig, CallToolResult> {
-    let args = ProxyProfileRefArgs { proxy_profile_id, proxy_profile_name };
+    apply_proxy_override_with_args(
+        backend,
+        config,
+        ProxyProfileRefArgs {
+            proxy_profile_id,
+            proxy_profile_name,
+            proxy_profile_ids: None,
+            proxy_profile_names: None,
+        },
+    )
+    .await
+}
+
+pub async fn apply_proxy_override_with_args(
+    backend: &dyn DbxBackend,
+    config: ConnectionConfig,
+    args: ProxyProfileRefArgs,
+) -> Result<ConnectionConfig, CallToolResult> {
     if !has_proxy_profile_ref(&args) {
         return Ok(config);
     }
-    if args.proxy_profile_id.as_deref().is_some_and(|v| !v.trim().is_empty())
-        && args.proxy_profile_name.as_deref().is_some_and(|v| !v.trim().is_empty())
-    {
+
+    let has_id = args.proxy_profile_id.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || args.proxy_profile_ids.as_ref().is_some_and(|v| v.iter().any(|s| !s.trim().is_empty()));
+    let has_name = args.proxy_profile_name.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || args.proxy_profile_names.as_ref().is_some_and(|v| v.iter().any(|s| !s.trim().is_empty()));
+    if has_id && has_name {
         return Err(tool_error(
             "PROXY_CONFLICT",
-            "Specify either proxy_profile_id or proxy_profile_name, not both.",
+            "Specify either proxy_profile_id(s) or proxy_profile_name(s), not both.",
         ));
     }
+
     let profiles = backend
         .load_tunnel_profiles()
         .await
         .map_err(|error| tool_error("PROXY_LOAD_ERROR", error))?;
-    if let Some(name) = args.proxy_profile_name.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
-        if args.proxy_profile_id.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_none() {
-            let matches = find_proxy_profiles_by_name(&profiles, name);
-            if matches.len() > 1 {
-                let lines: Vec<_> =
-                    matches.iter().map(|profile| format!("- {} ({})", profile.id(), profile.name())).collect();
-                return Err(tool_error(
-                    "AMBIGUOUS_PROXY_PROFILE",
-                    format!(
-                        "Multiple proxy profiles named \"{name}\". Specify proxy_profile_id or list index (#):\n{}",
-                        lines.join("\n")
-                    ),
-                ));
-            }
+
+    let resolved = match resolve_proxy_profiles(&profiles, &args) {
+        Ok(list) if !list.is_empty() => list,
+        Ok(_) => {
+            return Err(tool_error(
+                "PROXY_PROFILE_NOT_FOUND",
+                "Proxy profile not found. Use dbx_list_proxies to see saved profiles from DBX Settings > Tunnels.",
+            ))
         }
+        Err(message) => {
+            let code = if message.contains("Multiple proxy profiles") {
+                "AMBIGUOUS_PROXY_PROFILE"
+            } else if message.contains("out of range") || message.contains("not found") {
+                "PROXY_PROFILE_NOT_FOUND"
+            } else {
+                "INVALID_PROXY_PROFILE"
+            };
+            return Err(tool_error(code, message));
+        }
+    };
+
+    let mut proxy_configs = Vec::with_capacity(resolved.len());
+    for profile in &resolved {
+        let TransportLayerConfig::Proxy(proxy) = profile else {
+            return Err(tool_error("PROXY_PROFILE_NOT_FOUND", "Selected tunnel profile is not a proxy profile."));
+        };
+        proxy_configs.push(proxy);
     }
-    let Some(profile) = find_proxy_profile(&profiles, &args) else {
-        return Err(tool_error(
-            "PROXY_PROFILE_NOT_FOUND",
-            "Proxy profile not found. Use dbx_list_proxies to see saved profiles from DBX Settings > Tunnels.",
-        ));
-    };
-    let TransportLayerConfig::Proxy(proxy) = profile else {
-        return Err(tool_error("PROXY_PROFILE_NOT_FOUND", "Selected tunnel profile is not a proxy profile."));
-    };
-    Ok(apply_proxy_profile_override(config, proxy))
+
+    Ok(apply_proxy_profiles_failover(config, &proxy_configs))
 }
 
 pub fn as_proxy_config(profile: &TransportLayerConfig) -> Option<&ProxyTunnelConfig> {

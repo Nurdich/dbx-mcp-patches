@@ -114,8 +114,10 @@ struct Flags {
     proxy_port: Option<u16>,
     proxy_username: Option<String>,
     proxy_password: Option<String>,
-    proxy_profile_id: Option<String>,
-    proxy_profile_name: Option<String>,
+    /// Accumulated from `--proxy-profile-id` / `--proxy-profiles` (comma lists + repeats).
+    proxy_profile_ids: Vec<String>,
+    /// Accumulated from repeated `--proxy-profile-name`.
+    proxy_profile_names: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -339,34 +341,37 @@ async fn apply_cli_proxy_override(
     configs: Vec<ConnectionConfig>,
     flags: &Flags,
 ) -> Result<Vec<ConnectionConfig>, CliError> {
-    let has_ref = flags.proxy_profile_id.as_deref().is_some_and(|v| !v.trim().is_empty())
-        || flags.proxy_profile_name.as_deref().is_some_and(|v| !v.trim().is_empty());
-    if !has_ref {
+    let args = cli_proxy_ref_args(flags);
+    if !dbx_mcp::tunnel_profiles::has_proxy_profile_ref(&args) {
         return Ok(configs);
     }
     let mut out = Vec::with_capacity(configs.len());
     for config in configs {
-        let config = dbx_mcp::resolve::apply_proxy_override_if_requested(
-            backend,
-            config,
-            flags.proxy_profile_id.clone(),
-            flags.proxy_profile_name.clone(),
-        )
-        .await
-        .map_err(|error| {
-            CliError::new(
-                "PROXY_OVERRIDE_ERROR",
-                error
-                    .content
-                    .first()
-                    .and_then(|block| block.as_text())
-                    .map(|text| text.text.clone())
-                    .unwrap_or_else(|| "Proxy override failed".into()),
-            )
-        })?;
+        let config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, args.clone())
+            .await
+            .map_err(|error| {
+                CliError::new(
+                    "PROXY_OVERRIDE_ERROR",
+                    error
+                        .content
+                        .first()
+                        .and_then(|block| block.as_text())
+                        .map(|text| text.text.clone())
+                        .unwrap_or_else(|| "Proxy override failed".into()),
+                )
+            })?;
         out.push(config);
     }
     Ok(out)
+}
+
+fn cli_proxy_ref_args(flags: &Flags) -> dbx_mcp::tunnel_profiles::ProxyProfileRefArgs {
+    dbx_mcp::tunnel_profiles::ProxyProfileRefArgs {
+        proxy_profile_id: None,
+        proxy_profile_name: None,
+        proxy_profile_ids: (!flags.proxy_profile_ids.is_empty()).then(|| flags.proxy_profile_ids.clone()),
+        proxy_profile_names: (!flags.proxy_profile_names.is_empty()).then(|| flags.proxy_profile_names.clone()),
+    }
 }
 
 fn dynamic_cli_error(code: &str, message: impl Into<String>) -> CliError {
@@ -1103,8 +1108,7 @@ async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<
     )
     .map_err(|e| CliError::new("INVALID_CONNECTION", e))?;
 
-    let profile_ref = flags.proxy_profile_id.as_deref().is_some_and(|v| !v.trim().is_empty())
-        || flags.proxy_profile_name.as_deref().is_some_and(|v| !v.trim().is_empty());
+    let profile_ref = dbx_mcp::tunnel_profiles::has_proxy_profile_ref(&cli_proxy_ref_args(flags));
     let inline = flags.proxy
         || flags.proxy_host.as_deref().is_some_and(|v| !v.trim().is_empty())
         || flags.proxy_port.is_some();
@@ -1115,24 +1119,19 @@ async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<
         ));
     }
     if profile_ref {
-        config = dbx_mcp::resolve::apply_proxy_override_if_requested(
-            backend,
-            config,
-            flags.proxy_profile_id.clone(),
-            flags.proxy_profile_name.clone(),
-        )
-        .await
-        .map_err(|error| {
-            CliError::new(
-                "PROXY_PROFILE_NOT_FOUND",
-                error
-                    .content
-                    .first()
-                    .and_then(|block| block.as_text())
-                    .map(|text| text.text.clone())
-                    .unwrap_or_else(|| "Proxy profile not found".into()),
-            )
-        })?;
+        config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, cli_proxy_ref_args(flags))
+            .await
+            .map_err(|error| {
+                CliError::new(
+                    "PROXY_PROFILE_NOT_FOUND",
+                    error
+                        .content
+                        .first()
+                        .and_then(|block| block.as_text())
+                        .map(|text| text.text.clone())
+                        .unwrap_or_else(|| "Proxy profile not found".into()),
+                )
+            })?;
     } else if flags.proxy || inline {
         let layer = dbx_mcp::tunnel_profiles::inline_proxy_layer(&dbx_mcp::tunnel_profiles::InlineProxyArgs {
             proxy_enabled: Some(true),
@@ -1239,8 +1238,8 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         proxy_port: None,
         proxy_username: None,
         proxy_password: None,
-        proxy_profile_id: None,
-        proxy_profile_name: None,
+        proxy_profile_ids: Vec::new(),
+        proxy_profile_names: Vec::new(),
     };
     let mut index = 0;
     while index < argv.len() {
@@ -1330,9 +1329,15 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             }
             "--proxy-username" => flags.proxy_username = Some(option_value(argv, &mut index, "--proxy-username")?),
             "--proxy-password" => flags.proxy_password = Some(option_value(argv, &mut index, "--proxy-password")?),
-            "--proxy-profile-id" => flags.proxy_profile_id = Some(option_value(argv, &mut index, "--proxy-profile-id")?),
+            "--proxy-profile-id" | "--proxy-profiles" => {
+                flags
+                    .proxy_profile_ids
+                    .push(option_value(argv, &mut index, "--proxy-profile-id")?)
+            }
             "--proxy-profile-name" => {
-                flags.proxy_profile_name = Some(option_value(argv, &mut index, "--proxy-profile-name")?)
+                flags
+                    .proxy_profile_names
+                    .push(option_value(argv, &mut index, "--proxy-profile-name")?)
             }
             value if value.starts_with('-') => {
                 return Err(CliError::new("UNKNOWN_OPTION", format!("Unknown option: {value}")))
@@ -1663,7 +1668,7 @@ fn csv_cell(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  dbx doctor [-j, --json]\n  dbx capabilities [-j, --json]\n  dbx connections list [-j, --json]\n  dbx connections add --name <name> --type <db_type> --host <host> [--port n] [--username u] [--password p] [-d, --database db] [--ssl] [--driver-profile x]\n      [--proxy] [--proxy-type socks5|http] [-H, --proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]\n      [--proxy-profile-id id|# | --proxy-profile-name name|#] [-j, --json]\n  dbx connections remove <connection|#> [-j, --json]\n  dbx proxies list [-j, --json]\n  dbx stats <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx report <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [-q, --quiet] [-v, --verbose] [-j, --json] [-n, --no-save] [-o, --output path]\n  dbx schema list <connection|#|range> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx schema describe <connection|#|range> <table> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx query <connection|#|range> <sql> [--file path] [--limit n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [--proxy-profile-id id|# | --proxy-profile-name name|#] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx redis <connection|#|range> <command...> [-d, --database n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx context <connection|#|range> [-s, --schema name] [--tables a,b] [--max-tables n] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx open <connection|#|range> <table> [-s, --schema name] [-d, --database name] [-P, --parallel [n]] [-j, --json]\n\nOptions:\n  -j, --json           JSON output\n  -q, --quiet          Suppress progress on stderr\n  -v, --verbose        Extra progress detail (e.g. SQL text)\n  -P, --parallel [n]   Concurrent batch (default concurrency 15)\n  -d, --database NAME  Target database\n  -s, --schema NAME    Target schema\n  -t, --timeout DUR    Query timeout (e.g. 500ms, 60s, 1m)\n  -H, --proxy-host H   Proxy host (connections add)\n  -o, --output PATH    Report output file or batch directory\n  -n, --no-save        Skip saving report to file\n  --skip-unsupported   stats/report: treat unsupported types as skipped (default)\n  --no-skip-unsupported stats/report: treat unsupported types as failures"
+    "Usage:\n  dbx doctor [-j, --json]\n  dbx capabilities [-j, --json]\n  dbx connections list [-j, --json]\n  dbx connections add --name <name> --type <db_type> --host <host> [--port n] [--username u] [--password p] [-d, --database db] [--ssl] [--driver-profile x]\n      [--proxy] [--proxy-type socks5|http] [-H, --proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]\n      [--proxy-profile-id id|#|1,2,3|#1-#3 | --proxy-profiles ... | --proxy-profile-name name (repeatable)] [-j, --json]\n  dbx connections remove <connection|#> [-j, --json]\n  dbx proxies list [-j, --json]\n  dbx stats <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [--proxy-profile-id ... | --proxy-profiles ... | --proxy-profile-name ...] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx report <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [--proxy-profile-id ... | --proxy-profiles ... | --proxy-profile-name ...] [-q, --quiet] [-v, --verbose] [-j, --json] [-n, --no-save] [-o, --output path]\n  dbx schema list <connection|#|range> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx schema describe <connection|#|range> <table> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx query <connection|#|range> <sql> [--file path] [--limit n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [--proxy-profile-id id|# | --proxy-profile-name name|#] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx redis <connection|#|range> <command...> [-d, --database n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx context <connection|#|range> [-s, --schema name] [--tables a,b] [--max-tables n] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx open <connection|#|range> <table> [-s, --schema name] [-d, --database name] [-P, --parallel [n]] [-j, --json]\n\nOptions:\n  -j, --json           JSON output\n  -q, --quiet          Suppress progress on stderr\n  -v, --verbose        Extra progress detail (e.g. SQL text)\n  -P, --parallel [n]   Concurrent batch (default concurrency 15)\n  -d, --database NAME  Target database\n  -s, --schema NAME    Target schema\n  -t, --timeout DUR    Query timeout (e.g. 500ms, 60s, 1m)\n  -H, --proxy-host H   Proxy host (connections add)\n  -o, --output PATH    Report output file or batch directory\n  -n, --no-save        Skip saving report to file\n  --skip-unsupported   stats/report: treat unsupported types as skipped (default)\n  --no-skip-unsupported stats/report: treat unsupported types as failures"
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ Previous Node baseline (`packages-v0.4.31` / `5206750`) is archived in `legacy-n
 | Numeric `#` / ranges on connection selectors | **Ported** |
 | `#` column in `dbx_list_connections` | **Ported** |
 | Inline proxy + `proxy_profile_*` on `dbx_add_connection` | **Ported** |
+| Multi-proxy **failover group** (try-next, not chain) | **Ported** (MCP + CLI + `dbx-core` connect) |
 | One-shot `proxy_profile_*` on stats/report/**query** | **Ported** |
 | Batch ranges on list_tables / describe / query / schema_context / stats / report | **Ported** (sequential) |
 | `skip_unsupported` + Skipped vs Failures | **Ported** |
@@ -62,6 +63,10 @@ Previous Node baseline (`packages-v0.4.31` / `5206750`) is archived in `legacy-n
 # requires full checkout with crates/dbx-core
 rsync -a crates/dbx-mcp/ /path/to/dbx/crates/dbx-mcp/
 rsync -a crates/dbx-cli/ /path/to/dbx/crates/dbx-cli/
+# failover runtime also needs these upstream-core edits (already applied in dbx-main-rust):
+#   crates/dbx-core/src/connect_progress.rs
+#   crates/dbx-core/src/connection.rs (connection_host_port failover)
+#   crates/dbx-core/src/db/proxy_tunnel.rs (verify_proxy_connect)
 cargo build -p dbx-mcp --release
 cargo build -p dbx-cli --release --no-default-features
 ```

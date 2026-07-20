@@ -1,5 +1,56 @@
 ﻿# Update Log
 
+## 2026-07-21 — 多代理故障转移（failover group，非跳级链）
+
+### 语义
+
+- 有序代理列表：先试 #1，连接失败（超时 / 拒绝 / 代理认证失败 / 隧道建立失败 / 代理探测失败）再试下一个，**首个成功即停**。
+- **不是**多跳串联（A→B→目标）；上游 `transport_layers` 多 Proxy 且全部 `enabled` 仍表示跳级链。
+
+### 存储格式
+
+- 在 `transport_layers` 写入多个 `type=proxy` 的 profile 引用桩：
+  - **第一个** `enabled=true`（旧桌面端只认启用层 → 兼容单代理）
+  - **后续** `enabled=false`（故障转移候选项）
+- 运行时（`dbx-core::connection_host_port`）识别该约定，按序尝试；纯 Proxy 栈会 `verify_proxy_connect` 做急切探测。
+
+### CLI
+
+- `--proxy-profile-id 1,2,3` / `--proxy-profiles #1-#3` / 重复 `--proxy-profile-id`
+- 重复 `--proxy-profile-name a --proxy-profile-name b`
+- 适用于 `connections add` 与 stats/report/query 一次性覆盖
+
+### MCP
+
+- `proxy_profile_ids: string[]` 或逗号/范围字符串写在 `proxy_profile_id`
+- `proxy_profile_names: string[]`；保留单值 `proxy_profile_id` / `proxy_profile_name`（视为 1 元素列表）
+- 工具：`dbx_add_connection`、`dbx_get_database_stats`、`dbx_get_database_report`、`dbx_execute_query`
+
+### 日志（流逝输出）
+
+```
+[dbx] Proxy failover group (try next on failure, not chained): #1 (name) → #2 (...)
+[dbx] Trying proxy profile #1 (name)...
+[dbx] Proxy #1 failed: ...
+[dbx] Trying proxy profile #2...
+[dbx] Connected via proxy #2
+```
+
+### 涉及文件
+
+| 区域 | 文件 |
+|------|------|
+| Core 运行时 | `dbx-core`：`connect_progress.rs`、`connection.rs`、`db/proxy_tunnel.rs` |
+| MCP | `tunnel_profiles.rs`、`resolve.rs`、`server.rs`、`progress.rs` |
+| CLI | `dbx-cli/src/main.rs` |
+| 文档 | `README.md`、`update_log.md`、`PATCHES.md` |
+
+### 构建
+
+请自行在含 `dbx-core` 的完整仓库编译（本代理未执行 cargo）。
+
+---
+
 ## 2026-07-21 — 第二波：query/并行/短参/进度/connections+redis
 
 ### 完成

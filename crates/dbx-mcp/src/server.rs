@@ -67,10 +67,14 @@ pub struct ExecuteQueryRequest {
     pub sql: String,
     #[schemars(description = "Query timeout in milliseconds")]
     pub timeout_ms: Option<u64>,
-    #[schemars(description = "One-shot proxy profile ID or list index (#)")]
+    #[schemars(description = "One-shot proxy profile ID, list index (#), comma list, or range for failover")]
     pub proxy_profile_id: Option<String>,
     #[schemars(description = "One-shot proxy profile name or list index (#)")]
     pub proxy_profile_name: Option<String>,
+    #[schemars(description = "One-shot ordered failover proxy profile IDs / indexes")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "One-shot ordered failover proxy profile names")]
+    pub proxy_profile_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -87,10 +91,14 @@ pub struct AddConnectionRequest {
     #[serde(default)]
     pub ssl: bool,
     pub driver_profile: Option<String>,
-    #[schemars(description = "ID of a saved proxy tunnel profile, or list index (#) from dbx_list_proxies")]
+    #[schemars(description = "ID of a saved proxy tunnel profile, list index (#), comma list (1,2,3), or range (#1-#3). Multiple values form a failover group (try next on failure), not a multi-hop chain.")]
     pub proxy_profile_id: Option<String>,
     #[schemars(description = "Name of a saved proxy tunnel profile, or list index (#) from dbx_list_proxies")]
     pub proxy_profile_name: Option<String>,
+    #[schemars(description = "Ordered failover list of proxy profile IDs / list indexes. Same as repeating proxy_profile_id; first success wins.")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "Ordered failover list of proxy profile names. Do not mix with proxy_profile_id(s).")]
+    pub proxy_profile_names: Option<Vec<String>>,
     #[schemars(description = "Enable an inline SOCKS5/HTTP proxy on this connection")]
     pub proxy_enabled: Option<bool>,
     #[schemars(description = "Inline proxy host")]
@@ -115,10 +123,14 @@ pub struct DatabaseStatsRequest {
     pub timeout_ms: Option<u64>,
     #[schemars(description = "Skip unsupported database types in batch mode (default true)")]
     pub skip_unsupported: Option<bool>,
-    #[schemars(description = "One-shot proxy profile ID or list index (#)")]
+    #[schemars(description = "One-shot proxy profile ID, list index (#), comma list, or range for failover")]
     pub proxy_profile_id: Option<String>,
     #[schemars(description = "One-shot proxy profile name or list index (#)")]
     pub proxy_profile_name: Option<String>,
+    #[schemars(description = "One-shot ordered failover proxy profile IDs / indexes")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "One-shot ordered failover proxy profile names")]
+    pub proxy_profile_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -131,10 +143,14 @@ pub struct DatabaseReportRequest {
     pub timeout_ms: Option<u64>,
     #[schemars(description = "Skip unsupported database types in batch mode (default true)")]
     pub skip_unsupported: Option<bool>,
-    #[schemars(description = "One-shot proxy profile ID or list index (#)")]
+    #[schemars(description = "One-shot proxy profile ID, list index (#), comma list, or range for failover")]
     pub proxy_profile_id: Option<String>,
     #[schemars(description = "One-shot proxy profile name or list index (#)")]
     pub proxy_profile_name: Option<String>,
+    #[schemars(description = "One-shot ordered failover proxy profile IDs / indexes")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "One-shot ordered failover proxy profile names")]
+    pub proxy_profile_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -381,8 +397,12 @@ impl DbxMcpServer {
         let configs = match self
             .resolve_batch_configs(
                 &request.selector,
-                request.proxy_profile_id.clone(),
-                request.proxy_profile_name.clone(),
+                crate::tunnel_profiles::ProxyProfileRefArgs {
+                    proxy_profile_id: request.proxy_profile_id.clone(),
+                    proxy_profile_name: request.proxy_profile_name.clone(),
+                    proxy_profile_ids: request.proxy_profile_ids.clone(),
+                    proxy_profile_names: request.proxy_profile_names.clone(),
+                },
             )
             .await
         {
@@ -552,6 +572,8 @@ impl DbxMcpServer {
         let profile_ref = crate::tunnel_profiles::has_proxy_profile_ref(&crate::tunnel_profiles::ProxyProfileRefArgs {
             proxy_profile_id: request.proxy_profile_id.clone(),
             proxy_profile_name: request.proxy_profile_name.clone(),
+            proxy_profile_ids: request.proxy_profile_ids.clone(),
+            proxy_profile_names: request.proxy_profile_names.clone(),
         });
         let inline = crate::tunnel_profiles::has_inline_proxy_params(&crate::tunnel_profiles::InlineProxyArgs {
             proxy_enabled: request.proxy_enabled,
@@ -568,11 +590,15 @@ impl DbxMcpServer {
             );
         }
         let config = if profile_ref {
-            match crate::resolve::apply_proxy_override_if_requested(
+            match crate::resolve::apply_proxy_override_with_args(
                 self.backend.as_ref(),
                 config,
-                request.proxy_profile_id,
-                request.proxy_profile_name,
+                crate::tunnel_profiles::ProxyProfileRefArgs {
+                    proxy_profile_id: request.proxy_profile_id,
+                    proxy_profile_name: request.proxy_profile_name,
+                    proxy_profile_ids: request.proxy_profile_ids,
+                    proxy_profile_names: request.proxy_profile_names,
+                },
             )
             .await
             {
@@ -740,7 +766,21 @@ impl DbxMcpServer {
         description = "Catalog-based table/database stats (TABLE_ROWS / n_live_tup estimates; no COUNT(*)). Supports connection list index (#) and ranges (1-15)."
     )]
     async fn get_database_stats(&self, Parameters(request): Parameters<DatabaseStatsRequest>) -> CallToolResult {
-        self.run_stats_or_report(request.selector, request.database, request.schema, request.timeout_ms, request.skip_unsupported, request.proxy_profile_id, request.proxy_profile_name, false).await
+        self.run_stats_or_report(
+            request.selector,
+            request.database,
+            request.schema,
+            request.timeout_ms,
+            request.skip_unsupported,
+            crate::tunnel_profiles::ProxyProfileRefArgs {
+                proxy_profile_id: request.proxy_profile_id,
+                proxy_profile_name: request.proxy_profile_name,
+                proxy_profile_ids: request.proxy_profile_ids,
+                proxy_profile_names: request.proxy_profile_names,
+            },
+            false,
+        )
+        .await
     }
 
     #[tool(
@@ -748,7 +788,21 @@ impl DbxMcpServer {
         description = "Full database report: summary, tables sorted by rows desc, column comments, indexes. Catalog estimates only (no COUNT(*))."
     )]
     async fn get_database_report(&self, Parameters(request): Parameters<DatabaseReportRequest>) -> CallToolResult {
-        self.run_stats_or_report(request.selector, request.database, request.schema, request.timeout_ms, request.skip_unsupported, request.proxy_profile_id, request.proxy_profile_name, true).await
+        self.run_stats_or_report(
+            request.selector,
+            request.database,
+            request.schema,
+            request.timeout_ms,
+            request.skip_unsupported,
+            crate::tunnel_profiles::ProxyProfileRefArgs {
+                proxy_profile_id: request.proxy_profile_id,
+                proxy_profile_name: request.proxy_profile_name,
+                proxy_profile_ids: request.proxy_profile_ids,
+                proxy_profile_names: request.proxy_profile_names,
+            },
+            true,
+        )
+        .await
     }
 }
 
@@ -775,15 +829,11 @@ impl DbxMcpServer {
         schema: Option<String>,
         timeout_ms: Option<u64>,
         skip_unsupported: Option<bool>,
-        proxy_profile_id: Option<String>,
-        proxy_profile_name: Option<String>,
+        proxy_args: crate::tunnel_profiles::ProxyProfileRefArgs,
         report: bool,
     ) -> CallToolResult {
         let skip = skip_unsupported.unwrap_or(true);
-        let configs = match self
-            .resolve_batch_configs(&selector, proxy_profile_id, proxy_profile_name)
-            .await
-        {
+        let configs = match self.resolve_batch_configs(&selector, proxy_args).await {
             Ok(configs) => configs,
             Err(error) => return error,
         };
@@ -827,8 +877,7 @@ impl DbxMcpServer {
     async fn resolve_batch_configs(
         &self,
         selector: &ConnectionSelector,
-        proxy_profile_id: Option<String>,
-        proxy_profile_name: Option<String>,
+        proxy_args: crate::tunnel_profiles::ProxyProfileRefArgs,
     ) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, CallToolResult> {
         let configs = crate::resolve::resolve_connections(
             self.backend.as_ref(),
@@ -840,13 +889,8 @@ impl DbxMcpServer {
         let mut out = Vec::with_capacity(configs.len());
         for config in configs {
             out.push(
-                crate::resolve::apply_proxy_override_if_requested(
-                    self.backend.as_ref(),
-                    config,
-                    proxy_profile_id.clone(),
-                    proxy_profile_name.clone(),
-                )
-                .await?,
+                crate::resolve::apply_proxy_override_with_args(self.backend.as_ref(), config, proxy_args.clone())
+                    .await?,
             );
         }
         Ok(out)

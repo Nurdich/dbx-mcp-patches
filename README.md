@@ -34,6 +34,7 @@ Release note highlight: **原生 MCP Server / 原生 DBX CLI** — tools run in 
 ## Features ported to Rust
 
 - Proxy: inline params + saved tunnel profiles on `dbx_add_connection`
+- **Proxy failover group** (ordered try-next, not multi-hop): `proxy_profile_ids` / `1,2,3` / `#1-#3` / repeated `--proxy-profile-name`
 - `dbx_list_proxies` / `dbx proxies list`
 - `dbx_get_database_stats` / `dbx stats` (catalog `TABLE_ROWS` / estimates, no `COUNT(*)`)
 - `dbx_get_database_report` / `dbx report` (tables + comments + indexes; report saves to `{cwd}/reports/`)

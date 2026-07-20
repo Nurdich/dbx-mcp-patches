@@ -22,11 +22,16 @@ pub struct ProgressGuard;
 impl Drop for ProgressGuard {
     fn drop(&mut self) {
         ACTIVE.with(|slot| *slot.borrow_mut() = None);
+        dbx_core::connect_progress::set_hook(None);
     }
 }
 
 pub fn push_progress(options: ProgressOptions) -> ProgressGuard {
     ACTIVE.with(|slot| *slot.borrow_mut() = Some(options));
+    // Mirror core tunnel/failover emits into the same [dbx] stream.
+    dbx_core::connect_progress::set_hook(Some(Arc::new(|message: &str| {
+        connection_log(message, false);
+    })));
     ProgressGuard
 }
 
@@ -94,6 +99,38 @@ pub fn log_using_connection(config: &ConnectionConfig) {
         format!("Using connection \"{}\" ({})", config.name, describe_connection_target(config)),
         false,
     );
+    let proxy_layers: Vec<_> = config
+        .transport_layers
+        .iter()
+        .filter_map(|layer| match layer {
+            TransportLayerConfig::Proxy(proxy) => Some(proxy),
+            _ => None,
+        })
+        .collect();
+    let failover = proxy_layers.len() >= 2 && proxy_layers.iter().skip(1).all(|proxy| !proxy.enabled);
+    if failover {
+        let labels: Vec<String> = proxy_layers
+            .iter()
+            .enumerate()
+            .map(|(index, proxy)| {
+                let name = if !proxy.name.is_empty() {
+                    proxy.name.as_str()
+                } else if !proxy.profile_id.is_empty() {
+                    proxy.profile_id.as_str()
+                } else {
+                    proxy.id.as_str()
+                };
+                format!("#{} ({name})", index + 1)
+            })
+            .collect();
+        connection_log(
+            format!(
+                "Proxy failover group (try next on failure, not chained): {}",
+                labels.join(" → ")
+            ),
+            false,
+        );
+    }
     for layer in &config.transport_layers {
         if !layer.enabled() {
             continue;
@@ -102,7 +139,14 @@ pub fn log_using_connection(config: &ConnectionConfig) {
             TransportLayerConfig::Proxy(proxy) => {
                 if !proxy.profile_id.is_empty() {
                     connection_log(
-                        format!("Using saved proxy profile: {}", if proxy.name.is_empty() { &proxy.profile_id } else { &proxy.name }),
+                        format!(
+                            "Using saved proxy profile: {}",
+                            if proxy.name.is_empty() {
+                                &proxy.profile_id
+                            } else {
+                                &proxy.name
+                            }
+                        ),
                         false,
                     );
                 } else {
@@ -111,7 +155,11 @@ pub fn log_using_connection(config: &ConnectionConfig) {
                         dbx_core::models::connection::ProxyType::Socks5 => "socks5",
                     };
                     connection_log(
-                        format!("Connecting via {kind} proxy {}:{}", proxy.host, if proxy.port == 0 { 1080 } else { proxy.port }),
+                        format!(
+                            "Connecting via {kind} proxy {}:{}",
+                            proxy.host,
+                            if proxy.port == 0 { 1080 } else { proxy.port }
+                        ),
                         false,
                     );
                 }
@@ -130,7 +178,11 @@ pub fn log_using_connection(config: &ConnectionConfig) {
                         ssh.user,
                         ssh.host,
                         if ssh.port == 0 { 22 } else { ssh.port },
-                        if label.is_empty() { String::new() } else { format!(" ({label})") }
+                        if label.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({label})")
+                        }
                     ),
                     false,
                 );
