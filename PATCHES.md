@@ -1,69 +1,69 @@
-# DBX MCP / CLI Patches (2026-07-18)
+# DBX MCP / CLI Patches (Rust era — 2026-07-21)
 
-This fork branch contains **local enhancements** on top of upstream [t8y2/dbx](https://github.com/t8y2/dbx).
+Local enhancements on top of upstream [t8y2/dbx](https://github.com/t8y2/dbx) **Rust** MCP/CLI.
 
 ## Upstream baseline
 
 | Item | Value |
 |------|-------|
 | Upstream repo | https://github.com/t8y2/dbx |
-| Base commit | `5206750` — chore(packages): release 0.4.31 (`packages-v0.4.31`) |
-| Package version | `0.4.31` |
-| Previous baseline | `e226a56` / local patches on `0.4.29` |
-| Patched packages | `packages/mcp-server`, `packages/cli`, `packages/node-core` |
+| Base commit | `fe636d2d` — chore(jdbc): bump plugin version (main @ 2026-07-20) |
+| Nearby tags | `v0.5.61` / `v0.5.62`, packages `0.4.38` |
+| MCP | `crates/dbx-mcp` 0.4.38 |
+| CLI | `crates/dbx-cli` 0.4.38 |
+| npm | Thin launchers only (`packages/mcp-server`, `packages/cli`) |
 
-## What we patched (not in upstream)
+Previous Node baseline (`packages-v0.4.31` / `5206750`) is archived in `legacy-node-packages/`.
 
-### MCP Server (`@dbx-app/mcp-server`)
+## What we patched (not in upstream Rust)
 
-- **`dbx_add_connection`** — inline SOCKS5/HTTP proxy params + saved proxy profile refs (`proxy_profile_id` / `proxy_profile_name`)
-- **`dbx_list_proxies`** — list saved proxy tunnel profiles from DBX Settings > Tunnels
-- **`dbx_get_database_stats`** — catalog-based table/database stats (no `COUNT(*)`)
-- **`dbx_get_database_report`** — full report: summary, tables (sorted by rows desc), column comments, indexes
-- **Numeric list IDs** — `#` column in lists; use `1` / `#2` instead of UUID/name for connections and proxy profiles
+### MCP (`crates/dbx-mcp`)
 
-### CLI (`@dbx-app/cli`)
+| Feature | Status |
+|---------|--------|
+| `dbx_list_proxies` | **Ported** |
+| `dbx_get_database_stats` | **Ported** (catalog estimates; Redis/Mongo special-cased) |
+| `dbx_get_database_report` | **Ported** |
+| Numeric `#` / ranges on connection selectors | **Ported** |
+| `#` column in `dbx_list_connections` | **Ported** |
+| Inline proxy + `proxy_profile_*` on `dbx_add_connection` | **Ported** |
+| One-shot `proxy_profile_*` on stats/report | **Ported** |
+| Batch stats/report + `skip_unsupported` | **Ported** |
+| Proxy override on `dbx_execute_query` | **Pending** |
+| Streaming connection progress in tool text | **Pending** (catalog path is single-shot) |
+| Parallel batch (MCP) | N/A (CLI-only historically) |
 
-- **`dbx connections add`** — proxy flags aligned with MCP
-- **`dbx proxies list`** — mirrors `dbx_list_proxies`
-- **`dbx stats`** — mirrors `dbx_get_database_stats`
-- **`dbx report`** — mirrors `dbx_get_database_report`
-- Numeric connection/proxy references in all relevant commands
+### CLI (`crates/dbx-cli`)
 
-### node-core (`@dbx-app/node-core`)
+| Feature | Status |
+|---------|--------|
+| `dbx proxies list` | **Ported** |
+| `dbx stats` / `dbx report` | **Ported** |
+| List index / ranges | **Ported** |
+| Report save to `{cwd}/reports/` | **Ported** (`-n` / `--no-save`) |
+| `#` column in `connections list` | **Ported** |
+| `--parallel` / short-flag parity / `connections add` proxy flags | **Pending** |
+| `connections remove` / `dbx redis` | **Pending** (upstream CLI still narrower) |
 
-- `tunnel-profiles.ts` — load tunnel profiles (desktop + web backend)
-- `database-stats.ts` — `fetchDatabaseStats`, row-desc sort, system catalog exclusion
-- `database-report.ts` — `fetchDatabaseReport`, index/column comment SQL builders
-- `list-index.ts` — `parseListIndex`, index-based connection/proxy resolution
-- `connections.ts` / `backend.ts` / `web-backend.ts` — `profile_id` + `loadTunnelProfiles`
+### Shared modules (inside `dbx-mcp` crate)
 
-## Installed copies (for runtime, not in this git tree)
+- `list_index.rs` — `1` / `#2` / `1-15` / `1..15`
+- `tunnel_profiles.rs` — load/format/apply proxy profiles
+- `database_stats.rs` / `database_report.rs` — SQL builders + fetch
+- `resolve.rs` — connection + proxy resolution for tools
 
-`dist/` is gitignored upstream. After building or copying dist manually:
-
-| Location | Purpose |
-|----------|---------|
-| `C:\usr\local\node_modules\@dbx-app\mcp-server` | Cursor MCP server |
-| `G:\usr\local\node_modules\@dbx-app\cli` | `dbx` CLI |
-
-See **`update_log.md`** for full change history, verification commands, and known limits.
-
-## Build / install
-
-```bash
-pnpm install
-pnpm build:packages   # produces packages/*/dist
-```
-
-Or link locally:
+## Install into DBX monorepo
 
 ```bash
-npm link -C packages/node-core
-npm link -C packages/mcp-server
-npm link -C packages/cli
+# requires full checkout with crates/dbx-core
+rsync -a crates/dbx-mcp/ /path/to/dbx/crates/dbx-mcp/
+rsync -a crates/dbx-cli/ /path/to/dbx/crates/dbx-cli/
+cargo build -p dbx-mcp --release
+cargo build -p dbx-cli --release --no-default-features
 ```
+
+**Do not** expect the old Node `packages/mcp-server/src/index.ts` path to work against packages ≥0.4.38.
 
 ## Contributing upstream
 
-These changes are intended as a candidate PR to [t8y2/dbx](https://github.com/t8y2/dbx). Open an issue or PR there if you want them merged officially.
+Intended as a candidate PR to [t8y2/dbx](https://github.com/t8y2/dbx) once validated against real connections.

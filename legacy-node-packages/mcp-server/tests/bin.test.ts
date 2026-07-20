@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vitest";
 
 const packageDir = fileURLToPath(new URL("..", import.meta.url));
-const mcpBin = fileURLToPath(new URL("../bin/dbx-mcp-server.js", import.meta.url));
-const rustBinary = join(process.env.CARGO_TARGET_DIR || resolve(packageDir, "../..", "target"), "debug", process.platform === "win32" ? "dbx-mcp.exe" : "dbx-mcp");
+const mcpBin = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 
 type InitializeResponse = {
   id: number;
@@ -25,11 +24,7 @@ test("responds to initialize when invoked through an npm-style symlink", async (
   try {
     child = spawn(process.execPath, [bin.path], {
       cwd: packageDir,
-      env: {
-        ...process.env,
-        DBX_MCP_BINARY: rustBinary,
-        DBX_DATA_DIR: bin.dir,
-      },
+      env: { ...process.env },
     });
 
     const responsePromise = readJsonRpcResponse(child, 5000);

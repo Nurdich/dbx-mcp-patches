@@ -1,35 +1,42 @@
 # DBX MCP Server
 
-MCP server for [DBX](https://github.com/t8y2/dbx) — lets AI agents (Claude Code, Cursor, etc.) query your databases using connections already configured in DBX.
+Rust-powered Model Context Protocol server for [DBX](https://github.com/t8y2/dbx). It lets MCP-compatible AI agents inspect schemas and run safe database operations using connections configured in DBX.
 
-[中文](#中文说明) | English
+[中文说明](#中文说明) | [npm](https://www.npmjs.com/package/@dbx-app/mcp-server) | [Native releases](https://github.com/t8y2/dbx/releases?q=packages-v)
+
+## Architecture
+
+```text
+@dbx-app/mcp-server
+└── small Node.js launcher
+    └── platform-specific Rust dbx-mcp binary
+        └── dbx-core database and agent infrastructure
+```
+
+The MCP protocol, connection loading, SQL safety, schema access, Redis support, MongoDB shell parsing, Web backend access, and database execution are implemented in Rust. Node.js is used only by the npm launcher so existing `npm`, `npx`, and MCP client configurations continue to work.
 
 ## Features
 
-- **Zero config** — Automatically reads your DBX connections (including passwords from system keyring)
-- **11 tools** — List/add/remove connections, list saved proxies, list tables, describe table, get database stats, get schema context, execute SQL, execute Redis commands, open table in DBX UI
-- **Connection pooling** — Reuses database connections across queries
-- **Direct execution** — PostgreSQL, MySQL, SQLite, and compatible databases (Doris, StarRocks, etc.) can run without opening DBX
-- **Writes enabled by default** — regular `INSERT` / `UPDATE` / `DELETE` statements work out of the box, while dangerous SQL stays blocked unless explicitly enabled
-- **DBX UI integration** — Open tables directly in the DBX desktop app from your AI agent
+- **10 MCP tools** for connections, schemas, SQL, Redis, and DBX UI integration
+- **Precompiled native binaries** with no local Rust, Cargo, Python, or C/C++ build requirement
+- **No `better-sqlite3` runtime dependency** and no Node native-addon ABI coupling
+- **Local, Web, and Docker modes** using the same tool interface
+- **Direct native execution** for supported SQL, Redis, and MongoDB connections
+- **Agent/JDBC database support** through DBX agent infrastructure when the required agent and JRE are installed
+- **DBX-managed access policy** with a connection allowlist and three execution modes
+- **SQL, Redis, and MongoDB safety controls** that reload the policy for every request
+- **Offline execution** through downloadable native binaries
+- **Optional desktop integration** for opening tables and displaying query results in DBX
 
-## Quick Start
+## Installation
 
-### 1. Install
+### npm global install
 
 ```bash
 npm install -g @dbx-app/mcp-server
 ```
 
-Or run directly:
-
-```bash
-npx @dbx-app/mcp-server
-```
-
-### 2. Configure Claude Code
-
-Add to your project's `.mcp.json`:
+Then configure the MCP client to run:
 
 ```json
 {
@@ -41,7 +48,157 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-For Windows portable builds, set `DBX_DATA_DIR` to the portable data directory that contains `dbx.db`:
+### npx
+
+No global installation is required:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "npx",
+      "args": ["-y", "@dbx-app/mcp-server"]
+    }
+  }
+}
+```
+
+The npm package automatically installs the native package matching the current operating system and CPU. Do not install with `--no-optional`, because npm optional dependencies carry the platform binary.
+
+### Native binary / offline install
+
+Every package release publishes native archives and `SHA256SUMS` in [GitHub Releases](https://github.com/t8y2/dbx/releases?q=packages-v):
+
+| Platform | Release asset | npm platform package |
+| --- | --- | --- |
+| macOS Apple Silicon | `dbx-mcp-darwin-arm64.tar.gz` | `@dbx-app/mcp-darwin-arm64` |
+| macOS Intel | `dbx-mcp-darwin-x64.tar.gz` | `@dbx-app/mcp-darwin-x64` |
+| Linux glibc ARM64 | `dbx-mcp-linux-arm64-gnu.tar.gz` | `@dbx-app/mcp-linux-arm64-gnu` |
+| Linux glibc x64 | `dbx-mcp-linux-x64-gnu.tar.gz` | `@dbx-app/mcp-linux-x64-gnu` |
+| Windows ARM64 | `dbx-mcp-win32-arm64.zip` | `@dbx-app/mcp-win32-arm64` |
+| Windows x64 | `dbx-mcp-win32-x64.zip` | `@dbx-app/mcp-win32-x64` |
+
+Verify a Unix archive before extracting it:
+
+```bash
+sha256sum --check SHA256SUMS
+tar -xzf dbx-mcp-linux-x64-gnu.tar.gz
+chmod +x dbx-mcp
+```
+
+On macOS, use `shasum -a 256` if `sha256sum` is unavailable. On Windows, use `certutil -hashfile <archive> SHA256` and compare the value with `SHA256SUMS`.
+
+Configure the MCP client to run the extracted file directly:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "/absolute/path/to/dbx-mcp"
+    }
+  }
+}
+```
+
+Direct native execution does not require Node.js. GitHub package releases are intentionally not marked as the repository's latest release, so they do not replace the latest DBX desktop release.
+
+## Requirements
+
+### npm installation
+
+- Node.js 18.18.0 or newer
+- A supported operating system and CPU from the platform table
+- npm optional dependencies enabled
+
+### Native installation
+
+- No Node.js or npm requirement
+- Linux builds currently require glibc; Alpine/musl is not supported yet
+
+### Database configuration
+
+DBX MCP reads connection profiles from DBX storage. DBX does not need to remain open for native connections. However:
+
+- the connection must already exist in DBX storage, unless it is added through `dbx_add_connection`;
+- DBX Agent/JDBC databases require the matching agent, JDBC driver, and JRE to be installed;
+- `dbx_open_table` and `dbx_execute_and_show` require a running DBX desktop application;
+- DBX Web mode requires a reachable DBX Web server.
+
+## Usage Examples
+
+Ask the MCP client to:
+
+- "List my DBX connections"
+- "Show tables in the production PostgreSQL connection"
+- "Describe the `orders` table"
+- "Build schema context for the billing database"
+- "Count orders created in the last seven days"
+- "Run `INFO memory` on the Redis connection"
+- "Find the latest MongoDB documents in the events collection"
+- "Open the orders table in DBX"
+
+## Tools
+
+| Tool | Description |
+| --- | --- |
+| `dbx_list_connections` | List connections visible to the MCP session |
+| `dbx_add_connection` | Add a connection to DBX storage |
+| `dbx_remove_connection` | Remove a connection from DBX storage |
+| `dbx_list_tables` | List tables, views, or collections |
+| `dbx_describe_table` | Return columns and table metadata |
+| `dbx_get_schema_context` | Return compact schema context suitable for an AI model |
+| `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
+| `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_open_table` | Open a table in the running DBX desktop application |
+| `dbx_execute_and_show` | Execute a query and display the result in the DBX desktop application |
+
+When connection scoping is enabled, mutating connection tools and desktop UI tools are hidden.
+
+## Execution Modes
+
+### Local native mode
+
+This is the default. MCP reads DBX connection storage and executes supported connections locally in the Rust process.
+
+Common native paths include PostgreSQL, MySQL, SQLite, compatible SQL databases, Redis standalone, and MongoDB. SSH, cluster, vendor-specific, or Agent/JDBC connections may require additional DBX infrastructure.
+
+DBX connection storage defaults to:
+
+- macOS: `~/Library/Application Support/com.dbx.app/dbx.db`
+- Linux: `~/.local/share/com.dbx.app/dbx.db`
+- Windows: `%APPDATA%\com.dbx.app\dbx.db`
+
+Override the directory with `DBX_DATA_DIR`.
+
+### Agent/JDBC databases
+
+Databases such as Dameng, Kingbase, Oracle, DB2, Hive, Trino, Snowflake, SAP HANA, and other DBX Agent profiles use DBX's Java agent infrastructure rather than a Node.js database driver.
+
+The native npm/GitHub binary does not bundle every proprietary JDBC driver or JRE. Install the database agent through DBX first, or provide a compatible agent installation under the DBX agent directory. Availability depends on the installed driver and license terms of the database vendor.
+
+### DBX Web / Docker mode
+
+Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local desktop storage:
+
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_WEB_URL": "https://dbx.example.com",
+        "DBX_WEB_PASSWORD": "your-web-login-password"
+      }
+    }
+  }
+}
+```
+
+`DBX_WEB_PASSWORD` is the password used on the DBX Web login page. Desktop-local mode does not use it. Desktop UI tools are hidden in Web mode.
+
+### Windows portable DBX
+
+Point `DBX_DATA_DIR` at the portable `data` directory containing `dbx.db`:
 
 ```json
 {
@@ -56,33 +213,126 @@ For Windows portable builds, set `DBX_DATA_DIR` to the portable data directory t
 }
 ```
 
-Or for development (from source):
+## DBX-managed MCP Policy
+
+DBX stores one authoritative policy under **Settings → MCP** and reloads it for every request:
+
+| Permission mode | Allowed operations |
+| --- | --- |
+| Read only | Queries and metadata reads |
+| Data read/write | Regular inserts, effectively filtered updates/deletes, scoped MongoDB mutations, and ordinary Redis writes |
+| Full access | Also permits broad updates/deletes, DDL, `TRUNCATE`, MongoDB destructive operations, and Redis `FLUSH*` |
+
+**Allowed connections** controls which stable connection IDs MCP can list or resolve. Connection-level read-only protection, production protection, database credentials, and the allowlist remain upper bounds in every mode.
+
+Conditions such as `WHERE TRUE`, `WHERE 1 = 1`, `_id: {$exists: true}`, complementary predicates, and opaque MongoDB filters remain high risk. Unknown Redis commands also fail closed.
+
+Legacy connection scope variables can still narrow the DBX allowlist for existing client configurations:
 
 ```json
 {
   "mcpServers": {
-    "dbx": {
-      "command": "npx",
-      "args": ["tsx", "packages/mcp-server/src/index.ts"],
-      "cwd": "/path/to/dbx"
+    "dbx-production-scope": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_MCP_SCOPE_CONNECTION_NAME": "production-postgres",
+        "DBX_MCP_SCOPE_DATABASE": "analytics"
+      }
     }
   }
 }
 ```
 
-### 3. Use
+Use `DBX_MCP_SCOPE_CONNECTION_ID`, comma-separated `DBX_MCP_SCOPE_CONNECTION_IDS`, or `DBX_MCP_SCOPE_CONNECTION_NAME`. ID scopes take precedence over the name scope. The scoped database is optional.
 
-In Claude Code, just ask:
+## Safety
 
-- "List my database connections"
-- "Show the tables in my local-pg connection"
-- "Describe the users table"
-- "Query the average salary from employees"
-- "Open the orders table in DBX"
+Choose **Read only**, **Data read/write**, or **Full access** in DBX instead of placing permission flags in client configuration. Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) keeps MCP read-only until a central policy is saved for the first time; the legacy permission variables are ignored afterward.
 
-## CLI
+MongoDB update/delete operations require a verifiably effective filter unless Full access is enabled. Aggregation stages such as `$out` and `$merge` are treated as high-risk writes.
 
-For terminal, script, and Codex workflows, install the dedicated CLI package:
+SQL text is not included in normal MCP errors or logged by default. Enable temporary diagnostics with `DBX_MCP_DEBUG_SQL=1` and disable it after troubleshooting.
+
+## Environment Variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DBX_DATA_DIR` | Override the local DBX data directory |
+| `DBX_WEB_URL` | Use a DBX Web/Docker backend |
+| `DBX_WEB_PASSWORD` | Authenticate to the DBX Web backend |
+| `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
+| `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
+| `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict tools to one connection name |
+| `DBX_MCP_SCOPE_DATABASE` | Restrict tools to one database |
+| `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
+| `DBX_MCP_BINARY` | Override the native binary used by the npm launcher |
+
+## Troubleshooting
+
+### Optional platform package was not installed
+
+Reinstall without `--no-optional`:
+
+```bash
+npm uninstall -g @dbx-app/mcp-server
+npm install -g @dbx-app/mcp-server@latest
+```
+
+Verify the current Node platform:
+
+```bash
+node -p 'process.platform + "-" + process.arch'
+```
+
+### Unsupported Linux distribution
+
+The published Linux packages target glibc. Alpine Linux uses musl by default and is not currently supported.
+
+### `dbx.db` cannot be found
+
+Set `DBX_DATA_DIR` to the directory containing `dbx.db`, not to the database file itself.
+
+### Desktop action says DBX is not running
+
+Database queries can run without the desktop application when the connection is supported locally. `dbx_open_table` and `dbx_execute_and_show` intentionally require DBX desktop to be running.
+
+### Agent/JDBC database cannot start
+
+Open DBX Driver Manager and install/update the matching database agent and JRE. The standalone MCP binary does not redistribute every proprietary JDBC driver.
+
+### `better-sqlite3` or Node ABI error
+
+The Rust MCP runtime does not depend on `better-sqlite3`. This error normally indicates an older MCP version or the separate TypeScript-based `@dbx-app/cli` package. Upgrade MCP with:
+
+```bash
+npm install -g @dbx-app/mcp-server@latest
+```
+
+## Development
+
+Run the Rust server from source:
+
+```bash
+cargo run -p dbx-mcp --no-default-features
+```
+
+Run tests:
+
+```bash
+cargo test -p dbx-mcp --no-default-features
+pnpm --filter @dbx-app/mcp-server test
+```
+
+Build a release binary:
+
+```bash
+cargo build --release -p dbx-mcp --no-default-features
+```
+
+## DBX CLI
+
+`@dbx-app/cli` is a separate terminal-oriented package and currently remains TypeScript/Node.js based:
 
 ```bash
 npm install -g @dbx-app/cli
@@ -90,236 +340,7 @@ dbx connections list --json
 dbx query local "select 1" --json
 ```
 
-See the [DBX CLI README](../cli/README.md) for command details.
-
-### List indexes (`#` column)
-
-Connection, proxy, and table listings include a **`#`** column — a **1-based row index** in the current list output order (same order used when resolving numeric references).
-
-You can pass that index instead of a UUID or name:
-
-| Input examples | Resolves to |
-| -------------- | ----------- |
-| `1`, `#2` | Item at row 1 or 2 from the latest list of that category |
-| `1-15`, `1..15`, `1:15`, `#1-#15` | Inclusive index range (batch-capable tools; sequential) |
-| Exact UUID / name | Still preferred when present (checked before index) |
-
-**MCP:** use `connection_id`, `connection_name`, `proxy_profile_id`, or `proxy_profile_name` with a numeric value or range.
-
-**CLI:** use the connection argument positionally, e.g. `dbx stats 1`, `dbx stats 1-15`, `dbx query 2 "select 1"`, or `--proxy-profile-id 1`.
-
-Lists reload data on each call; index `N` always means “the Nth row in the current list,” not a persisted database ID.
-
-## CLI ↔ MCP parity
-
-| Capability | CLI | MCP |
-|------------|-----|-----|
-| Connections list/add/remove | `connections *` | `dbx_list/add/remove_connection` |
-| Proxies list | `proxies list` | `dbx_list_proxies` |
-| Schema list/describe/context | `schema *` / `context` | `dbx_list_tables` / `dbx_describe_table` / `dbx_get_schema_context` |
-| Query / Redis | `query` / `redis` | `dbx_execute_query` / `dbx_execute_redis_command` |
-| Stats / report | `stats` / `report` | `dbx_get_database_stats` / `dbx_get_database_report` |
-| Proxy profile override | `--proxy-profile-id/name` | `proxy_profile_id` / `proxy_profile_name` |
-| Connection range `1-15` | yes (+ `--parallel`) | yes (sequential batch) |
-| `--skip-unsupported` | stats/report (default on) | `skip_unsupported` (default true) |
-| Timeout | `-t/--timeout` | `timeout_ms` on stats/report/query |
-| Report file save | `{cwd}/reports/` default | text only (no cwd write) |
-| Open table / execute-and-show | `open` / — | `dbx_open_table` / `dbx_execute_and_show` (desktop) |
-| doctor / capabilities | yes | CLI-only |
-
-## Tools
-
-| Tool                        | Description                                          |
-| --------------------------- | ---------------------------------------------------- |
-| `dbx_list_connections`      | List all database connections configured in DBX      |
-| `dbx_add_connection`        | Add a new database connection                        |
-| `dbx_list_proxies`          | List saved proxy tunnel profiles from DBX Settings   |
-| `dbx_remove_connection`     | Remove a database connection                         |
-| `dbx_list_tables`           | List tables and views for a connection               |
-| `dbx_describe_table`        | Get column definitions for a table                   |
-| `dbx_get_database_stats`    | Database status overview from system catalog views   |
-| `dbx_get_database_report`   | Full database report: summary, tables, comments, indexes |
-| `dbx_get_schema_context`    | Get compact table and column context for writing SQL |
-| `dbx_execute_query`         | Execute a SQL query (max 100 rows)                   |
-| `dbx_execute_redis_command` | Execute a Redis command on a Redis connection        |
-| `dbx_open_table`            | Open a table in DBX desktop app UI                   |
-
-### `dbx_add_connection` Parameters
-
-| Parameter         | Type    | Required | Default  | Description                                              |
-| ----------------- | ------- | -------- | -------- | -------------------------------------------------------- |
-| `name`            | string  | yes      | —        | Connection name                                          |
-| `db_type`         | string  | yes      | —        | Database type (e.g. `mysql`, `postgresql`, `redis`)      |
-| `host`            | string  | yes      | —        | Database host; for cloudflare-d1, use the Account ID     |
-| `port`            | number  | no       | —        | Database port (defaults vary by db_type)                 |
-| `username`        | string  | no       | `""`     | Username                                                 |
-| `password`        | string  | no       | `""`     | Password; for cloudflare-d1, use the API Token         |
-| `database`        | string  | no       | —        | Default database name; for cloudflare-d1, use the D1 ID  |
-| `ssl`             | boolean | no       | `false`  | Enable SSL                                               |
-| `driver_profile`  | string  | no       | —        | Driver profile (e.g. `gbase8a`, `gbase8s`)              |
-| `proxy_enabled`   | boolean | no       | `false`  | Enable SOCKS5 or HTTP proxy tunnel                       |
-| `proxy_type`      | enum    | no       | `socks5` | Proxy protocol: `socks5` or `http`                       |
-| `proxy_host`      | string  | when proxy enabled | — | Proxy server host                             |
-| `proxy_port`      | number  | no       | `1080`   | Proxy server port (1–65535)                              |
-| `proxy_username`      | string  | no       | —        | Proxy authentication username                            |
-| `proxy_password`      | string  | no       | —        | Proxy authentication password                            |
-| `proxy_profile_id`    | string  | no       | —        | Saved proxy profile ID, name, or list index `#` from `dbx_list_proxies` |
-| `proxy_profile_name`  | string  | no       | —        | Saved proxy profile name or list index `#` (alternative to ID)        |
-
-**Proxy modes (mutually exclusive):**
-
-1. **Inline** — set `proxy_enabled=true` and provide `proxy_host` (plus optional `proxy_type`, `proxy_port`, credentials). Stored via legacy `proxy_*` fields converted to a `transport_layers` proxy entry.
-2. **Saved profile** — set `proxy_profile_id` or `proxy_profile_name` to reference a tunnel profile from DBX **Settings > Tunnels**. The connection stores a `transport_layers` stub with `profile_id`; DBX resolves the full proxy config at connect time.
-
-You cannot mix inline proxy settings with `proxy_profile_id` / `proxy_profile_name`. Specify only one lookup key for saved profiles (ID or name, not both). Use `dbx_list_proxies` to discover available profiles.
-
-**Proxy profile precedence (replace, do not stack):** When `proxy_profile_id` / `proxy_profile_name` is provided, any existing proxy layers on the connection (inline `proxy_*` or a previous profile stub) are **removed** and replaced with the new profile reference. SSH layers are preserved. This applies to `dbx_add_connection` (persisted) and one-shot overrides on `dbx_get_database_stats` / `dbx_get_database_report` / `dbx_execute_query` (request only, not saved).
-
-SSH tunnel parameters are not yet exposed by this MCP tool.
-
-### `dbx_get_database_stats`
-
-Returns a compact markdown overview suitable for AI agents. All metrics come from database system catalogs — no manual `COUNT(*)` or cached counters.
-
-| Parameter         | Type   | Required | Description                                              |
-| ----------------- | ------ | -------- | -------------------------------------------------------- |
-| `connection_id`   | string | no       | Connection UUID, list index `#`, or range (`1-15`) from `dbx_list_connections` |
-| `connection_name` | string | no       | Connection name, list index `#`, or range (`1-15`) from `dbx_list_connections` |
-| `database`        | string | no       | Database name (Dameng: also accepted as schema alias)  |
-| `schema`          | string | no       | Schema name (default: `public` for PostgreSQL, `dbo` for SQL Server) |
-| `timeout_ms`      | number | no       | Per-connection query timeout in ms (CLI `-t/--timeout`) |
-| `skip_unsupported`| boolean| no       | Default `true`: unsupported types → skipped (CLI `--skip-unsupported`) |
-| `proxy_profile_id` | string | no | One-shot: replace connection proxy with this saved profile for this request only |
-| `proxy_profile_name` | string | no | One-shot alternative to `proxy_profile_id` |
-
-**Query strategy by database type:**
-
-| Type | Catalog source |
-| ---- | -------------- |
-| MySQL / MariaDB / Doris / StarRocks / Manticore | `information_schema.TABLES`, `information_schema.SCHEMATA` |
-| PostgreSQL family | `information_schema.tables` + `pg_catalog` + `pg_stat_user_tables` |
-| SQLite / rqlite | `sqlite_master` |
-| MongoDB | `collStats` per collection (up to 50) |
-| Redis | `INFO` + `DBSIZE` |
-| Other SQL (via bridge) | `information_schema.tables` best-effort fallback |
-
-Output columns: Name, Type, Engine, Rows/Docs (estimate), Data size, Index size, Total size, Comment.
-
-### `dbx_get_database_report`
-
-Returns a structured markdown report for AI agents and humans. All data comes from system catalogs — no `COUNT(*)` or slow table scans.
-
-| Parameter         | Type   | Required | Description                                              |
-| ----------------- | ------ | -------- | -------------------------------------------------------- |
-| `connection_id`   | string | no       | Connection UUID, list index `#`, or range (`1-15`) from `dbx_list_connections` |
-| `connection_name` | string | no       | Connection name, list index `#`, or range (`1-15`) from `dbx_list_connections` |
-| `database`        | string | no       | Database name (Dameng: also accepted as schema alias)  |
-| `schema`          | string | no       | Schema name (default: `public` for PostgreSQL, `dbo` for SQL Server) |
-| `timeout_ms` / `skip_unsupported` | number / boolean | no | Same semantics as `dbx_get_database_stats` |
-| `proxy_profile_id` / `proxy_profile_name` | string | no | One-shot proxy profile override (replaces existing proxy for this request) |
-
-**Note:** MCP returns report text only (does not write under `{cwd}/reports/`). Use CLI `dbx report` when you need the default file save.
-
-**Report sections:**
-
-1. **Database Summary** — schema/db name, charset, collation, table count (from catalog)
-2. **Tables** — name, type, engine, row estimate, size, table comment; sorted by rows descending
-3. **Column Comments** — columns with non-empty comments from `information_schema.COLUMNS` or `pg_catalog.col_description`
-4. **Indexes** — from `information_schema.STATISTICS` (MySQL) or `pg_indexes` (PostgreSQL) or `sqlite_master`
-
-**CLI:** `dbx report <connection|#> [--schema name] [--database name] [--json]`
-
-## SQL Safety
-
-`dbx_execute_query` accepts multiple SQL statements and executes them one at a time after checking each statement. Regular write statements such as `INSERT`, `UPDATE`, and `DELETE ... WHERE ...` are allowed by default.
-
-If you need to force a read-only MCP session, set:
-
-```bash
-DBX_MCP_ALLOW_WRITES=0
-```
-
-Dangerous statements such as `DROP`, `TRUNCATE`, and `ALTER` remain blocked unless you also set:
-
-```bash
-DBX_MCP_ALLOW_DANGEROUS_SQL=1
-```
-
-Redis connections use `dbx_execute_redis_command` instead of `dbx_execute_query`. Redis write commands honor `DBX_MCP_ALLOW_WRITES`; dangerous Redis commands such as `KEYS`, `FLUSHALL`, and `EVAL` require `DBX_MCP_ALLOW_DANGEROUS_SQL=1`.
-
-## Streaming Output
-
-Tools that connect to a database (`dbx_list_tables`, `dbx_describe_table`, `dbx_execute_query`, `dbx_get_database_stats`, `dbx_get_database_report`, `dbx_execute_redis_command`, `dbx_get_schema_context`, etc.) prepend streaming output to the tool response:
-
-```
-[dbx] Using connection "my-db" (postgres @ host:5432/mydb)
-[dbx] Connecting via socks5 proxy proxy.example.com:1080
-[dbx] Starting local proxy tunnel to host:5432...
-[dbx] Proxy tunnel ready on 127.0.0.1:54321
-[dbx] Connecting to database postgres @ host:5432/mydb (via 127.0.0.1:54321)
-[dbx] Database connection pool ready
-
----
-
-[my-db (uuid) [postgres @ host:5432]]
-| results... |
-```
-
-On errors, the same progress lines appear before the error message so you can see which stage failed (proxy, tunnel, database, etc.).
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `DBX_MCP_QUIET=1` | off | Suppress streaming output in tool responses |
-| `DBX_MCP_VERBOSE=1` | off | Include extra verbose-only steps (e.g. reused proxy tunnel, bridge endpoint) |
-
-CLI uses the same streaming output via stderr with `--quiet` / `--verbose` or `DBX_QUIET` / `DBX_VERBOSE`.
-
-## How It Works
-
-```
-AI Agent → MCP Server → Database
-                ↓
-         DBX SQLite database (dbx.db)
-```
-
-The MCP server reads your database connections from DBX's SQLite database:
-
-- **macOS**: `~/Library/Application Support/com.dbx.app/dbx.db`
-- **Linux**: `~/.local/share/com.dbx.app/dbx.db`
-- **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
-
-Windows portable builds store data next to `DBX.exe`, usually in `data\dbx.db`. Set `DBX_DATA_DIR` to that `data` folder instead of copying `dbx.db` into the default directory.
-
-## DBX Web / Docker Mode
-
-When connecting MCP to a deployed DBX Web instance, set `DBX_WEB_URL` instead of reading local desktop storage:
-
-```json
-{
-  "mcpServers": {
-    "dbx": {
-      "command": "dbx-mcp-server",
-      "env": {
-        "DBX_WEB_URL": "https://dbx.example.com",
-        "DBX_WEB_PASSWORD": "your-web-password"
-      }
-    }
-  }
-}
-```
-
-If the Web instance has password protection enabled, `DBX_WEB_PASSWORD` is required. Use the same password you enter on the DBX Web login page, including the password created by the first-run setup screen. You do not need to set `DBX_PASSWORD` on the DBX Web server just for MCP; `DBX_PASSWORD` is only a server-side environment override. Without `DBX_WEB_PASSWORD`, MCP calls fail before any connection data is returned. Desktop local mode does not use `DBX_WEB_PASSWORD`.
-
-## DBX UI Integration
-
-The `dbx_open_table` tool communicates with the running DBX app to open tables directly in the UI. This requires DBX to be running. If DBX is not running, the tool will return an error message.
-
-PostgreSQL, MySQL, SQLite, Doris, StarRocks, and Redshift queries run directly from the MCP server. Redis standalone command execution also runs directly. Other database types, plus Redis Sentinel/Cluster or SSH-backed Redis connections, still use the DBX desktop bridge unless `DBX_WEB_URL` is configured.
-
-## Requirements
-
-- [DBX](https://github.com/t8y2/dbx) installed with at least one connection configured
-- Node.js 22.13.0 或更高版本
+See the [CLI README](../cli/README.md).
 
 ## License
 
@@ -329,34 +350,39 @@ Apache-2.0
 
 ## 中文说明
 
-[DBX](https://github.com/t8y2/dbx) 的 MCP Server，让 AI 编程助手（Claude Code、Cursor 等）直接使用 DBX 中已配置的数据库连接查询数据。
+DBX MCP Server 是 [DBX](https://github.com/t8y2/dbx) 的 Rust MCP 服务，让 Claude Code、Cursor、Windsurf 等兼容 MCP 的 AI 工具使用 DBX 中已有的连接查询数据库。
 
-### 特性
+[npm](https://www.npmjs.com/package/@dbx-app/mcp-server) | [原生版本下载](https://github.com/t8y2/dbx/releases?q=packages-v)
 
-- **零配置** — 自动读取 DBX 的连接配置
-- **9 个工具** — 列出/添加/删除连接、列出表、查看表结构、获取 Schema 上下文、执行 SQL、执行 Redis 命令、在 DBX 中打开表
-- **连接池** — 跨查询复用数据库连接
-- **直接执行** — PostgreSQL、MySQL、SQLite 及兼容数据库（Doris、StarRocks 等）无需打开 DBX 即可查询
-- **默认允许常规写入** — `INSERT` / `UPDATE` / `DELETE` 可直接执行，危险语句仍需显式开启
-- **DBX UI 联动** — 从 AI 助手直接在 DBX 桌面端打开表
+### 架构
 
-### 快速开始
+```text
+@dbx-app/mcp-server
+└── 轻量 Node.js 启动器
+    └── 当前平台的 Rust dbx-mcp 二进制
+        └── dbx-core 数据库和 Agent 基础设施
+```
 
-#### 1. 安装
+MCP 协议、连接读取、SQL 安全检查、Schema、Redis、MongoDB、Web 后端和数据库执行均由 Rust 实现。Node.js 只用于保持原有 npm/npx 安装入口不变。
+
+### 主要能力
+
+- 10 个 MCP 工具
+- 不依赖 `better-sqlite3`，没有 Node 原生模块 ABI 问题
+- 支持本地 DBX、DBX Web 和 Docker
+- 支持预编译原生二进制和离线运行
+- 支持常见 SQL、Redis、MongoDB 直连
+- 支持达梦、金仓、Oracle、DB2、Hive 等 Agent/JDBC 数据库
+- 支持只读、危险操作、连接和数据库作用域限制
+- DBX 桌面端未启动时仍可执行支持本地运行的连接
+
+### npm 安装
 
 ```bash
 npm install -g @dbx-app/mcp-server
 ```
 
-或直接运行：
-
-```bash
-npx @dbx-app/mcp-server
-```
-
-#### 2. 配置 Claude Code
-
-在项目的 `.mcp.json` 中添加：
+MCP 配置：
 
 ```json
 {
@@ -368,233 +394,80 @@ npx @dbx-app/mcp-server
 }
 ```
 
-Windows 便携版需要在 MCP 配置中设置 `DBX_DATA_DIR`，指向包含 `dbx.db` 的便携版数据目录：
+也可以直接使用 npx：
 
 ```json
 {
   "mcpServers": {
     "dbx": {
-      "command": "dbx-mcp-server",
-      "env": {
-        "DBX_DATA_DIR": "D:\\DBX_x64-portable\\data"
-      }
+      "command": "npx",
+      "args": ["-y", "@dbx-app/mcp-server"]
     }
   }
 }
 ```
 
-#### 3. 使用
+不要使用 `--no-optional`，平台二进制通过 npm `optionalDependencies` 自动安装。
 
-在 Claude Code 中直接说：
+### 原生二进制和离线安装
 
-- "列出我的数据库连接"
-- "查看 local-pg 上有哪些表"
-- "查看 users 表的结构"
-- "查询最近 7 天的订单数量"
-- "打开 orders 表"
+每个 packages 版本会在 [GitHub Releases](https://github.com/t8y2/dbx/releases?q=packages-v) 发布以下文件：
 
-### CLI
+| 平台 | 文件 |
+| --- | --- |
+| macOS Apple Silicon | `dbx-mcp-darwin-arm64.tar.gz` |
+| macOS Intel | `dbx-mcp-darwin-x64.tar.gz` |
+| Linux glibc ARM64 | `dbx-mcp-linux-arm64-gnu.tar.gz` |
+| Linux glibc x64 | `dbx-mcp-linux-x64-gnu.tar.gz` |
+| Windows ARM64 | `dbx-mcp-win32-arm64.zip` |
+| Windows x64 | `dbx-mcp-win32-x64.zip` |
 
-终端、脚本和 Codex 工作流请安装独立 CLI 包：
+下载后使用 `SHA256SUMS` 校验，并直接配置：
 
-```bash
-npm install -g @dbx-app/cli
-dbx connections list --json
-dbx query local "select 1" --json
+```json
+{
+  "mcpServers": {
+    "dbx": {
+      "command": "/绝对路径/dbx-mcp"
+    }
+  }
+}
 ```
 
-命令详情见 [DBX CLI README](../cli/README.md)。
+直接运行原生文件不需要 Node.js。Linux 当前只支持 glibc，暂不支持 Alpine/musl。
 
-### 列表序号（`#` 列）
+### 系统要求
 
-连接、代理、表列表均包含 **`#`** 列，表示当前列表中的 **1-based 行序号**（与解析数字引用时使用的顺序一致）。
-
-可用该序号代替 UUID 或名称：
-
-| 输入示例 | 含义 |
-| -------- | ---- |
-| `1`、`#2` | 对应类别最新列表中的第 1 / 2 行 |
-| `1-15`、`1..15` | 序号范围（支持批量的工具；顺序执行） |
-| 精确 UUID / 名称 | 仍优先匹配（先于序号解析） |
-
-**MCP：** 在 `connection_id`、`connection_name`、`proxy_profile_id`、`proxy_profile_name` 中传入数字或范围。
-
-**CLI：** 在连接参数位置使用，例如 `dbx stats 1`、`dbx stats 1-15`、`dbx query 2 "select 1"`、`--proxy-profile-id 1`。
-
-每次 list 都会重新加载数据；序号 `N` 表示「当前列表第 N 行」，不是持久化 ID。
-
-### CLI ↔ MCP 能力对照
-
-| 能力 | CLI | MCP |
-|------|-----|-----|
-| 连接 list/add/remove | `connections *` | `dbx_list/add/remove_connection` |
-| 代理 list | `proxies list` | `dbx_list_proxies` |
-| schema / context | `schema *` / `context` | `dbx_list_tables` / `dbx_describe_table` / `dbx_get_schema_context` |
-| query / redis | `query` / `redis` | `dbx_execute_query` / `dbx_execute_redis_command` |
-| stats / report | `stats` / `report` | `dbx_get_database_stats` / `dbx_get_database_report` |
-| 代理覆盖 | `--proxy-profile-id/name` | `proxy_profile_id` / `proxy_profile_name` |
-| 范围 `1-15` | 是（可 `--parallel`） | 是（顺序批量） |
-| skip-unsupported | stats/report 默认开 | `skip_unsupported` 默认 true |
-| timeout | `-t/--timeout` | `timeout_ms` |
-| report 落盘 | 默认 `{cwd}/reports/` | 仅返回文本 |
-| open / execute-and-show | `open` / — | 桌面端工具 |
-| doctor / capabilities | 有 | 仅 CLI |
+- npm 安装需要 Node.js 18.18.0 或更高版本
+- 原生二进制不需要 Node.js、Rust、Cargo、Python 或本地编译环境
+- 连接配置需要存在于 DBX 存储中，或通过 `dbx_add_connection` 添加
+- Agent/JDBC 数据库需要提前安装对应 Agent、JDBC Driver 和 JRE
+- `dbx_open_table`、`dbx_execute_and_show` 需要 DBX 桌面端正在运行
 
 ### 工具列表
 
-| 工具                        | 说明                                  |
-| --------------------------- | ------------------------------------- |
-| `dbx_list_connections`      | 列出 DBX 中所有已配置的数据库连接     |
-| `dbx_add_connection`        | 添加新的数据库连接                    |
-| `dbx_list_proxies`          | 列出 DBX 设置中已保存的代理隧道配置   |
-| `dbx_remove_connection`     | 删除数据库连接                        |
-| `dbx_list_tables`           | 列出指定连接的表和视图                |
-| `dbx_describe_table`        | 获取表的列定义                        |
-| `dbx_get_database_stats`    | 从系统目录视图获取数据库状态概览      |
-| `dbx_get_database_report`   | 完整数据库报告：摘要、表、列注释、索引 |
-| `dbx_get_schema_context`    | 获取适合 AI 写 SQL 的紧凑表结构上下文 |
-| `dbx_execute_query`         | 执行 SQL 查询（最多返回 100 行）      |
-| `dbx_execute_redis_command` | 在 Redis 连接上执行 Redis 命令        |
-| `dbx_open_table`            | 在 DBX 桌面端打开指定表               |
+| 工具 | 说明 |
+| --- | --- |
+| `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
+| `dbx_add_connection` | 添加 DBX 连接配置 |
+| `dbx_remove_connection` | 删除 DBX 连接配置 |
+| `dbx_list_tables` | 列出表、视图或集合 |
+| `dbx_describe_table` | 获取字段和表结构 |
+| `dbx_get_schema_context` | 获取适合 AI 使用的紧凑 Schema 上下文 |
+| `dbx_execute_query` | 执行 SQL 或支持的 MongoDB Shell 命令，最多返回 100 行 |
+| `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_open_table` | 在 DBX 桌面端打开表 |
+| `dbx_execute_and_show` | 执行查询并在 DBX 桌面端展示结果 |
 
-### `dbx_add_connection` 参数
+### 本地数据目录
 
-| 参数              | 类型    | 必填     | 默认值   | 说明                                     |
-| ----------------- | ------- | -------- | -------- | ---------------------------------------- |
-| `name`            | string  | 是       | —        | 连接名称                                 |
-| `db_type`         | string  | 是       | —        | 数据库类型（如 `mysql`、`postgresql`）   |
-| `host`            | string  | 是       | —        | 数据库主机；cloudflare-d1 填 Account ID  |
-| `port`            | number  | 否       | —        | 数据库端口（按 db_type 有默认值）        |
-| `username`        | string  | 否       | `""`     | 用户名                                   |
-| `password`        | string  | 否       | `""`     | 密码；cloudflare-d1 填 API Token         |
-| `database`        | string  | 否       | —        | 默认数据库；cloudflare-d1 填 D1 ID       |
-| `ssl`             | boolean | 否       | `false`  | 是否启用 SSL                             |
-| `driver_profile`  | string  | 否       | —        | 驱动配置（如 `gbase8a`、`gbase8s`）      |
-| `proxy_enabled`   | boolean | 否       | `false`  | 是否启用 SOCKS5/HTTP 代理隧道            |
-| `proxy_type`      | enum    | 否       | `socks5` | 代理协议：`socks5` 或 `http`             |
-| `proxy_host`      | string  | 启用代理时 | —      | 代理服务器主机                           |
-| `proxy_port`      | number  | 否       | `1080`   | 代理端口（1–65535）                      |
-| `proxy_username`  | string  | 否       | —        | 代理认证用户名                           |
-| `proxy_password`  | string  | 否       | —        | 代理认证密码                             |
-| `proxy_profile_id` | string | 否       | —        | 已保存代理配置 ID、名称，或 `dbx_list_proxies` 中的序号 `#` |
-| `proxy_profile_name` | string | 否 | —        | 已保存代理配置名称或序号 `#`（`proxy_profile_id` 的替代） |
+- macOS：`~/Library/Application Support/com.dbx.app/dbx.db`
+- Linux：`~/.local/share/com.dbx.app/dbx.db`
+- Windows：`%APPDATA%\com.dbx.app\dbx.db`
 
-**代理模式（互斥，不可混用）：**
+通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
 
-1. **内联模式** — 设置 `proxy_enabled=true` 并提供 `proxy_host`（及可选的 `proxy_type`、`proxy_port`、认证信息）。通过遗留 `proxy_*` 字段写入 `transport_layers`。
-2. **引用已保存配置** — 设置 `proxy_profile_id` 或 `proxy_profile_name`，引用 DBX **设置 > 隧道** 中的代理配置。连接侧只存带 `profile_id` 的 `transport_layers` 引用桩，DBX 在连接时解析完整代理配置。
-
-不可同时使用内联代理参数与 `proxy_profile_id` / `proxy_profile_name`。引用已保存配置时只能指定 ID 或名称之一。可用 `dbx_list_proxies` 查看可用配置。
-
-**代理配置优先级（替换，不叠加）：** 传入 `proxy_profile_id` / `proxy_profile_name` 时，会**移除**连接上已有的代理层（内联 `proxy_*` 或旧的 profile 引用桩），再写入新的 profile 引用。SSH 层保留。适用于 `dbx_add_connection`（持久化）以及 `dbx_get_database_stats` / `dbx_get_database_report` / `dbx_execute_query` 的一次性覆盖（仅本次请求，不写回连接）。
-
-SSH 隧道参数暂未在此 MCP 工具中暴露。
-
-### `dbx_get_database_stats`
-
-返回适合 AI 阅读的紧凑 Markdown 概览。所有指标均来自数据库系统目录视图，不执行手动 `COUNT(*)`，也不依赖缓存计数。
-
-| 参数              | 类型   | 必填 | 说明                                                         |
-| ----------------- | ------ | ---- | ------------------------------------------------------------ |
-| `connection_id`   | string | 否   | 连接 UUID，或 `dbx_list_connections` 中的序号 `#`            |
-| `connection_name` | string | 否   | 连接名称，或 `dbx_list_connections` 中的序号 `#`             |
-| `database`        | string | 否   | 数据库名（Dameng 也可作为 schema 别名）                      |
-| `schema`          | string | 否   | Schema 名（PostgreSQL 默认 `public`，SQL Server 默认 `dbo`） |
-| `proxy_profile_id` | string | 否 | 一次性：用该已保存代理配置替换连接现有代理（仅本次请求） |
-| `proxy_profile_name` | string | 否 | 同上，名称方式（与 id 二选一） |
-
-**各数据库类型的查询策略：**
-
-| 类型 | 目录来源 |
-| ---- | -------- |
-| MySQL / MariaDB / Doris / StarRocks / Manticore | `information_schema.TABLES`、`information_schema.SCHEMATA` |
-| PostgreSQL 系 | `information_schema.tables` + `pg_catalog` + `pg_stat_user_tables` |
-| SQLite / rqlite | `sqlite_master` |
-| MongoDB | 各集合 `collStats`（最多 50 个） |
-| Redis | `INFO` + `DBSIZE` |
-| 其他 SQL（经 bridge） | `information_schema.tables` 尽力回退 |
-
-输出列：Name、Type、Engine、Rows/Docs（估计值）、Data、Index、Total、Comment。
-
-### `dbx_get_database_report`
-
-返回结构化 Markdown 报告，适合 AI 与人工阅读。所有数据来自系统目录视图，不执行 `COUNT(*)` 或慢速全表扫描。
-
-| 参数              | 类型   | 必填 | 说明                                                         |
-| ----------------- | ------ | ---- | ------------------------------------------------------------ |
-| `connection_id`   | string | 否   | 连接 UUID，或 `dbx_list_connections` 中的序号 `#`            |
-| `connection_name` | string | 否   | 连接名称，或 `dbx_list_connections` 中的序号 `#`             |
-| `database`        | string | 否   | 数据库名（Dameng 也可作为 schema 别名）                      |
-| `schema`          | string | 否   | Schema 名（PostgreSQL 默认 `public`，SQL Server 默认 `dbo`） |
-| `proxy_profile_id` / `proxy_profile_name` | string | 否 | 一次性代理覆盖（替换连接现有代理，仅本次请求） |
-
-**报告章节：**
-
-1. **Database Summary** — schema/库名、字符集、排序规则、表数量（来自目录）
-2. **Tables** — 表名、类型、引擎、行数估计、大小、表注释；按行数降序排列
-3. **Column Comments** — 来自 `information_schema.COLUMNS` 或 `pg_catalog.col_description` 的非空列注释
-4. **Indexes** — 来自 `information_schema.STATISTICS`（MySQL）、`pg_indexes`（PostgreSQL）或 `sqlite_master`（SQLite）
-
-**CLI：** `dbx report <connection|#> [--schema name] [--database name] [--json]`
-
-### SQL 安全
-
-`dbx_execute_query` 支持多条 SQL 语句，会逐条完成安全检查并依次执行。默认允许常规写操作，例如 `INSERT`、`UPDATE`、`DELETE ... WHERE ...`。
-
-如果你希望 MCP 会话强制退回只读，可设置：
-
-```bash
-DBX_MCP_ALLOW_WRITES=0
-```
-
-`DROP`、`TRUNCATE`、`ALTER` 等危险语句仍会被拦截，除非额外设置：
-
-```bash
-DBX_MCP_ALLOW_DANGEROUS_SQL=1
-```
-
-Redis 连接使用 `dbx_execute_redis_command`，不通过 `dbx_execute_query` 执行。Redis 写命令遵循 `DBX_MCP_ALLOW_WRITES`；`KEYS`、`FLUSHALL`、`EVAL` 等危险 Redis 命令需要设置 `DBX_MCP_ALLOW_DANGEROUS_SQL=1`。
-
-### 流逝输出
-
-会建立数据库连接的工具（`dbx_list_tables`、`dbx_describe_table`、`dbx_execute_query`、`dbx_get_database_stats`、`dbx_get_database_report`、`dbx_execute_redis_command`、`dbx_get_schema_context` 等）会在返回结果前附带流逝输出：
-
-```
-[dbx] Using connection "my-db" (postgres @ host:5432/mydb)
-[dbx] Connecting via socks5 proxy proxy.example.com:1080
-[dbx] Starting local proxy tunnel to host:5432...
-[dbx] Proxy tunnel ready on 127.0.0.1:54321
-[dbx] Connecting to database postgres @ host:5432/mydb (via 127.0.0.1:54321)
-[dbx] Database connection pool ready
-
----
-
-[my-db (uuid) [postgres @ host:5432]]
-| 查询结果... |
-```
-
-出错时，错误信息前同样会显示进度，便于定位失败阶段（代理、隧道、数据库等）。
-
-| 变量 | 默认 | 作用 |
-|------|------|------|
-| `DBX_MCP_QUIET=1` | 关闭 | 不在工具响应中显示流逝输出 |
-| `DBX_MCP_VERBOSE=1` | 关闭 | 显示更多 verbose 步骤（如复用代理隧道、bridge 端点） |
-
-CLI 通过 stderr 输出相同流逝输出，可用 `--quiet` / `--verbose` 或 `DBX_QUIET` / `DBX_VERBOSE`。
-
-### 工作原理
-
-MCP Server 从 DBX 的 SQLite 数据库读取连接信息：
-
-- **macOS**: `~/Library/Application Support/com.dbx.app/dbx.db`
-- **Linux**: `~/.local/share/com.dbx.app/dbx.db`
-- **Windows**: `%APPDATA%\com.dbx.app\dbx.db`
-
-Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。请把 `DBX_DATA_DIR` 设置为这个 `data` 文件夹，不要手工复制 `dbx.db` 到默认目录。
-
-### DBX Web / Docker 模式
-
-如果 MCP 连接的是已部署的 DBX Web 实例，请设置 `DBX_WEB_URL`，不要读取本机桌面端存储：
+### DBX Web / Docker
 
 ```json
 {
@@ -603,22 +476,121 @@ Windows 便携版的数据通常在 `DBX.exe` 同级的 `data\dbx.db`。请把 `
       "command": "dbx-mcp-server",
       "env": {
         "DBX_WEB_URL": "https://dbx.example.com",
-        "DBX_WEB_PASSWORD": "你的 Web 访问密码"
+        "DBX_WEB_PASSWORD": "Web 登录密码"
       }
     }
   }
 }
 ```
 
-当 Web 实例启用了密码保护时，必须提供 `DBX_WEB_PASSWORD`。这里填写的就是 DBX Web 登录页使用的密码，也包括首次打开 Web 页面时通过 setup 设置的密码。为了让 MCP 可用，不需要在启动 DBX Web 时额外设置 `DBX_PASSWORD`；`DBX_PASSWORD` 只是服务端环境变量覆盖。未提供 `DBX_WEB_PASSWORD` 时，MCP 调用会在返回任何连接数据前失败。桌面本地模式不使用 `DBX_WEB_PASSWORD`。
+Web 模式不会读取本机 DBX 桌面存储，也不会暴露桌面 UI 工具。
 
-### DBX UI 联动
+### Agent/JDBC 数据库
 
-`dbx_open_table` 工具通过本地 HTTP 接口与运行中的 DBX 应用通信，直接在 UI 中打开表。需要 DBX 正在运行。
+达梦、人大金仓、Oracle、DB2、Hive、Trino、Snowflake、SAP HANA 等数据库通过 DBX Java Agent/JDBC 基础设施运行，而不是通过 Node.js 数据库驱动运行。
 
-PostgreSQL、MySQL、SQLite、Doris、StarRocks、Redshift 查询可由 MCP Server 直接执行。Redis standalone 命令执行也会直接连接。其他数据库类型，以及 Redis Sentinel/Cluster 或 SSH Redis 连接，仍会走 DBX 桌面端 bridge，除非配置了 `DBX_WEB_URL` 使用 Web 后端。
+npm 和 GitHub Release 中的原生 MCP 文件不会捆绑所有厂商的专有 JDBC Driver。请先通过 DBX Driver Manager 安装对应 Agent 和 JRE，或提供兼容的 DBX Agent 目录。
 
-### 系统要求
+### DBX 管理的 MCP 策略
 
-- 已安装 [DBX](https://github.com/t8y2/dbx) 并配置了至少一个数据库连接
-- Node.js 22.13.0 or newer
+DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时重新读取：
+
+| 权限模式 | 允许的操作 |
+| --- | --- |
+| 只读 | 查询和元数据读取 |
+| 数据读写 | 普通插入、带有效过滤条件的更新/删除、范围明确的 MongoDB 修改和普通 Redis 写入 |
+| 完全访问 | 额外允许大范围更新/删除、DDL、`TRUNCATE`、MongoDB 破坏性操作和 Redis `FLUSH*` |
+
+**允许访问的连接** 决定 MCP 可以列出和解析哪些稳定连接 ID。连接自身只读、生产库保护、数据库账号权限和 allowlist 在任何模式下都是权限上限。
+
+`WHERE TRUE`、`WHERE 1 = 1`、`_id: {$exists: true}`、互补条件或不透明 MongoDB 过滤器仍按高风险处理。未知 Redis 命令也会失败关闭。
+
+旧连接 scope 变量可继续兼容读取，但只能进一步收窄 DBX allowlist：
+
+```json
+{
+  "mcpServers": {
+    "dbx-production-scope": {
+      "command": "dbx-mcp-server",
+      "env": {
+        "DBX_MCP_SCOPE_CONNECTION_NAME": "production-postgres",
+        "DBX_MCP_SCOPE_DATABASE": "analytics"
+      }
+    }
+  }
+}
+```
+
+可使用 `DBX_MCP_SCOPE_CONNECTION_ID`、逗号分隔的 `DBX_MCP_SCOPE_CONNECTION_IDS` 或 `DBX_MCP_SCOPE_CONNECTION_NAME`。ID scope 优先于名称 scope；作用域模式会隐藏连接增删和桌面 UI 工具。
+
+### SQL 和命令安全
+
+请在 DBX 中选择 **只读**、**数据读写** 或 **完全访问**，不要在客户端配置中放置权限开关。新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。为兼容升级，在中央策略首次保存前，`DBX_MCP_ALLOW_WRITES=0`（或 `false`）仍会保持 MCP 只读；策略保存后旧权限变量即被忽略。
+
+MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的 filter；`$out`、`$merge` 聚合阶段按高风险写操作处理。
+
+### 环境变量
+
+| 变量 | 用途 |
+| --- | --- |
+| `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
+| `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
+| `DBX_WEB_PASSWORD` | DBX Web 登录密码 |
+| `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制到指定连接 ID |
+| `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制到多个连接 ID |
+| `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制到指定连接名称 |
+| `DBX_MCP_SCOPE_DATABASE` | 限制到指定数据库 |
+| `DBX_MCP_DEBUG_SQL` | 临时输出 SQL 诊断信息 |
+| `DBX_MCP_BINARY` | 覆盖 npm 启动器使用的原生文件 |
+
+### 常见问题
+
+**提示平台 optional package 未安装**
+
+重新安装并确保没有使用 `--no-optional`：
+
+```bash
+npm uninstall -g @dbx-app/mcp-server
+npm install -g @dbx-app/mcp-server@latest
+```
+
+**提示找不到 `dbx.db`**
+
+将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录，而不是数据库文件路径。
+
+**提示 DBX 未运行**
+
+普通数据库查询不一定需要启动 DBX；只有桌面 UI 工具和仍需 bridge 的连接需要 DBX 运行。
+
+**Agent 数据库无法启动**
+
+通过 DBX Driver Manager 安装或更新对应数据库 Agent、JDBC Driver 和 JRE。
+
+**出现 `better-sqlite3` 或 Node ABI 错误**
+
+Rust MCP 不依赖 `better-sqlite3`。请升级 MCP；如果错误来自 `@dbx-app/cli`，则属于当前仍为 TypeScript 的独立 CLI 包。
+
+### 开发和测试
+
+```bash
+cargo run -p dbx-mcp --no-default-features
+cargo test -p dbx-mcp --no-default-features
+pnpm --filter @dbx-app/mcp-server test
+cargo build --release -p dbx-mcp --no-default-features
+```
+
+### DBX CLI
+
+`@dbx-app/cli` 是独立的终端包，目前仍使用 TypeScript/Node.js：
+
+```bash
+npm install -g @dbx-app/cli
+dbx connections list --json
+```
+
+详见 [CLI README](../cli/README.md)。
+
+### License
+
+Apache-2.0

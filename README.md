@@ -1,38 +1,75 @@
 # dbx-mcp-patches
 
-Local enhancements for [DBX](https://github.com/t8y2/dbx) MCP Server, CLI, and node-core.
+Local enhancements for [DBX](https://github.com/t8y2/dbx) **Rust** MCP Server and CLI.
 
-**Upstream:** [t8y2/dbx](https://github.com/t8y2/dbx) — this repo contains **only the patched packages**, not the full DBX monorepo.
+**Upstream:** [t8y2/dbx](https://github.com/t8y2/dbx) — this repo contains **patched crate sources + thin npm launchers**, not the full DBX monorepo (`dbx-core` stays upstream).
 
-## Quick links
+## Upstream change (2026-07-19 / v0.5.61+)
 
-- [PATCHES.md](./PATCHES.md) — what changed vs upstream
-- [update_log.md](./update_log.md) — detailed change log (2026-07-16)
+| Item | Value |
+|------|-------|
+| Baseline commit | `fe636d2d` (origin/main @ 2026-07-20) |
+| MCP crate | `crates/dbx-mcp` **0.4.38** |
+| CLI crate | `crates/dbx-cli` **0.4.38** |
+| npm | `@dbx-app/mcp-server` / `@dbx-app/cli` **0.4.38** = thin Node launcher → platform Rust binary |
+| Deprecated | Node `@dbx-app/node-core` MCP implementation (archived under `legacy-node-packages/`) |
 
-## Packages
+Release note highlight: **原生 MCP Server / 原生 DBX CLI** — tools run in Rust; npm only resolves `@dbx-app/mcp-<platform>` / `cli-<platform>` binaries.
 
-| Package | Path |
-|---------|------|
-| MCP Server | `packages/mcp-server` |
-| CLI | `packages/cli` |
-| node-core | `packages/node-core` |
+## Strategy
 
-## Features (2026-07-16)
+**A + thin launcher (B):** re-implement patch features in Rust (`crates/dbx-mcp`, `crates/dbx-cli`). Keep npm `packages/*/bin/*.js` as upstream launchers (no Node tool logic).
 
-- Proxy: inline params + saved tunnel profiles (`dbx_list_proxies`)
-- Stats: `dbx_get_database_stats` / `dbx stats` (catalog, rows desc)
-- Report: `dbx_get_database_report` / `dbx report`
-- Numeric list IDs (`#` column, use `1` / `#2` for connections and proxies)
-- CLI connection index ranges (`1-15`, `1..15`, batch up to 15 connections)
-- Streaming output (CLI stderr / MCP tool responses / Web API client stages)
+## Layout
 
-## Install into DBX monorepo
+| Path | Role |
+|------|------|
+| `crates/dbx-mcp` | Patched Rust MCP (tools + stats/report/proxy/list-index) |
+| `crates/dbx-cli` | Patched Rust CLI (`stats` / `report` / `proxies list`) |
+| `packages/mcp-server` | Upstream npm launcher (spawn Rust binary) |
+| `packages/cli` | Upstream npm launcher |
+| `legacy-node-packages/` | Previous Node 0.4.31 patches (reference only) |
+| `UPSTREAM_BASELINE.txt` | Exact upstream SHA |
 
-Copy or merge these `packages/*` directories into your [t8y2/dbx](https://github.com/t8y2/dbx) checkout, then:
+## Features ported to Rust
+
+- Proxy: inline params + saved tunnel profiles on `dbx_add_connection`
+- `dbx_list_proxies` / `dbx proxies list`
+- `dbx_get_database_stats` / `dbx stats` (catalog `TABLE_ROWS` / estimates, no `COUNT(*)`)
+- `dbx_get_database_report` / `dbx report` (tables + comments + indexes; report saves to `{cwd}/reports/`)
+- Numeric list IDs + ranges (`1`, `#2`, `1-15`)
+- `skip_unsupported` for batch stats/report
+- One-shot `proxy_profile_*` override on stats/report
+
+See [PATCHES.md](./PATCHES.md) and [update_log.md](./update_log.md) for the gap matrix.
+
+## Build / use (you must build — agents do not compile)
+
+Merge these crates into a full [t8y2/dbx](https://github.com/t8y2/dbx) checkout (needs `crates/dbx-core`):
 
 ```bash
-pnpm install
-pnpm build:packages
+# from full dbx monorepo
+cp -r /path/to/dbx-mcp-patches/crates/dbx-mcp ./crates/
+cp -r /path/to/dbx-mcp-patches/crates/dbx-cli ./crates/
+
+cargo build -p dbx-mcp --release
+cargo build -p dbx-cli --release --no-default-features
+```
+
+Point Cursor / npm launcher at the built binary:
+
+```bash
+# Windows example
+set DBX_MCP_BINARY=C:\path\to\dbx\target\release\dbx-mcp.exe
+# or copy over the platform package bin:
+#   node_modules\@dbx-app\mcp-win32-x64\bin\dbx-mcp.exe
+```
+
+Install npm launcher (optional, for `npx` / `dbx-mcp-server`):
+
+```bash
+npm install -g @dbx-app/mcp-server@0.4.38
+# then replace optionalDependency binary with your release build
 ```
 
 ## License

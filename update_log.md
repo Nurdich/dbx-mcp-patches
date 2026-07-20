@@ -1,5 +1,66 @@
-# Update Log
+﻿# Update Log
 
+## 2026-07-21 — 迁移到上游 Rust MCP / CLI（packages 0.4.38）
+
+### 上游变化
+
+| 项 | 值 |
+|----|-----|
+| 仓库 | https://github.com/t8y2/dbx |
+| 基线 | `fe636d2d`（main，约 v0.5.62 / packages 0.4.38） |
+| MCP | `crates/dbx-mcp` 原生二进制；npm `@dbx-app/mcp-server` 仅为 launcher |
+| CLI | `crates/dbx-cli` 原生二进制；npm `@dbx-app/cli` 仅为 launcher |
+| 说明 | v0.5.61 起「原生 MCP Server / 原生 DBX CLI」；不再依赖 Node `better-sqlite3` / node-core 执行工具 |
+
+### 策略
+
+**以 Rust 为 MCP/CLI 真源（策略 A）+ 保留 npm 薄封装（策略 B）**：在 `crates/dbx-mcp` / `crates/dbx-cli` 移植本地能力；旧 Node 补丁移至 `legacy-node-packages/` 仅作对照。
+
+### 已移植（Rust）
+
+- `dbx_list_proxies` / `dbx proxies list`
+- `dbx_get_database_stats` / `dbx stats`（目录估算行数，无 COUNT(*)）
+- `dbx_get_database_report` / `dbx report`（表/注释/索引；默认写入 `{cwd}/reports/`）
+- 连接数字序号与范围（`1` / `#2` / `1-15`）
+- `dbx_add_connection` 内联代理 + `proxy_profile_*`
+- stats/report 一次性 `proxy_profile_*` 覆盖与 `skip_unsupported` 批量跳过
+- 列表输出 `#` 列
+
+### 待移植 / 缺口
+
+| 能力 | 状态 |
+|------|------|
+| query 工具的 proxy_profile 覆盖与范围批量 | 待办 |
+| CLI `--parallel`、短参数全量、`connections add/remove`、`dbx redis` | 待办 |
+| 流式连接进度输出 | 待办 |
+| 与上游 `dbx-core` 更深度复用表统计 API | 可选优化 |
+
+### 仓库结构
+
+```
+crates/dbx-mcp/     # 补丁后的 Rust MCP
+crates/dbx-cli/     # 补丁后的 Rust CLI
+packages/mcp-server # 上游 npm launcher
+packages/cli
+legacy-node-packages/  # 原 Node 0.4.31 补丁归档
+```
+
+### 构建说明（需本地自行编译，代理未执行 cargo）
+
+```bash
+# 在完整 t8y2/dbx 仓库中覆盖 crates 后：
+cargo build -p dbx-mcp --release
+cargo build -p dbx-cli --release --no-default-features
+# 将 target/release/dbx-mcp(.exe) 替换到
+#   node_modules/@dbx-app/mcp-win32-x64/bin/
+# 或设置 DBX_MCP_BINARY
+```
+
+### 安装路径
+
+当前 `C:\usr\local\node_modules\@dbx-app\mcp-server` 仍为旧 Node 0.4.31 源码树；升级到 0.4.38+ launcher 后，需用本仓库编译出的 Rust 二进制替换平台包内 `bin/dbx-mcp.exe`。
+
+---
 ## 2026-07-18 — CLI ↔ MCP 能力对齐（parity）
 
 ### 目标
@@ -1120,3 +1181,4 @@ dbx proxies list
 ```
 
 修复后 CLI 与 MCP 的 node-core dist 哈希完全一致（各 32 个文件）。
+
