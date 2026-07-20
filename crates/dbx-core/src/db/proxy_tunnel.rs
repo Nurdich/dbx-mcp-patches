@@ -125,6 +125,28 @@ async fn connect_via_proxy(proxy: &ProxyEndpoint, remote: &RemoteEndpoint) -> Re
     }
 }
 
+/// Eagerly verify that a proxy accepts connections and can CONNECT/SOCKS to `remote_host:remote_port`.
+pub async fn verify_proxy_connect(
+    proxy_type: ProxyType,
+    proxy_host: &str,
+    proxy_port: u16,
+    proxy_username: &str,
+    proxy_password: &str,
+    remote_host: &str,
+    remote_port: u16,
+) -> Result<(), String> {
+    let proxy = ProxyEndpoint {
+        proxy_type,
+        host: proxy_host.to_string(),
+        port: proxy_port,
+        username: proxy_username.to_string(),
+        password: proxy_password.to_string(),
+    };
+    let remote = RemoteEndpoint { host: remote_host.to_string(), port: remote_port };
+    let _stream = connect_via_proxy(&proxy, &remote).await?;
+    Ok(())
+}
+
 async fn http_connect(
     mut stream: TcpStream,
     proxy: &ProxyEndpoint,

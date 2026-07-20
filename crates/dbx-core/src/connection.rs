@@ -1681,7 +1681,14 @@ impl AppState {
         &self,
         config: &ConnectionConfig,
     ) -> Result<Vec<TransportLayerConfig>, String> {
-        let layers = config.effective_transport_layers();
+        self.resolve_transport_layer_list(&config.effective_transport_layers()).await
+    }
+
+    async fn resolve_transport_layer_list(
+        &self,
+        layers: &[TransportLayerConfig],
+    ) -> Result<Vec<TransportLayerConfig>, String> {
+        let layers: Vec<TransportLayerConfig> = layers.iter().filter(|layer| layer.enabled()).cloned().collect();
         if layers.iter().all(|layer| layer.profile_id().is_empty()) {
             return Ok(layers);
         }
@@ -1718,6 +1725,97 @@ impl AppState {
                 Ok(layer.resolved_from_profile(profile))
             })
             .collect()
+    }
+
+    /// Build ordered transport-layer attempts.
+    ///
+    /// Failover group convention (NOT multi-hop chaining): multiple `Proxy`
+    /// layers where the first is enabled and every following proxy is disabled.
+    /// Each attempt uses non-proxy layers plus exactly one of those proxies.
+    /// Old clients that only honor enabled layers keep using the first proxy.
+    async fn transport_layer_failover_attempts(
+        &self,
+        config: &ConnectionConfig,
+    ) -> Result<Vec<(String, Vec<TransportLayerConfig>)>, String> {
+        let proxy_refs: Vec<&crate::models::connection::ProxyTunnelConfig> = config
+            .transport_layers
+            .iter()
+            .filter_map(|layer| match layer {
+                TransportLayerConfig::Proxy(proxy) => Some(proxy),
+                _ => None,
+            })
+            .collect();
+
+        let is_failover_group =
+            proxy_refs.len() >= 2 && proxy_refs.iter().skip(1).all(|proxy| !proxy.enabled);
+
+        if !is_failover_group {
+            let resolved = self.resolved_transport_layers(config).await?;
+            if resolved.is_empty() {
+                return Ok(Vec::new());
+            }
+            let label = proxy_attempt_label(resolved.as_slice(), 1);
+            return Ok(vec![(label, resolved)]);
+        }
+
+        let non_proxy: Vec<TransportLayerConfig> = config
+            .transport_layers
+            .iter()
+            .filter(|layer| !matches!(layer, TransportLayerConfig::Proxy(_)))
+            .cloned()
+            .collect();
+
+        let mut attempts = Vec::with_capacity(proxy_refs.len());
+        for (index, proxy) in proxy_refs.into_iter().enumerate() {
+            let mut selected = proxy.clone();
+            selected.enabled = true;
+            let mut layers = non_proxy.clone();
+            layers.push(TransportLayerConfig::Proxy(selected));
+            let resolved = self.resolve_transport_layer_list(&layers).await?;
+            let label = proxy_attempt_label(resolved.as_slice(), index + 1);
+            attempts.push((label, resolved));
+        }
+        Ok(attempts)
+    }
+
+    async fn start_transport_attempt(
+        &self,
+        connection_id: &str,
+        layers: &[TransportLayerConfig],
+        remote_host: &str,
+        remote_port: u16,
+    ) -> Result<u16, String> {
+        let local_port = db::transport_layer_tunnel::start_transport_layers(
+            connection_id,
+            layers,
+            remote_host,
+            remote_port,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await?;
+
+        // Eager proxy check for proxy-only stacks (SOCKS/HTTP connect is otherwise lazy).
+        let proxy_only =
+            !layers.is_empty() && layers.iter().all(|layer| matches!(layer, TransportLayerConfig::Proxy(_)));
+        if proxy_only {
+            if let Some(TransportLayerConfig::Proxy(proxy)) = layers.last() {
+                db::proxy_tunnel::verify_proxy_connect(
+                    proxy.proxy_type,
+                    &proxy.host,
+                    if proxy.port == 0 { 1080 } else { proxy.port },
+                    &proxy.username,
+                    &proxy.password,
+                    remote_host,
+                    remote_port,
+                )
+                .await
+                .map_err(|err| format!("Proxy verification failed: {err}"))?;
+            }
+        }
+
+        Ok(local_port)
     }
 
     /// Tests a shared tunnel profile in isolation (no downstream database), for
@@ -1771,24 +1869,44 @@ impl AppState {
         connection_id: &str,
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
-        let transport_layers = self.resolved_transport_layers(config).await?;
-        if transport_layers.is_empty() {
+        let attempts = self.transport_layer_failover_attempts(config).await?;
+        if attempts.is_empty() {
             return Ok((config.host.clone(), config.port));
         }
 
         let (remote_host, remote_port) = connection_remote_endpoint(config);
-        let local_port = db::transport_layer_tunnel::start_transport_layers(
-            connection_id,
-            &transport_layers,
-            &remote_host,
-            remote_port,
-            &self.tunnels,
-            &self.proxy_tunnels,
-            &self.http_tunnels,
-        )
-        .await?;
+        let total = attempts.len();
+        let mut last_error = None;
 
-        Ok(("127.0.0.1".to_string(), local_port))
+        for (index, (label, layers)) in attempts.into_iter().enumerate() {
+            let ordinal = index + 1;
+            if total > 1 {
+                crate::connect_progress::emit(format!("Trying proxy profile #{ordinal} ({label})..."));
+            }
+            if index > 0 {
+                self.reset_connection_transport_for_config(connection_id, config).await;
+            }
+            match self
+                .start_transport_attempt(connection_id, &layers, &remote_host, remote_port)
+                .await
+            {
+                Ok(local_port) => {
+                    if total > 1 {
+                        crate::connect_progress::emit(format!("Connected via proxy #{ordinal}"));
+                    }
+                    return Ok(("127.0.0.1".to_string(), local_port));
+                }
+                Err(err) => {
+                    if total > 1 {
+                        crate::connect_progress::emit(format!("Proxy #{ordinal} failed: {err}"));
+                    }
+                    self.reset_connection_transport_for_config(connection_id, config).await;
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| "All proxy failover candidates failed".to_string()))
     }
 
     pub async fn connect_redis_sentinel(
@@ -2729,9 +2847,12 @@ impl AppState {
     pub async fn reset_connection_transport_for_config(&self, connection_id: &str, config: &ConnectionConfig) {
         let existing_layer_count = {
             let configs = self.configs.read().await;
-            configs.get(connection_id).map(|config| config.effective_transport_layers().len()).unwrap_or(0)
+            configs
+                .get(connection_id)
+                .map(|config| config.transport_layers.len())
+                .unwrap_or(0)
         };
-        let layer_count = existing_layer_count.max(config.effective_transport_layers().len());
+        let layer_count = existing_layer_count.max(config.transport_layers.len()).max(1);
         self.reset_connection_transport_layers(connection_id, layer_count).await;
     }
 
@@ -3178,6 +3299,23 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
 fn is_agent_validate_connection_unsupported(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
     lower.contains("validate_connection") && (lower.contains("unknown method") || lower.contains("method not found"))
+}
+
+fn proxy_attempt_label(layers: &[TransportLayerConfig], ordinal: usize) -> String {
+    let Some(TransportLayerConfig::Proxy(proxy)) = layers.iter().rev().find(|layer| matches!(layer, TransportLayerConfig::Proxy(_))) else {
+        return format!("attempt-{ordinal}");
+    };
+    if !proxy.name.is_empty() {
+        proxy.name.clone()
+    } else if !proxy.profile_id.is_empty() {
+        proxy.profile_id.clone()
+    } else if !proxy.host.is_empty() {
+        format!("{}:{}", proxy.host, if proxy.port == 0 { 1080 } else { proxy.port })
+    } else if !proxy.id.is_empty() {
+        proxy.id.clone()
+    } else {
+        format!("attempt-{ordinal}")
+    }
 }
 
 fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {

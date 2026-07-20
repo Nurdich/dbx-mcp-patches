@@ -16,6 +16,7 @@ pub mod changelog;
 pub mod cloud_sync;
 pub mod connection;
 pub mod connection_secrets;
+pub mod connect_progress;
 pub mod csv_export;
 pub mod data_compare;
 pub mod data_grid_sql;

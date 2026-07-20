@@ -29,9 +29,9 @@ pub struct ListConnectionsRequest {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ConnectionSelector {
-    #[schemars(description = "Unique ID of the DBX connection")]
+    #[schemars(description = "Unique ID of the DBX connection, or list index (#) / range (1-15)")]
     pub connection_id: Option<String>,
-    #[schemars(description = "Name of the DBX connection")]
+    #[schemars(description = "Name of the DBX connection, or list index (#) / range (1-15)")]
     pub connection_name: Option<String>,
 }
 
@@ -65,6 +65,16 @@ pub struct ExecuteQueryRequest {
     pub database: Option<String>,
     #[schemars(description = "SQL query to execute")]
     pub sql: String,
+    #[schemars(description = "Query timeout in milliseconds")]
+    pub timeout_ms: Option<u64>,
+    #[schemars(description = "One-shot proxy profile ID, list index (#), comma list, or range for failover")]
+    pub proxy_profile_id: Option<String>,
+    #[schemars(description = "One-shot proxy profile name or list index (#)")]
+    pub proxy_profile_name: Option<String>,
+    #[schemars(description = "One-shot ordered failover proxy profile IDs / indexes")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "One-shot ordered failover proxy profile names")]
+    pub proxy_profile_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -81,7 +91,70 @@ pub struct AddConnectionRequest {
     #[serde(default)]
     pub ssl: bool,
     pub driver_profile: Option<String>,
+    #[schemars(description = "ID of a saved proxy tunnel profile, list index (#), comma list (1,2,3), or range (#1-#3). Multiple values form a failover group (try next on failure), not a multi-hop chain.")]
+    pub proxy_profile_id: Option<String>,
+    #[schemars(description = "Name of a saved proxy tunnel profile, or list index (#) from dbx_list_proxies")]
+    pub proxy_profile_name: Option<String>,
+    #[schemars(description = "Ordered failover list of proxy profile IDs / list indexes. Same as repeating proxy_profile_id; first success wins.")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "Ordered failover list of proxy profile names. Do not mix with proxy_profile_id(s).")]
+    pub proxy_profile_names: Option<Vec<String>>,
+    #[schemars(description = "Enable an inline SOCKS5/HTTP proxy on this connection")]
+    pub proxy_enabled: Option<bool>,
+    #[schemars(description = "Inline proxy host")]
+    pub proxy_host: Option<String>,
+    #[schemars(description = "Inline proxy port")]
+    pub proxy_port: Option<u16>,
+    #[schemars(description = "Inline proxy username")]
+    pub proxy_username: Option<String>,
+    #[schemars(description = "Inline proxy password")]
+    pub proxy_password: Option<String>,
+    #[schemars(description = "Inline proxy type: socks5 or http")]
+    pub proxy_type: Option<String>,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseStatsRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    #[schemars(description = "Query timeout in milliseconds")]
+    pub timeout_ms: Option<u64>,
+    #[schemars(description = "Skip unsupported database types in batch mode (default true)")]
+    pub skip_unsupported: Option<bool>,
+    #[schemars(description = "One-shot proxy profile ID, list index (#), comma list, or range for failover")]
+    pub proxy_profile_id: Option<String>,
+    #[schemars(description = "One-shot proxy profile name or list index (#)")]
+    pub proxy_profile_name: Option<String>,
+    #[schemars(description = "One-shot ordered failover proxy profile IDs / indexes")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "One-shot ordered failover proxy profile names")]
+    pub proxy_profile_names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DatabaseReportRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    #[schemars(description = "Query timeout in milliseconds")]
+    pub timeout_ms: Option<u64>,
+    #[schemars(description = "Skip unsupported database types in batch mode (default true)")]
+    pub skip_unsupported: Option<bool>,
+    #[schemars(description = "One-shot proxy profile ID, list index (#), comma list, or range for failover")]
+    pub proxy_profile_id: Option<String>,
+    #[schemars(description = "One-shot proxy profile name or list index (#)")]
+    pub proxy_profile_name: Option<String>,
+    #[schemars(description = "One-shot ordered failover proxy profile IDs / indexes")]
+    pub proxy_profile_ids: Option<Vec<String>>,
+    #[schemars(description = "One-shot ordered failover proxy profile names")]
+    pub proxy_profile_names: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListProxiesRequest {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RemoveConnectionRequest {
@@ -218,103 +291,143 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_list_tables", description = "List tables and views for a database connection")]
+    #[tool(
+        name = "dbx_list_tables",
+        description = "List tables and views for a database connection. Accepts connection ranges (e.g. 1-15); runs sequentially."
+    )]
     async fn list_tables(&self, Parameters(request): Parameters<ListTablesRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
+        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+            Ok(configs) => configs,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved.connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        match self.backend.list_tables(&resolved.connection, &database, &request.schema.unwrap_or_default()).await {
-            Ok(tables) if tables.is_empty() => text("No tables found."),
-            Ok(tables) => text(
-                tables
-                    .into_iter()
-                    .map(|table| {
-                        let comment = table
-                            .comment
-                            .filter(|comment| !comment.is_empty())
-                            .map(|comment| format!(" -- {comment}"))
-                            .unwrap_or_default();
-                        format!("- {} ({}){}", table.name, table.table_type, comment)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            Err(error) => tool_error("TABLE_LIST_ERROR", error),
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            let database = match self.resolve_database(request.database.clone(), &connection) {
+                Ok(database) => database,
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                    continue;
+                }
+            };
+            match self
+                .backend
+                .list_tables(&connection, &database, &request.schema.clone().unwrap_or_default())
+                .await
+            {
+                Ok(tables) if tables.is_empty() => parts.push(format!("{heading}No tables found.")),
+                Ok(tables) => {
+                    let body = tables
+                        .into_iter()
+                        .map(|table| {
+                            let comment = table
+                                .comment
+                                .filter(|comment| !comment.is_empty())
+                                .map(|comment| format!(" -- {comment}"))
+                                .unwrap_or_default();
+                            format!("- {} ({}){}", table.name, table.table_type, comment)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    parts.push(format!("{heading}{body}"));
+                }
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}Error [TABLE_LIST_ERROR]: {error}"));
+                }
+            }
         }
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
 
-    #[tool(name = "dbx_describe_table", description = "Get column definitions for a table")]
+
+    #[tool(
+        name = "dbx_describe_table",
+        description = "Get column definitions for a table. Accepts connection ranges (e.g. 1-15); runs sequentially."
+    )]
     async fn describe_table(&self, Parameters(request): Parameters<DescribeTableRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
+        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+            Ok(configs) => configs,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved.connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        match self
-            .backend
-            .get_columns(&resolved.connection, &database, &request.schema.unwrap_or_default(), &request.table)
-            .await
-        {
-            Ok(columns) if columns.is_empty() => text("No columns found."),
-            Ok(columns) => text(format_columns(&columns)),
-            Err(error) => tool_error("TABLE_DESCRIPTION_ERROR", error),
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            let database = match self.resolve_database(request.database.clone(), &connection) {
+                Ok(database) => database,
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                    continue;
+                }
+            };
+            match self
+                .backend
+                .get_columns(&connection, &database, &request.schema.clone().unwrap_or_default(), &request.table)
+                .await
+            {
+                Ok(columns) if columns.is_empty() => parts.push(format!("{heading}No columns found.")),
+                Ok(columns) => parts.push(format!("{heading}{}", format_columns(&columns))),
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}Error [TABLE_DESCRIPTION_ERROR]: {error}"));
+                }
+            }
         }
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
+
 
     #[tool(
         name = "dbx_execute_query",
-        description = "Execute a SQL query on a database connection (max 100 rows returned)"
+        description = "Execute a SQL query on a database connection (max 100 rows returned). Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
-            Err(error) => return error,
-        };
-        let connection = &resolved.connection;
-        if connection.db_type == dbx_core::models::connection::DatabaseType::Redis {
-            return tool_error(
-                "REDIS_COMMAND_REQUIRED",
-                "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
-            );
-        }
-        let database = match self.resolve_database(request.database, connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        if connection.db_type == DatabaseType::MongoDb {
-            let command = match validate_mongo_command(connection, &resolved.policy, &database, &request.sql) {
-                Ok(command) => command,
-                Err(error) => return error,
-            };
-            return match self.backend.execute_mongo_command(connection, &database, &command).await {
-                Ok(result) => text(format_query_result(&result, 100)),
-                Err(error) => backend_tool_error("QUERY_ERROR", error),
-            };
-        }
-        let permissions = match validate_sql_policy(connection, &resolved.policy, &database, &request.sql) {
-            Ok(permissions) => permissions,
-            Err(error) => return error,
-        };
-        let result = self
-            .backend
-            .execute_agent_tool(
-                connection,
-                &database,
-                "execute_query",
-                json!({ "sql": request.sql, "limit": 100 }),
-                permissions,
+        let configs = match self
+            .resolve_batch_configs(
+                &request.selector,
+                crate::tunnel_profiles::ProxyProfileRefArgs {
+                    proxy_profile_id: request.proxy_profile_id.clone(),
+                    proxy_profile_name: request.proxy_profile_name.clone(),
+                    proxy_profile_ids: request.proxy_profile_ids.clone(),
+                    proxy_profile_names: request.proxy_profile_names.clone(),
+                },
             )
-            .await;
-        agent_result(result)
+            .await
+        {
+            Ok(configs) => configs,
+            Err(error) => return error,
+        };
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            match self.execute_query_on_connection(&connection, &request).await {
+                Ok(body) => parts.push(format!("{heading}{body}")),
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                }
+            }
+        }
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
+
 
     #[tool(name = "dbx_execute_redis_command", description = "Execute a Redis command on a Redis connection")]
     async fn execute_redis_command(
@@ -385,50 +498,34 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_get_schema_context", description = "Get compact table and column context for writing SQL")]
+    #[tool(
+        name = "dbx_get_schema_context",
+        description = "Get compact table and column context for writing SQL. Accepts connection ranges (e.g. 1-15); runs sequentially."
+    )]
     async fn get_schema_context(&self, Parameters(request): Parameters<SchemaContextRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
+        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+            Ok(configs) => configs,
             Err(error) => return error,
         };
-        let connection = &resolved.connection;
-        let database = match self.resolve_database(request.database, connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        let schema = request.schema.unwrap_or_default();
-        let max_tables = request.max_tables.unwrap_or(8).clamp(1, 20);
-        let available = match self.backend.list_tables(connection, &database, &schema).await {
-            Ok(tables) => tables,
-            Err(error) => return tool_error("SCHEMA_CONTEXT_ERROR", error),
-        };
-        let requested = request
-            .tables
-            .unwrap_or_default()
-            .into_iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect::<std::collections::HashSet<_>>();
-        let mut selected = if requested.is_empty() {
-            available.iter().collect::<Vec<_>>()
-        } else {
-            available.iter().filter(|table| requested.contains(&table.name.to_ascii_lowercase())).collect::<Vec<_>>()
-        };
-        let truncated = selected.len() > max_tables || (requested.is_empty() && available.len() > max_tables);
-        selected.truncate(max_tables);
-        if selected.is_empty() {
-            return text("No matching tables found.");
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            match self.schema_context_on_connection(&connection, &request).await {
+                Ok(body) => parts.push(format!("{heading}{body}")),
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                }
+            }
         }
-        let mut tables = Vec::with_capacity(selected.len());
-        for table in selected {
-            // Keep metadata calls sequential because some embedded drivers expose a single physical connection.
-            let columns = match self.backend.get_columns(connection, &database, &schema, &table.name).await {
-                Ok(columns) => columns,
-                Err(error) => return tool_error("SCHEMA_CONTEXT_ERROR", error),
-            };
-            tables.push((table.clone(), columns));
-        }
-        text(format_schema_context(&connection.name, &database, &schema, &tables, truncated))
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
+
 
     #[tool(name = "dbx_add_connection", description = "Add a new database connection to DBX")]
     async fn add_connection(&self, Parameters(request): Parameters<AddConnectionRequest>) -> CallToolResult {
@@ -471,6 +568,61 @@ impl DbxMcpServer {
         ) {
             Ok(config) => config,
             Err(error) => return tool_error("INVALID_CONNECTION", error),
+        };
+        let profile_ref = crate::tunnel_profiles::has_proxy_profile_ref(&crate::tunnel_profiles::ProxyProfileRefArgs {
+            proxy_profile_id: request.proxy_profile_id.clone(),
+            proxy_profile_name: request.proxy_profile_name.clone(),
+            proxy_profile_ids: request.proxy_profile_ids.clone(),
+            proxy_profile_names: request.proxy_profile_names.clone(),
+        });
+        let inline = crate::tunnel_profiles::has_inline_proxy_params(&crate::tunnel_profiles::InlineProxyArgs {
+            proxy_enabled: request.proxy_enabled,
+            proxy_host: request.proxy_host.clone(),
+            proxy_port: request.proxy_port,
+            proxy_username: request.proxy_username.clone(),
+            proxy_password: request.proxy_password.clone(),
+            proxy_type: request.proxy_type.clone(),
+        });
+        if profile_ref && inline {
+            return tool_error(
+                "PROXY_CONFLICT",
+                "Cannot mix saved proxy reference (proxy_profile_id/proxy_profile_name) with inline proxy settings.",
+            );
+        }
+        let config = if profile_ref {
+            match crate::resolve::apply_proxy_override_with_args(
+                self.backend.as_ref(),
+                config,
+                crate::tunnel_profiles::ProxyProfileRefArgs {
+                    proxy_profile_id: request.proxy_profile_id,
+                    proxy_profile_name: request.proxy_profile_name,
+                    proxy_profile_ids: request.proxy_profile_ids,
+                    proxy_profile_names: request.proxy_profile_names,
+                },
+            )
+            .await
+            {
+                Ok(config) => config,
+                Err(error) => return error,
+            }
+        } else if inline {
+            match crate::tunnel_profiles::inline_proxy_layer(&crate::tunnel_profiles::InlineProxyArgs {
+                proxy_enabled: request.proxy_enabled,
+                proxy_host: request.proxy_host,
+                proxy_port: request.proxy_port,
+                proxy_username: request.proxy_username,
+                proxy_password: request.proxy_password,
+                proxy_type: request.proxy_type,
+            }) {
+                Ok(layer) => {
+                    let mut config = config;
+                    config.transport_layers.push(layer);
+                    config
+                }
+                Err(error) => return tool_error("INVALID_PROXY", error),
+            }
+        } else {
+            config
         };
         match self.backend.add_connection_for_mcp(config).await {
             Ok(config) => text(format!("Connection \"{}\" added (id: {}).", config.name, config.id)),
@@ -596,12 +748,66 @@ impl DbxMcpServer {
             .await
         {
             Ok(()) => text("Query sent to DBX"),
+
             Err(error) => backend_tool_error("DBX_NOT_RUNNING", error),
         }
+    }
+
+    #[tool(name = "dbx_list_proxies", description = "List saved proxy tunnel profiles from DBX Settings > Tunnels")]
+    async fn list_proxies(&self, Parameters(ListProxiesRequest {}): Parameters<ListProxiesRequest>) -> CallToolResult {
+        match self.backend.load_tunnel_profiles().await {
+            Ok(profiles) => text(crate::tunnel_profiles::format_proxy_list(&profiles)),
+            Err(error) => tool_error("PROXY_LOAD_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_get_database_stats",
+        description = "Catalog-based table/database stats (TABLE_ROWS / n_live_tup estimates; no COUNT(*)). Supports connection list index (#) and ranges (1-15)."
+    )]
+    async fn get_database_stats(&self, Parameters(request): Parameters<DatabaseStatsRequest>) -> CallToolResult {
+        self.run_stats_or_report(
+            request.selector,
+            request.database,
+            request.schema,
+            request.timeout_ms,
+            request.skip_unsupported,
+            crate::tunnel_profiles::ProxyProfileRefArgs {
+                proxy_profile_id: request.proxy_profile_id,
+                proxy_profile_name: request.proxy_profile_name,
+                proxy_profile_ids: request.proxy_profile_ids,
+                proxy_profile_names: request.proxy_profile_names,
+            },
+            false,
+        )
+        .await
+    }
+
+    #[tool(
+        name = "dbx_get_database_report",
+        description = "Full database report: summary, tables sorted by rows desc, column comments, indexes. Catalog estimates only (no COUNT(*))."
+    )]
+    async fn get_database_report(&self, Parameters(request): Parameters<DatabaseReportRequest>) -> CallToolResult {
+        self.run_stats_or_report(
+            request.selector,
+            request.database,
+            request.schema,
+            request.timeout_ms,
+            request.skip_unsupported,
+            crate::tunnel_profiles::ProxyProfileRefArgs {
+                proxy_profile_id: request.proxy_profile_id,
+                proxy_profile_name: request.proxy_profile_name,
+                proxy_profile_ids: request.proxy_profile_ids,
+                proxy_profile_names: request.proxy_profile_names,
+            },
+            true,
+        )
+        .await
     }
 }
 
 impl DbxMcpServer {
+
     async fn load_scoped_connections(&self) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, String> {
         let policy = self.backend.load_mcp_global_policy().await?;
         let connections = self.backend.load_connections().await?;
@@ -614,6 +820,156 @@ impl DbxMcpServer {
 
     async fn load_policy(&self) -> Result<McpGlobalPolicy, CallToolResult> {
         self.backend.load_mcp_global_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
+    }
+
+    async fn run_stats_or_report(
+        &self,
+        selector: ConnectionSelector,
+        database: Option<String>,
+        schema: Option<String>,
+        timeout_ms: Option<u64>,
+        skip_unsupported: Option<bool>,
+        proxy_args: crate::tunnel_profiles::ProxyProfileRefArgs,
+        report: bool,
+    ) -> CallToolResult {
+        let skip = skip_unsupported.unwrap_or(true);
+        let configs = match self.resolve_batch_configs(&selector, proxy_args).await {
+            Ok(configs) => configs,
+            Err(error) => return error,
+        };
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let mut parts: Vec<String> = Vec::new();
+        let mut failures = 0usize;
+        let mut skipped = 0usize;
+        let total = configs.len();
+        for (idx, config) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&config);
+            let options = crate::database_stats::DatabaseStatsOptions {
+                database: database.clone(),
+                schema: schema.clone(),
+                redis_db: None,
+                timeout_ms,
+            };
+            let heading = crate::batch::batch_heading(&config, idx + 1, total);
+            let result = if report {
+                crate::database_report::fetch_database_report(self.backend.as_ref(), &config, options).await
+            } else {
+                crate::database_stats::fetch_database_stats(self.backend.as_ref(), &config, options).await
+            };
+            match result {
+                Ok(body) => parts.push(format!("{heading}{body}")),
+                Err(error) if skip && error.code == "UNSUPPORTED_DB_TYPE" => {
+                    skipped += 1;
+                    parts.push(format!("{heading}Skipped [{}]: {}", error.code, error.message));
+                }
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}Error [{}]: {}", error.code, error.message));
+                }
+            }
+        }
+        finish_batch_parts(parts, total, skipped, failures, &progress)
+    }
+
+
+
+    async fn resolve_batch_configs(
+        &self,
+        selector: &ConnectionSelector,
+        proxy_args: crate::tunnel_profiles::ProxyProfileRefArgs,
+    ) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, CallToolResult> {
+        let configs = crate::resolve::resolve_connections(
+            self.backend.as_ref(),
+            &self.scope,
+            selector.connection_id.as_deref(),
+            selector.connection_name.as_deref(),
+        )
+        .await?;
+        let mut out = Vec::with_capacity(configs.len());
+        for config in configs {
+            out.push(
+                crate::resolve::apply_proxy_override_with_args(self.backend.as_ref(), config, proxy_args.clone())
+                    .await?,
+            );
+        }
+        Ok(out)
+    }
+
+    async fn execute_query_on_connection(
+        &self,
+        connection: &dbx_core::models::connection::ConnectionConfig,
+        request: &ExecuteQueryRequest,
+    ) -> Result<String, CallToolResult> {
+        let policy = self.load_policy().await?;
+        if connection.db_type == DatabaseType::Redis {
+            return Err(tool_error(
+                "REDIS_COMMAND_REQUIRED",
+                "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
+            ));
+        }
+        let database = self.resolve_database(request.database.clone(), connection)?;
+        crate::progress::log_query_sql(&request.sql);
+        if connection.db_type == DatabaseType::MongoDb {
+            let command = validate_mongo_command(connection, &policy, &database, &request.sql)?;
+            let result = self
+                .backend
+                .execute_mongo_command(connection, &database, &command)
+                .await
+                .map_err(|error| backend_tool_error("QUERY_ERROR", error))?;
+            return Ok(format_query_result(&result, 100));
+        }
+        let _permissions = validate_sql_policy(connection, &policy, &database, &request.sql)?;
+        // Same timeout conversion as stats/report: ms → ceil seconds for QueryExecutionOptions.
+        let timeout_secs = request.timeout_ms.map(|ms| (ms + 999) / 1000);
+        let result = self
+            .backend
+            .execute_query(connection, &database, &request.sql, Some(100), timeout_secs)
+            .await
+            .map_err(|error| backend_tool_error("QUERY_ERROR", error))?;
+        Ok(format_query_result(&result, 100))
+    }
+
+    async fn schema_context_on_connection(
+        &self,
+        connection: &dbx_core::models::connection::ConnectionConfig,
+        request: &SchemaContextRequest,
+    ) -> Result<String, CallToolResult> {
+        let database = self.resolve_database(request.database.clone(), connection)?;
+        let schema = request.schema.clone().unwrap_or_default();
+        let max_tables = request.max_tables.unwrap_or(8).clamp(1, 20);
+        let available = self
+            .backend
+            .list_tables(connection, &database, &schema)
+            .await
+            .map_err(|error| tool_error("SCHEMA_CONTEXT_ERROR", error))?;
+        let requested = request
+            .tables
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        let mut selected = if requested.is_empty() {
+            available.iter().collect::<Vec<_>>()
+        } else {
+            available.iter().filter(|table| requested.contains(&table.name.to_ascii_lowercase())).collect::<Vec<_>>()
+        };
+        let truncated = selected.len() > max_tables || (requested.is_empty() && available.len() > max_tables);
+        selected.truncate(max_tables);
+        if selected.is_empty() {
+            return Ok("No matching tables found.".to_string());
+        }
+        let mut tables = Vec::new();
+        for table in selected {
+            let columns = self
+                .backend
+                .get_columns(connection, &database, &schema, &table.name)
+                .await
+                .map_err(|error| tool_error("SCHEMA_CONTEXT_ERROR", error))?;
+            tables.push((table.clone(), columns));
+        }
+        Ok(format_schema_context(&connection.name, &database, &schema, &tables, truncated))
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -666,6 +1022,22 @@ impl DbxMcpServer {
     }
 
     async fn resolve_connection(&self, selector: &ConnectionSelector) -> Result<ResolvedConnection, CallToolResult> {
+        let looks_like_index = |value: &str| {
+            matches!(crate::list_index::parse_list_index_range(value), Ok(Some(_)))
+        };
+        if selector.connection_id.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_some_and(looks_like_index)
+            || selector.connection_name.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_some_and(looks_like_index)
+        {
+            let policy = self.load_policy().await?;
+            let connection = crate::resolve::resolve_single_connection(
+                self.backend.as_ref(),
+                &self.scope,
+                selector.connection_id.as_deref(),
+                selector.connection_name.as_deref(),
+            )
+            .await?;
+            return Ok(ResolvedConnection { connection, policy });
+        }
         let policy = self.load_policy().await?;
         let connections =
             self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
@@ -739,6 +1111,40 @@ impl ServerHandler for DbxMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dbx", env!("CARGO_PKG_VERSION")))
             .with_instructions("Use DBX connections to inspect schemas and query databases safely.")
+    }
+}
+
+
+fn call_tool_message(result: &CallToolResult) -> String {
+    result
+        .content
+        .first()
+        .and_then(|block| block.as_text())
+        .map(|text| text.text.clone())
+        .unwrap_or_else(|| "Error".to_string())
+}
+
+fn finish_batch_parts(
+    mut parts: Vec<String>,
+    total: usize,
+    skipped: usize,
+    failures: usize,
+    progress: &crate::progress::ProgressOptions,
+) -> CallToolResult {
+    if total > 1 {
+        parts.push(crate::batch::batch_summary(
+            total,
+            total.saturating_sub(skipped + failures),
+            skipped,
+            failures,
+        ));
+    }
+    let progress_text = crate::progress::format_progress_section(&crate::progress::collector_text(progress));
+    let body = format!("{progress_text}{}", parts.join("\n\n"));
+    if failures > 0 {
+        CallToolResult::error(vec![ContentBlock::text(body)])
+    } else {
+        text(body)
     }
 }
 
@@ -923,10 +1329,11 @@ fn ambiguous_connections(name: &str, connections: &[dbx_core::models::connection
 
 fn format_connections(connections: &[ConnectionSummary]) -> String {
     let mut output =
-        String::from("| ID | Name | Type | Host | Port | Database |\n| --- | --- | --- | --- | --- | --- |");
-    for connection in connections {
+        String::from("| # | ID | Name | Type | Host | Port | Database |\n| --- | --- | --- | --- | --- | --- | --- |");
+    for (idx, connection) in connections.iter().enumerate() {
         output.push_str(&format!(
-            "\n| {} | {} | {} | {} | {} | {} |",
+            "\n| {} | {} | {} | {} | {} | {} | {} |",
+            idx + 1,
             escape_cell(&connection.id),
             escape_cell(&connection.name),
             escape_cell(&connection.db_type),
@@ -937,6 +1344,7 @@ fn format_connections(connections: &[ConnectionSummary]) -> String {
     }
     output
 }
+
 
 fn format_columns(columns: &[dbx_core::db::ColumnInfo]) -> String {
     let rows = columns
@@ -1119,6 +1527,9 @@ mod tests {
         assert!(names.contains(&"dbx_get_schema_context"));
         assert!(names.contains(&"dbx_open_table"));
         assert!(names.contains(&"dbx_execute_and_show"));
+        assert!(names.contains(&"dbx_list_proxies"));
+        assert!(names.contains(&"dbx_get_database_stats"));
+        assert!(names.contains(&"dbx_get_database_report"));
     }
 
     #[test]

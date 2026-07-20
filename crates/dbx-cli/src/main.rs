@@ -93,6 +93,37 @@ struct Flags {
     allow_dangerous: bool,
     help: bool,
     version: bool,
+    quiet: bool,
+    verbose: bool,
+    /// None = sequential; Some(n) = parallel (n==0 → default 15).
+    parallel: Option<usize>,
+    skip_unsupported: bool,
+    no_save: bool,
+    output: Option<PathBuf>,
+    name: Option<String>,
+    db_type: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
+    username: Option<String>,
+    password: Option<String>,
+    ssl: bool,
+    driver_profile: Option<String>,
+    proxy: bool,
+    proxy_type: Option<String>,
+    proxy_host: Option<String>,
+    proxy_port: Option<u16>,
+    proxy_username: Option<String>,
+    proxy_password: Option<String>,
+    /// Accumulated from `--proxy-profile-id` / `--proxy-profiles` (comma lists + repeats).
+    proxy_profile_ids: Vec<String>,
+    /// Accumulated from repeated `--proxy-profile-name`.
+    proxy_profile_names: Vec<String>,
+}
+
+#[derive(Debug)]
+enum CliOutcome {
+    Ok(String),
+    SoftFail(String),
 }
 
 #[derive(Debug)]
@@ -132,9 +163,13 @@ struct Diagnostics {
 #[tokio::main]
 async fn main() -> ExitCode {
     match run(env::args().skip(1).collect()).await {
-        Ok(output) => {
+        Ok(CliOutcome::Ok(output)) => {
             print!("{output}");
             ExitCode::SUCCESS
+        }
+        Ok(CliOutcome::SoftFail(output)) => {
+            print!("{output}");
+            ExitCode::FAILURE
         }
         Err((error, json_output)) => {
             if json_output {
@@ -151,24 +186,28 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(argv: Vec<String>) -> Result<String, (CliError, bool)> {
-    let wants_json = argv.iter().any(|arg| arg == "--json");
+async fn run(argv: Vec<String>) -> Result<CliOutcome, (CliError, bool)> {
+    let wants_json = argv.iter().any(|arg| arg == "--json" || arg == "-j");
     let flags = parse_flags(&argv).map_err(|error| (error, wants_json))?;
     let json_output = flags.format == OutputFormat::Json;
     if flags.version {
-        return Ok(format!("{VERSION}\n"));
+        return Ok(CliOutcome::Ok(format!("{VERSION}\n")));
     }
     if flags.args.is_empty() || flags.help || flags.args.first().is_some_and(|arg| arg == "help") {
-        return Ok(format!("{}\n", usage()));
+        return Ok(CliOutcome::Ok(format!("{}\n", usage())));
     }
     if flags.args[0] == "doctor" {
         ensure_arg_count(&flags.args, 1, "dbx doctor").map_err(|error| (error, json_output))?;
         let diagnostics = diagnostics().await;
-        return format_diagnostics(&diagnostics, flags.format).map_err(|error| (error, json_output));
+        return format_diagnostics(&diagnostics, flags.format)
+            .map(CliOutcome::Ok)
+            .map_err(|error| (error, json_output));
     }
     if flags.args[0] == "capabilities" {
         ensure_arg_count(&flags.args, 1, "dbx capabilities").map_err(|error| (error, json_output))?;
-        return format_capabilities(flags.format).map_err(|error| (error, json_output));
+        return format_capabilities(flags.format)
+            .map(CliOutcome::Ok)
+            .map_err(|error| (error, json_output));
     }
 
     let backend: Arc<dyn DbxBackend> = if let Ok(base_url) = env::var("DBX_WEB_URL") {
@@ -186,75 +225,371 @@ async fn run(argv: Vec<String>) -> Result<String, (CliError, bool)> {
         )
     };
 
-    let result = run_with_backend(backend.as_ref(), flags).await;
-    result.map_err(|error| (error, json_output))
+    run_with_backend(backend, flags).await.map_err(|error| (error, json_output))
 }
 
-async fn run_with_backend(backend: &dyn DbxBackend, flags: Flags) -> Result<String, CliError> {
+fn ok(body: String) -> Result<CliOutcome, CliError> {
+    Ok(CliOutcome::Ok(body))
+}
+
+fn soft_fail(body: String) -> Result<CliOutcome, CliError> {
+    Ok(CliOutcome::SoftFail(body))
+}
+
+fn outcome_text(outcome: CliOutcome) -> String {
+    match outcome {
+        CliOutcome::Ok(body) | CliOutcome::SoftFail(body) => body,
+    }
+}
+
+async fn run_with_backend(backend: Arc<dyn DbxBackend>, flags: Flags) -> Result<CliOutcome, CliError> {
     let args = &flags.args;
     if args.first().is_some_and(|arg| arg == "connections") && args.get(1).is_some_and(|arg| arg == "list") {
         ensure_arg_count(args, 2, "dbx connections list")?;
-        return format_connections(&backend.load_connections().await.map_err(store_error)?, flags.format);
+        return format_connections(&backend.load_connections().await.map_err(store_error)?, flags.format).map(CliOutcome::Ok);
+    }
+    if args.first().is_some_and(|arg| arg == "connections") && args.get(1).is_some_and(|arg| arg == "add") {
+        return run_connections_add(backend.as_ref(), &flags).await;
+    }
+    if args.first().is_some_and(|arg| arg == "connections") && args.get(1).is_some_and(|arg| arg == "remove") {
+        ensure_arg_count(args, 3, "dbx connections remove")?;
+        let connection_ref = required(args.get(2), "Connection name or list index is required.")?;
+        let connection = find_connection(backend.as_ref(), connection_ref).await?;
+        let removed = backend
+            .remove_connection_for_mcp(&connection.id)
+            .await
+            .map_err(store_error)?;
+        if !removed {
+            return Err(CliError::new(
+                "CONNECTION_NOT_FOUND",
+                format!("Connection \"{}\" was not removed.", connection.name),
+            ));
+        }
+        if flags.format == OutputFormat::Json {
+            return ok(format!(
+                "{}\n",
+                serde_json::to_string_pretty(&json!({ "removed": true, "id": connection.id, "name": connection.name }))
+                    .unwrap()
+            ));
+        }
+        return ok(format!("Connection \"{}\" removed.\n", connection.name));
     }
     if args.first().is_some_and(|arg| arg == "schema") && args.get(1).is_some_and(|arg| arg == "list") {
         ensure_arg_count(args, 3, "dbx schema list")?;
-        let connection_name = required(args.get(2), "Connection name is required.")?;
-        let connection = find_connection(backend, connection_name).await?;
-        let database = selected_database(&connection, flags.database.as_deref());
-        let schema = flags.schema.as_deref().unwrap_or("");
-        let tables = backend.list_tables(&connection, &database, schema).await.map_err(command_error)?;
-        return format_tables(connection_name, flags.schema.as_deref(), &tables, flags.format);
+        return run_schema_list(backend, &flags).await;
     }
     if args.first().is_some_and(|arg| arg == "schema") && args.get(1).is_some_and(|arg| arg == "describe") {
         ensure_arg_count(args, 4, "dbx schema describe")?;
-        let connection_name = required(args.get(2), "Connection name is required.")?;
-        let table = required(args.get(3), "Table name is required.")?;
-        let connection = find_connection(backend, connection_name).await?;
-        let database = selected_database(&connection, flags.database.as_deref());
-        let schema = flags.schema.as_deref().unwrap_or("");
-        let columns = backend.get_columns(&connection, &database, schema, table).await.map_err(command_error)?;
-        return format_columns(connection_name, flags.schema.as_deref(), table, &columns, flags.format);
+        return run_schema_describe(backend, &flags).await;
     }
     if args.first().is_some_and(|arg| arg == "query") {
         return run_query(backend, &flags).await;
     }
+    if args.first().is_some_and(|arg| arg == "redis") {
+        return run_redis(backend, &flags).await;
+    }
     if args.first().is_some_and(|arg| arg == "context") {
         return run_context(backend, &flags).await;
     }
+    if args.first().is_some_and(|arg| arg == "proxies") && args.get(1).is_some_and(|arg| arg == "list") {
+        ensure_arg_count(args, 2, "dbx proxies list")?;
+        let profiles = backend.load_tunnel_profiles().await.map_err(store_error)?;
+        return ok(format!("{}\n", dbx_mcp::tunnel_profiles::format_proxy_list(&profiles)));
+    }
+    if args.first().is_some_and(|arg| arg == "stats") {
+        ensure_arg_count(args, 2, "dbx stats")?;
+        return run_stats_or_report(backend, &flags, false).await;
+    }
+    if args.first().is_some_and(|arg| arg == "report") {
+        ensure_arg_count(args, 2, "dbx report")?;
+        return run_stats_or_report(backend, &flags, true).await;
+    }
     if args.first().is_some_and(|arg| arg == "open") {
         ensure_arg_count(args, 3, "dbx open")?;
-        let connection = required(args.get(1), "Connection name is required.")?;
-        let table = required(args.get(2), "Table name is required.")?;
-        if flags.format == OutputFormat::Csv {
-            return Err(CliError::new("INVALID_OPTION", "CSV format is not supported for dbx open."));
-        }
-        backend
-            .bridge_request(
-                "/open-table",
-                optional_object([
-                    ("connection_name", Some(json!(connection))),
-                    ("table", Some(json!(table))),
-                    ("schema", flags.schema.clone().map(|value| json!(value))),
-                    ("database", flags.database.clone().map(|value| json!(value))),
-                ]),
-            )
-            .await
-            .map_err(|message| CliError::new("DBX_NOT_RUNNING", message))?;
-        if flags.format == OutputFormat::Json {
-            return json_string(&optional_object([
-                ("opened", Some(json!(true))),
-                ("connection", Some(json!(connection))),
-                ("table", Some(json!(table))),
-                ("schema", flags.schema.clone().map(|value| json!(value))),
-                ("database", flags.database.clone().map(|value| json!(value))),
-            ]));
-        }
-        return Ok(format!("Opened {table} in DBX\n"));
+        return run_open(backend, &flags).await;
     }
     Err(CliError::new("USAGE", usage()))
 }
 
-async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, CliError> {
+async fn select_connections(backend: &dyn DbxBackend, connection_ref: &str) -> Result<Vec<ConnectionConfig>, CliError> {
+    let connections = backend.load_connections().await.map_err(store_error)?;
+    if let Ok(Some(indexes)) = dbx_mcp::list_index::parse_list_index_range(connection_ref) {
+        if indexes.len() > dbx_mcp::list_index::MAX_LIST_INDEX_RANGE_WARN_SIZE {
+            eprintln!(
+                "[dbx] Warning: range \"{connection_ref}\" resolves to {} connections (>{}).",
+                indexes.len(),
+                dbx_mcp::list_index::MAX_LIST_INDEX_RANGE_WARN_SIZE
+            );
+        }
+        let mut out = Vec::new();
+        for index in indexes {
+            let connection = connections.get(index - 1).cloned().ok_or_else(|| {
+                CliError::new(
+                    "CONNECTION_NOT_FOUND",
+                    format!("List index #{index} is out of range (1-{}).", connections.len()),
+                )
+            })?;
+            out.push(connection);
+        }
+        return Ok(out);
+    }
+    Ok(vec![find_connection(backend, connection_ref).await?])
+}
+
+async fn apply_cli_proxy_override(
+    backend: &dyn DbxBackend,
+    configs: Vec<ConnectionConfig>,
+    flags: &Flags,
+) -> Result<Vec<ConnectionConfig>, CliError> {
+    let args = cli_proxy_ref_args(flags);
+    if !dbx_mcp::tunnel_profiles::has_proxy_profile_ref(&args) {
+        return Ok(configs);
+    }
+    let mut out = Vec::with_capacity(configs.len());
+    for config in configs {
+        let config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, args.clone())
+            .await
+            .map_err(|error| {
+                CliError::new(
+                    "PROXY_OVERRIDE_ERROR",
+                    error
+                        .content
+                        .first()
+                        .and_then(|block| block.as_text())
+                        .map(|text| text.text.clone())
+                        .unwrap_or_else(|| "Proxy override failed".into()),
+                )
+            })?;
+        out.push(config);
+    }
+    Ok(out)
+}
+
+fn cli_proxy_ref_args(flags: &Flags) -> dbx_mcp::tunnel_profiles::ProxyProfileRefArgs {
+    dbx_mcp::tunnel_profiles::ProxyProfileRefArgs {
+        proxy_profile_id: None,
+        proxy_profile_name: None,
+        proxy_profile_ids: (!flags.proxy_profile_ids.is_empty()).then(|| flags.proxy_profile_ids.clone()),
+        proxy_profile_names: (!flags.proxy_profile_names.is_empty()).then(|| flags.proxy_profile_names.clone()),
+    }
+}
+
+fn dynamic_cli_error(code: &str, message: impl Into<String>) -> CliError {
+    let static_code: &'static str = match code {
+        "SQL_BLOCKED" => "SQL_BLOCKED",
+        "QUERY_ERROR" => "QUERY_ERROR",
+        "REDIS_COMMAND_REQUIRED" => "REDIS_COMMAND_REQUIRED",
+        "REDIS_COMMAND_ERROR" => "REDIS_COMMAND_ERROR",
+        "INVALID_CONNECTION_TYPE" => "INVALID_CONNECTION_TYPE",
+        "INVALID_OPTION" => "INVALID_OPTION",
+        "INVALID_ARGUMENT" => "INVALID_ARGUMENT",
+        "CONNECTION_NOT_FOUND" => "CONNECTION_NOT_FOUND",
+        "CONNECTION_STORE_ERROR" => "CONNECTION_STORE_ERROR",
+        "DBX_NOT_RUNNING" => "DBX_NOT_RUNNING",
+        "UNSUPPORTED_DB_TYPE" => "UNSUPPORTED_DB_TYPE",
+        "PROXY_OVERRIDE_ERROR" => "PROXY_OVERRIDE_ERROR",
+        "ERROR" => "ERROR",
+        _ => "ERROR",
+    };
+    CliError::new(static_code, message)
+}
+
+fn finish_batch_outcome<T>(
+    items: &[dbx_mcp::batch::BatchItem<T>],
+    selected: &[ConnectionConfig],
+    mut parts: Vec<String>,
+) -> Result<CliOutcome, CliError> {
+    let total = selected.len();
+    let (ok_count, skipped, failures) = dbx_mcp::batch::count_batch(items);
+    if total == 1 && failures > 0 {
+        if let Some(dbx_mcp::batch::BatchItem::Err { code, message, .. }) = items.first() {
+            return Err(dynamic_cli_error(code, message.clone()));
+        }
+    }
+    if total > 1 {
+        parts.push(dbx_mcp::batch::batch_summary(total, ok_count, skipped, failures));
+    }
+    let joined = parts.join("\n\n");
+    let body = if joined.ends_with('\n') {
+        joined
+    } else {
+        format!("{joined}\n")
+    };
+    if failures > 0 {
+        soft_fail(body)
+    } else {
+        ok(body)
+    }
+}
+
+async fn run_batch_string_jobs<F, Fut>(
+    backend: Arc<dyn DbxBackend>,
+    selected: Vec<ConnectionConfig>,
+    flags: &Flags,
+    worker: F,
+) -> Result<CliOutcome, CliError>
+where
+    F: Fn(Arc<dyn DbxBackend>, ConnectionConfig, usize) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<String, (String, String, bool)>> + Send + 'static,
+{
+    let quiet = flags.quiet;
+    let verbose = flags.verbose;
+    let items = dbx_mcp::batch::run_connection_batch(&selected, flags.parallel, move |config, index| {
+        let backend = Arc::clone(&backend);
+        let fut = worker(backend, config, index);
+        async move {
+            let _guard = dbx_mcp::progress::push_progress(dbx_mcp::progress::cli_progress_options(quiet, verbose));
+            fut.await
+        }
+    })
+    .await;
+
+    let total = selected.len();
+    let mut parts = Vec::new();
+    for item in &items {
+        match item {
+            dbx_mcp::batch::BatchItem::Ok { index, value } => {
+                let heading = dbx_mcp::batch::batch_heading(&selected[*index], index + 1, total);
+                parts.push(format!("{heading}{value}"));
+            }
+            dbx_mcp::batch::BatchItem::Skipped { index, name, code, message } => {
+                let heading = if total > 1 {
+                    format!("## #{} {name}\n\n", index + 1)
+                } else {
+                    String::new()
+                };
+                parts.push(format!("{heading}Skipped [{code}]: {message}"));
+            }
+            dbx_mcp::batch::BatchItem::Err { index, name, code, message } => {
+                let heading = if total > 1 {
+                    format!("## #{} {name}\n\n", index + 1)
+                } else {
+                    String::new()
+                };
+                parts.push(format!("{heading}Error [{code}]: {message}"));
+            }
+        }
+    }
+    finish_batch_outcome(&items, &selected, parts)
+}
+
+async fn run_stats_or_report(
+    backend: Arc<dyn DbxBackend>,
+    flags: &Flags,
+    report: bool,
+) -> Result<CliOutcome, CliError> {
+    let connection_ref = required(flags.args.get(1), "Connection name or list index/range is required.")?;
+    let selected = select_connections(backend.as_ref(), connection_ref).await?;
+    let selected = apply_cli_proxy_override(backend.as_ref(), selected, flags).await?;
+    let total = selected.len();
+    let database = flags.database.clone();
+    let schema = flags.schema.clone();
+    let timeout_ms = flags.timeout_ms;
+    let skip_unsupported = flags.skip_unsupported;
+    let quiet = flags.quiet;
+    let verbose = flags.verbose;
+
+    let items = dbx_mcp::batch::run_connection_batch(&selected, flags.parallel, move |config, _index| {
+        let backend = Arc::clone(&backend);
+        let database = database.clone();
+        let schema = schema.clone();
+        async move {
+            let _guard = dbx_mcp::progress::push_progress(dbx_mcp::progress::cli_progress_options(quiet, verbose));
+            dbx_mcp::progress::log_using_connection(&config);
+            let options = dbx_mcp::database_stats::DatabaseStatsOptions {
+                database,
+                schema,
+                redis_db: None,
+                timeout_ms,
+            };
+            let result = if report {
+                dbx_mcp::database_report::fetch_database_report(backend.as_ref(), &config, options).await
+            } else {
+                dbx_mcp::database_stats::fetch_database_stats(backend.as_ref(), &config, options).await
+            };
+            match result {
+                Ok(body) => Ok(body),
+                Err(error) if skip_unsupported && error.code == "UNSUPPORTED_DB_TYPE" => {
+                    Err((error.code.to_string(), error.message, true))
+                }
+                Err(error) => Err((error.code.to_string(), error.message, false)),
+            }
+        }
+    })
+    .await;
+
+    let mut parts = Vec::new();
+    let mut saved_paths = Vec::new();
+    for item in &items {
+        match item {
+            dbx_mcp::batch::BatchItem::Ok { index, value } => {
+                let config = &selected[*index];
+                let heading = dbx_mcp::batch::batch_heading(config, index + 1, total);
+                if report && !flags.no_save {
+                    let dir = flags
+                        .output
+                        .clone()
+                        .unwrap_or_else(dbx_mcp::database_report::default_reports_dir);
+                    std::fs::create_dir_all(&dir).map_err(|e| CliError::new("REPORT_SAVE_ERROR", e.to_string()))?;
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let scope = flags
+                        .database
+                        .clone()
+                        .or_else(|| flags.schema.clone())
+                        .or_else(|| config.database.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    let path = if total > 1 {
+                        let batch_dir = if flags.output.is_some() {
+                            dir
+                        } else {
+                            let batch_dir = dir.join(format!("dbx-report-batch-{stamp}"));
+                            std::fs::create_dir_all(&batch_dir)
+                                .map_err(|e| CliError::new("REPORT_SAVE_ERROR", e.to_string()))?;
+                            batch_dir
+                        };
+                        batch_dir.join(format!("dbx-report-{}-{}.md", config.name, scope))
+                    } else if let Some(output) = &flags.output {
+                        output.clone()
+                    } else {
+                        dir.join(format!("dbx-report-{}-{}-{}.md", config.name, scope, stamp))
+                    };
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| CliError::new("REPORT_SAVE_ERROR", e.to_string()))?;
+                    }
+                    std::fs::write(&path, value).map_err(|e| CliError::new("REPORT_SAVE_ERROR", e.to_string()))?;
+                    saved_paths.push(path.display().to_string());
+                }
+                parts.push(format!("{heading}{value}"));
+            }
+            dbx_mcp::batch::BatchItem::Skipped { index, name, code, message } => {
+                let heading = if total > 1 {
+                    format!("## #{} {name}\n\n", index + 1)
+                } else {
+                    String::new()
+                };
+                parts.push(format!("{heading}Skipped [{code}]: {message}"));
+            }
+            dbx_mcp::batch::BatchItem::Err { index, name, code, message } => {
+                let heading = if total > 1 {
+                    format!("## #{} {name}\n\n", index + 1)
+                } else {
+                    String::new()
+                };
+                parts.push(format!("{heading}Error [{code}]: {message}"));
+            }
+        }
+    }
+    for path in &saved_paths {
+        eprintln!("[dbx] Report saved: {path}");
+    }
+    finish_batch_outcome(&items, &selected, parts)
+}
+
+async fn run_query(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutcome, CliError> {
     let args = &flags.args;
     let default_connection = env::var("DBX_CONNECTION").ok().filter(|value| !value.is_empty());
     let uses_default = default_connection.is_some() && args.len() == if flags.file.is_some() { 1 } else { 2 };
@@ -273,7 +608,7 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
         },
         "dbx query",
     )?;
-    let connection_name = if uses_default {
+    let connection_ref = if uses_default {
         default_connection.as_deref().unwrap()
     } else {
         required(args.get(1), "Connection name is required.")?
@@ -286,7 +621,6 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
     } else {
         required(args.get(if uses_default { 1 } else { 2 }), "SQL string or --file is required.")?.to_string()
     };
-    let connection = find_connection(backend, connection_name).await?;
     let env_allow_writes = env_flag("DBX_MCP_ALLOW_WRITES");
     let env_allow_dangerous = env_flag("DBX_MCP_ALLOW_DANGEROUS_SQL");
     if flags.allow_dangerous && !flags.allow_writes && !env_allow_writes {
@@ -294,20 +628,66 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
     }
     let allow_writes = flags.allow_writes || env_allow_writes;
     let allow_dangerous = flags.allow_dangerous || env_allow_dangerous;
-    let database = selected_database(&connection, flags.database.as_deref());
+    let selected = select_connections(backend.as_ref(), connection_ref).await?;
+    let selected = apply_cli_proxy_override(backend.as_ref(), selected, flags).await?;
+    let format = flags.format;
+    let database_override = flags.database.clone();
+    let max_rows = flags.max_rows;
+    let timeout_ms = flags.timeout_ms;
+    let sql_owned = sql.clone();
+
+    run_batch_string_jobs(backend, selected, flags, move |backend, connection, _index| {
+        let sql = sql_owned.clone();
+        let database_override = database_override.clone();
+        async move {
+            dbx_mcp::progress::log_using_connection(&connection);
+            dbx_mcp::progress::log_query_sql(&sql);
+            match execute_query_one(
+                backend.as_ref(),
+                &connection,
+                &sql,
+                database_override.as_deref(),
+                allow_writes,
+                allow_dangerous,
+                max_rows,
+                timeout_ms,
+                format,
+            )
+            .await
+            {
+                Ok(body) => Ok(body),
+                Err(error) => Err((error.code.to_string(), error.message, false)),
+            }
+        }
+    })
+    .await
+}
+
+async fn execute_query_one(
+    backend: &dyn DbxBackend,
+    connection: &ConnectionConfig,
+    sql: &str,
+    database_override: Option<&str>,
+    allow_writes: bool,
+    allow_dangerous: bool,
+    max_rows: Option<usize>,
+    timeout_ms: Option<u64>,
+    format: OutputFormat,
+) -> Result<String, CliError> {
+    let database = selected_database(connection, database_override);
     if connection.db_type == DatabaseType::Redis {
         return Err(CliError::new(
             "REDIS_COMMAND_REQUIRED",
-            "Redis connections do not accept SQL through dbx query. Use an MCP Redis command tool or DBX directly.",
+            "Redis connections do not accept SQL through dbx query. Use dbx redis.",
         ));
     }
     if connection.db_type == DatabaseType::MongoDb {
-        let command = mongo::parse(&sql).map_err(|message| CliError::new("QUERY_ERROR", message))?;
+        let command = mongo::parse(sql).map_err(|message| CliError::new("QUERY_ERROR", message))?;
         if let Err(error) = mongo::validate_safety(
             &command,
             allow_writes,
             allow_dangerous,
-            is_production_database(&connection, &database),
+            is_production_database(connection, &database),
         ) {
             return Err(match error {
                 MongoSafetyError::WritesDisabled => {
@@ -327,11 +707,11 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
             });
         }
         let mut result =
-            backend.execute_mongo_command(&connection, &database, &command).await.map_err(command_error)?;
-        truncate_query_result(&mut result, flags.max_rows);
-        return format_query(connection_name, &result, flags.format);
+            backend.execute_mongo_command(connection, &database, &command).await.map_err(command_error)?;
+        truncate_query_result(&mut result, max_rows);
+        return format_query(&connection.name, &result, format);
     }
-    let risk = classify_sql_risk_for_database(&sql, connection.db_type)
+    let risk = classify_sql_risk_for_database(sql, connection.db_type)
         .map_err(|message| CliError::new("SQL_BLOCKED", message))?;
     if risk == SqlRisk::Transaction
         || risk == SqlRisk::Write && !allow_writes
@@ -339,15 +719,15 @@ async fn run_query(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, Cl
     {
         return Err(CliError::new("SQL_BLOCKED", format!("{risk} statement is blocked.")));
     }
-    if risk != SqlRisk::ReadOnly && targets_production_database(&connection, &database, &sql) {
+    if risk != SqlRisk::ReadOnly && targets_production_database(connection, &database, sql) {
         return Err(CliError::new("SQL_BLOCKED", "Writes and DDL are blocked for production databases."));
     }
-    let timeout_secs = flags.timeout_ms.map(|value| value.div_ceil(1000));
+    let timeout_secs = timeout_ms.map(|value| value.div_ceil(1000));
     let result = backend
-        .execute_query(&connection, &database, &sql, flags.max_rows, timeout_secs)
+        .execute_query(connection, &database, sql, max_rows, timeout_secs)
         .await
         .map_err(command_error)?;
-    format_query(connection_name, &result, flags.format)
+    format_query(&connection.name, &result, format)
 }
 
 fn truncate_query_result(result: &mut QueryResult, max_rows: Option<usize>) {
@@ -358,7 +738,71 @@ fn truncate_query_result(result: &mut QueryResult, max_rows: Option<usize>) {
     }
 }
 
-async fn run_context(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, CliError> {
+async fn run_schema_list(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutcome, CliError> {
+    let connection_ref = required(flags.args.get(2), "Connection name is required.")?;
+    let selected = select_connections(backend.as_ref(), connection_ref).await?;
+    let selected = apply_cli_proxy_override(backend.as_ref(), selected, flags).await?;
+    let format = flags.format;
+    let database_override = flags.database.clone();
+    let schema = flags.schema.clone();
+    run_batch_string_jobs(backend, selected, flags, move |backend, connection, _index| {
+        let database_override = database_override.clone();
+        let schema = schema.clone();
+        async move {
+            dbx_mcp::progress::log_using_connection(&connection);
+            let database = selected_database(&connection, database_override.as_deref());
+            let schema = schema.as_deref().unwrap_or("");
+            match backend.list_tables(&connection, &database, schema).await {
+                Ok(tables) => match format_tables(&connection.name, flags_schema(schema), &tables, format) {
+                    Ok(body) => Ok(body),
+                    Err(error) => Err((error.code.to_string(), error.message, false)),
+                },
+                Err(error) => Err(("ERROR".into(), error, false)),
+            }
+        }
+    })
+    .await
+}
+
+fn flags_schema(schema: &str) -> Option<&str> {
+    if schema.is_empty() {
+        None
+    } else {
+        Some(schema)
+    }
+}
+
+async fn run_schema_describe(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutcome, CliError> {
+    let connection_ref = required(flags.args.get(2), "Connection name is required.")?;
+    let table = required(flags.args.get(3), "Table name is required.")?.to_string();
+    let selected = select_connections(backend.as_ref(), connection_ref).await?;
+    let selected = apply_cli_proxy_override(backend.as_ref(), selected, flags).await?;
+    let format = flags.format;
+    let database_override = flags.database.clone();
+    let schema = flags.schema.clone();
+    run_batch_string_jobs(backend, selected, flags, move |backend, connection, _index| {
+        let database_override = database_override.clone();
+        let schema = schema.clone();
+        let table = table.clone();
+        async move {
+            dbx_mcp::progress::log_using_connection(&connection);
+            let database = selected_database(&connection, database_override.as_deref());
+            let schema_name = schema.as_deref().unwrap_or("");
+            match backend.get_columns(&connection, &database, schema_name, &table).await {
+                Ok(columns) => {
+                    match format_columns(&connection.name, flags_schema(schema_name), &table, &columns, format) {
+                        Ok(body) => Ok(body),
+                        Err(error) => Err((error.code.to_string(), error.message, false)),
+                    }
+                }
+                Err(error) => Err(("ERROR".into(), error, false)),
+            }
+        }
+    })
+    .await
+}
+
+async fn run_context(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutcome, CliError> {
     let args = &flags.args;
     let default_connection = env::var("DBX_CONNECTION").ok().filter(|value| !value.is_empty());
     let uses_default = default_connection.is_some() && args.len() == 1;
@@ -366,23 +810,63 @@ async fn run_context(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, 
     if flags.format == OutputFormat::Csv {
         return Err(CliError::new("INVALID_OPTION", "CSV format is not supported for dbx context."));
     }
-    let connection_name = if uses_default {
+    let connection_ref = if uses_default {
         default_connection.as_deref().unwrap()
     } else {
         required(args.get(1), "Connection name is required.")?
     };
-    let connection = find_connection(backend, connection_name).await?;
-    let database = selected_database(&connection, flags.database.as_deref());
-    let schema = flags.schema.as_deref().unwrap_or("");
-    let all_tables = backend.list_tables(&connection, &database, schema).await.map_err(command_error)?;
-    let max_tables = flags.max_tables.unwrap_or(8).clamp(1, 20);
-    let requested = !flags.tables.is_empty();
+    let selected = select_connections(backend.as_ref(), connection_ref).await?;
+    let selected = apply_cli_proxy_override(backend.as_ref(), selected, flags).await?;
+    let format = flags.format;
+    let database_override = flags.database.clone();
+    let schema = flags.schema.clone();
+    let tables = flags.tables.clone();
+    let max_tables = flags.max_tables;
+    run_batch_string_jobs(backend, selected, flags, move |backend, connection, _index| {
+        let database_override = database_override.clone();
+        let schema = schema.clone();
+        let tables = tables.clone();
+        async move {
+            dbx_mcp::progress::log_using_connection(&connection);
+            match build_context_body(
+                backend.as_ref(),
+                &connection,
+                database_override.as_deref(),
+                schema.as_deref(),
+                &tables,
+                max_tables,
+                format,
+            )
+            .await
+            {
+                Ok(body) => Ok(body),
+                Err(error) => Err((error.code.to_string(), error.message, false)),
+            }
+        }
+    })
+    .await
+}
+
+async fn build_context_body(
+    backend: &dyn DbxBackend,
+    connection: &ConnectionConfig,
+    database_override: Option<&str>,
+    schema: Option<&str>,
+    requested_tables: &[String],
+    max_tables: Option<usize>,
+    format: OutputFormat,
+) -> Result<String, CliError> {
+    let database = selected_database(connection, database_override);
+    let schema = schema.unwrap_or("");
+    let all_tables = backend.list_tables(connection, &database, schema).await.map_err(command_error)?;
+    let max_tables = max_tables.unwrap_or(8).clamp(1, 20);
+    let requested = !requested_tables.is_empty();
     let selected: Vec<TableInfo> = if !requested {
         all_tables.iter().take(max_tables).cloned().collect()
     } else {
         all_tables
             .iter()
-            .filter(|table| flags.tables.iter().any(|name| name.eq_ignore_ascii_case(&table.name)))
+            .filter(|table| requested_tables.iter().any(|name| name.eq_ignore_ascii_case(&table.name)))
             .cloned()
             .collect()
     };
@@ -390,20 +874,23 @@ async fn run_context(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, 
     let selected = selected.into_iter().take(max_tables).collect::<Vec<_>>();
     let mut context_tables = Vec::new();
     for table in selected {
-        let columns = backend.get_columns(&connection, &database, schema, &table.name).await.map_err(command_error)?;
+        let columns = backend
+            .get_columns(connection, &database, schema, &table.name)
+            .await
+            .map_err(command_error)?;
         context_tables.push(json!({ "name": table.name, "type": table.table_type, "columns": columns }));
     }
     let payload = json!({
-        "connection": connection_name,
+        "connection": connection.name,
         "database": database,
         "schema": schema,
         "truncated": truncated,
         "tables": context_tables,
     });
-    if flags.format == OutputFormat::Json {
+    if format == OutputFormat::Json {
         return json_string(&payload);
     }
-    let mut header = vec![format!("Connection: {connection_name}")];
+    let mut header = vec![format!("Connection: {}", connection.name)];
     if !database.is_empty() {
         header.push(format!("Database: {database}"));
     }
@@ -422,9 +909,20 @@ async fn run_context(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, 
                 "- {} {} {}{}{}\n",
                 column["name"].as_str().unwrap_or_default(),
                 column["data_type"].as_str().unwrap_or_default(),
-                if column["is_nullable"].as_bool().unwrap_or(false) { "NULL" } else { "NOT NULL" },
-                if column["is_primary_key"].as_bool().unwrap_or(false) { " PK" } else { "" },
-                column["comment"].as_str().map(|comment| format!(" -- {comment}")).unwrap_or_default()
+                if column["is_nullable"].as_bool().unwrap_or(false) {
+                    "NULL"
+                } else {
+                    "NOT NULL"
+                },
+                if column["is_primary_key"].as_bool().unwrap_or(false) {
+                    " PK"
+                } else {
+                    ""
+                },
+                column["comment"]
+                    .as_str()
+                    .map(|comment| format!(" -- {comment}"))
+                    .unwrap_or_default()
             ));
         }
     }
@@ -434,14 +932,271 @@ async fn run_context(backend: &dyn DbxBackend, flags: &Flags) -> Result<String, 
     Ok(output)
 }
 
+async fn run_open(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutcome, CliError> {
+    if flags.format == OutputFormat::Csv {
+        return Err(CliError::new("INVALID_OPTION", "CSV format is not supported for dbx open."));
+    }
+    let connection_ref = required(flags.args.get(1), "Connection name is required.")?;
+    let table = required(flags.args.get(2), "Table name is required.")?.to_string();
+    let selected = select_connections(backend.as_ref(), connection_ref).await?;
+    let total = selected.len();
+    let mut parts = Vec::new();
+    let mut failures = 0usize;
+    let quiet = flags.quiet;
+    let verbose = flags.verbose;
+    for (idx, connection) in selected.into_iter().enumerate() {
+        let _guard = dbx_mcp::progress::push_progress(dbx_mcp::progress::cli_progress_options(quiet, verbose));
+        dbx_mcp::progress::log_using_connection(&connection);
+        let heading = dbx_mcp::batch::batch_heading(&connection, idx + 1, total);
+        match backend
+            .bridge_request(
+                "/open-table",
+                optional_object([
+                    ("connection_name", Some(json!(connection.name))),
+                    ("table", Some(json!(table))),
+                    ("schema", flags.schema.clone().map(|value| json!(value))),
+                    ("database", flags.database.clone().map(|value| json!(value))),
+                ]),
+            )
+            .await
+        {
+            Ok(()) => {
+                if flags.format == OutputFormat::Json {
+                    parts.push(format!(
+                        "{heading}{}",
+                        serde_json::to_string_pretty(&optional_object([
+                            ("opened", Some(json!(true))),
+                            ("connection", Some(json!(connection.name))),
+                            ("table", Some(json!(table))),
+                            ("schema", flags.schema.clone().map(|value| json!(value))),
+                            ("database", flags.database.clone().map(|value| json!(value))),
+                        ]))
+                        .unwrap()
+                    ));
+                } else {
+                    parts.push(format!("{heading}Opened {table} in DBX"));
+                }
+            }
+            Err(message) => {
+                failures += 1;
+                if total == 1 {
+                    return Err(CliError::new("DBX_NOT_RUNNING", message));
+                }
+                parts.push(format!("{heading}Error [DBX_NOT_RUNNING]: {message}"));
+            }
+        }
+    }
+    let _ = failures;
+    let mut ok_count = 0usize;
+    let mut fail_count = 0usize;
+    // Reconstruct counts from parts is awkward; recompute from loop state.
+    // `failures` already tracked.
+    fail_count = failures;
+    ok_count = total.saturating_sub(failures);
+    if total > 1 {
+        parts.push(dbx_mcp::batch::batch_summary(total, ok_count, 0, fail_count));
+    }
+    let joined = parts.join("\n\n");
+    let body = if joined.ends_with('\n') {
+        joined
+    } else {
+        format!("{joined}\n")
+    };
+    if fail_count > 0 {
+        soft_fail(body)
+    } else {
+        ok(body)
+    }
+}
+
+async fn run_redis(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutcome, CliError> {
+    if flags.args.len() < 3 {
+        return Err(CliError::new(
+            "INVALID_ARGUMENT",
+            "dbx redis expects <connection|#|range> <command...>",
+        ));
+    }
+    if flags.format == OutputFormat::Csv {
+        return Err(CliError::new("INVALID_OPTION", "CSV format is not supported for dbx redis."));
+    }
+    let connection_ref = &flags.args[1];
+    let command = flags.args[2..].join(" ");
+    let selected = select_connections(backend.as_ref(), connection_ref).await?;
+    let selected = apply_cli_proxy_override(backend.as_ref(), selected, flags).await?;
+    let allow_dangerous = flags.allow_dangerous;
+    let database_override = flags.database.clone();
+    let format = flags.format;
+    run_batch_string_jobs(backend, selected, flags, move |backend, connection, _index| {
+        let command = command.clone();
+        let database_override = database_override.clone();
+        async move {
+            dbx_mcp::progress::log_using_connection(&connection);
+            if connection.db_type != DatabaseType::Redis {
+                return Err((
+                    "INVALID_CONNECTION_TYPE".into(),
+                    format!("Connection \"{}\" is not Redis.", connection.name),
+                    false,
+                ));
+            }
+            let db = database_override
+                .as_deref()
+                .and_then(|v| v.parse().ok())
+                .or_else(|| connection.database.as_deref().and_then(|v| v.parse().ok()))
+                .unwrap_or(0u32);
+            match backend
+                .execute_redis_command(&connection, db, &command, allow_dangerous)
+                .await
+            {
+                Ok(result) => {
+                    if format == OutputFormat::Json {
+                        Ok(serde_json::to_string_pretty(&json!({
+                            "connection": connection.name,
+                            "db": db,
+                            "value": result.value,
+                        }))
+                        .unwrap())
+                    } else if let Value::String(text) = &result.value {
+                        Ok(text.clone())
+                    } else {
+                        Ok(result.value.to_string())
+                    }
+                }
+                Err(error) => Err(("REDIS_COMMAND_ERROR".into(), error, false)),
+            }
+        }
+    })
+    .await
+}
+
+async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<CliOutcome, CliError> {
+    ensure_arg_count(&flags.args, 2, "dbx connections add")?;
+    let name = flags
+        .name
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| CliError::new("INVALID_ARGUMENT", "--name is required."))?;
+    let db_type = flags
+        .db_type
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| CliError::new("INVALID_ARGUMENT", "--type is required."))?;
+    let host = flags
+        .host
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| CliError::new("INVALID_ARGUMENT", "--host is required."))?;
+    let existing = backend.load_connections().await.map_err(store_error)?;
+    if existing.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
+        return Err(CliError::new("CONNECTION_EXISTS", format!("Connection \"{name}\" already exists.")));
+    }
+    let parsed =
+        dbx_mcp::backend::parse_database_type(db_type).map_err(|e| CliError::new("INVALID_CONNECTION_TYPE", e))?;
+    let port = flags.port.or_else(|| default_cli_port(db_type)).ok_or_else(|| {
+        CliError::new("INVALID_ARGUMENT", "Port is required for this database type (use --port).")
+    })?;
+    let mut config = dbx_mcp::backend::new_connection_config(
+        uuid::Uuid::new_v4().to_string(),
+        name.to_string(),
+        parsed,
+        host.to_string(),
+        port,
+        flags.username.clone().unwrap_or_default(),
+        flags.password.clone().unwrap_or_default(),
+        flags.database.clone(),
+        flags.ssl,
+        flags.driver_profile.clone(),
+    )
+    .map_err(|e| CliError::new("INVALID_CONNECTION", e))?;
+
+    let profile_ref = dbx_mcp::tunnel_profiles::has_proxy_profile_ref(&cli_proxy_ref_args(flags));
+    let inline = flags.proxy
+        || flags.proxy_host.as_deref().is_some_and(|v| !v.trim().is_empty())
+        || flags.proxy_port.is_some();
+    if profile_ref && inline {
+        return Err(CliError::new(
+            "PROXY_CONFLICT",
+            "Cannot mix saved proxy reference with inline proxy settings.",
+        ));
+    }
+    if profile_ref {
+        config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, cli_proxy_ref_args(flags))
+            .await
+            .map_err(|error| {
+                CliError::new(
+                    "PROXY_PROFILE_NOT_FOUND",
+                    error
+                        .content
+                        .first()
+                        .and_then(|block| block.as_text())
+                        .map(|text| text.text.clone())
+                        .unwrap_or_else(|| "Proxy profile not found".into()),
+                )
+            })?;
+    } else if flags.proxy || inline {
+        let layer = dbx_mcp::tunnel_profiles::inline_proxy_layer(&dbx_mcp::tunnel_profiles::InlineProxyArgs {
+            proxy_enabled: Some(true),
+            proxy_host: flags.proxy_host.clone(),
+            proxy_port: flags.proxy_port,
+            proxy_username: flags.proxy_username.clone(),
+            proxy_password: flags.proxy_password.clone(),
+            proxy_type: flags.proxy_type.clone(),
+        })
+        .map_err(|e| CliError::new("INVALID_PROXY", e))?;
+        config.transport_layers.push(layer);
+    }
+
+    let saved = backend.add_connection_for_mcp(config).await.map_err(store_error)?;
+    if flags.format == OutputFormat::Json {
+        return ok(format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({ "id": saved.id, "name": saved.name })).unwrap()
+        ));
+    }
+    ok(format!("Connection \"{}\" added (id: {}).\n", saved.name, saved.id))
+}
+
+fn default_cli_port(db_type: &str) -> Option<u16> {
+    match db_type.to_ascii_lowercase().as_str() {
+        "postgres" | "redshift" | "gaussdb" | "opengauss" | "kingbase" | "highgo" | "vastbase" => Some(5432),
+        "mysql" | "doris" | "starrocks" | "mariadb" | "tidb" => Some(3306),
+        "sqlserver" => Some(1433),
+        "redis" => Some(6379),
+        "mongodb" => Some(27017),
+        "rqlite" => Some(4001),
+        "sqlite" | "duckdb" | "access" => Some(0),
+        _ => None,
+    }
+}
+
 async fn find_connection(backend: &dyn DbxBackend, name: &str) -> Result<ConnectionConfig, CliError> {
-    backend
-        .load_connections()
-        .await
-        .map_err(store_error)?
+    let connections = backend.load_connections().await.map_err(store_error)?;
+    if let Ok(Some(indexes)) = dbx_mcp::list_index::parse_list_index_range(name) {
+        if indexes.len() != 1 {
+            return Err(CliError::new(
+                "CONNECTION_RANGE",
+                "This command accepts a single connection index; use a range-capable command (stats/report/query/redis/schema/context).",
+            ));
+        }
+        let index = indexes[0];
+        return connections.get(index - 1).cloned().ok_or_else(|| {
+            CliError::new(
+                "CONNECTION_NOT_FOUND",
+                format!("List index #{index} is out of range (1-{}).", connections.len()),
+            )
+        });
+    }
+    let matching: Vec<_> = connections
         .into_iter()
-        .find(|connection| connection.name.eq_ignore_ascii_case(name))
-        .ok_or_else(|| CliError::new("CONNECTION_NOT_FOUND", format!("Connection \"{name}\" not found.")))
+        .filter(|connection| connection.name.eq_ignore_ascii_case(name) || connection.id == name)
+        .collect();
+    match matching.as_slice() {
+        [] => Err(CliError::new("CONNECTION_NOT_FOUND", format!("Connection \"{name}\" not found."))),
+        [connection] => Ok(connection.clone()),
+        _ => Err(CliError::new(
+            "AMBIGUOUS_CONNECTION",
+            format!("Multiple connections match \"{name}\". Use a unique name or list index (#)."),
+        )),
+    }
 }
 
 fn selected_database(connection: &ConnectionConfig, override_database: Option<&str>) -> String {
@@ -463,6 +1218,28 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
         allow_dangerous: false,
         help: false,
         version: false,
+        quiet: false,
+        verbose: false,
+        parallel: None,
+        skip_unsupported: true,
+        no_save: false,
+        output: None,
+        name: None,
+        db_type: None,
+        host: None,
+        port: None,
+        username: None,
+        password: None,
+        ssl: false,
+        driver_profile: None,
+        proxy: false,
+        proxy_type: None,
+        proxy_host: None,
+        proxy_port: None,
+        proxy_username: None,
+        proxy_password: None,
+        proxy_profile_ids: Vec::new(),
+        proxy_profile_names: Vec::new(),
     };
     let mut index = 0;
     while index < argv.len() {
@@ -472,7 +1249,7 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             break;
         }
         match arg.as_str() {
-            "--json" => flags.format = OutputFormat::Json,
+            "--json" | "-j" => flags.format = OutputFormat::Json,
             "--format" => {
                 let value = option_value(argv, &mut index, "--format")?;
                 flags.format = match value.as_str() {
@@ -484,8 +1261,25 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             }
             "--help" | "-h" => flags.help = true,
             "--version" | "-V" => flags.version = true,
-            "--schema" => flags.schema = Some(option_value(argv, &mut index, "--schema")?),
-            "--database" => flags.database = Some(option_value(argv, &mut index, "--database")?),
+            "--quiet" | "-q" => flags.quiet = true,
+            "--verbose" | "-v" => flags.verbose = true,
+            "--parallel" | "-P" => {
+                let next = argv.get(index + 1);
+                if let Some(value) = next.filter(|value| !value.starts_with('-') && value.chars().all(|c| c.is_ascii_digit()))
+                {
+                    let n = value.parse::<usize>().unwrap_or(0);
+                    flags.parallel = Some(if n == 0 {
+                        dbx_mcp::list_index::DEFAULT_PARALLEL_CONCURRENCY
+                    } else {
+                        n
+                    });
+                    index += 1;
+                } else {
+                    flags.parallel = Some(dbx_mcp::list_index::DEFAULT_PARALLEL_CONCURRENCY);
+                }
+            }
+            "--schema" | "-s" => flags.schema = Some(option_value(argv, &mut index, "--schema")?),
+            "--database" | "-d" => flags.database = Some(option_value(argv, &mut index, "--database")?),
             "--tables" => {
                 flags.tables = option_value(argv, &mut index, "--tables")?
                     .split(',')
@@ -499,12 +1293,52 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
                     Some(positive_usize(&option_value(argv, &mut index, "--max-tables")?, "--max-tables")?)
             }
             "--limit" => flags.max_rows = Some(positive_usize(&option_value(argv, &mut index, "--limit")?, "--limit")?),
-            "--timeout" => {
+            "--timeout" | "-t" => {
                 flags.timeout_ms = Some(duration_ms(&option_value(argv, &mut index, "--timeout")?, "--timeout")?)
             }
             "--file" => flags.file = Some(PathBuf::from(option_value(argv, &mut index, "--file")?)),
             "--allow-writes" => flags.allow_writes = true,
             "--allow-dangerous-sql" => flags.allow_dangerous = true,
+            "--skip-unsupported" => flags.skip_unsupported = true,
+            "--no-skip-unsupported" => flags.skip_unsupported = false,
+            "--no-save" | "-n" => flags.no_save = true,
+            "--output" | "-o" => flags.output = Some(PathBuf::from(option_value(argv, &mut index, "--output")?)),
+            "--name" => flags.name = Some(option_value(argv, &mut index, "--name")?),
+            "--type" => flags.db_type = Some(option_value(argv, &mut index, "--type")?),
+            "--host" => flags.host = Some(option_value(argv, &mut index, "--host")?),
+            "--port" => {
+                flags.port = Some(
+                    option_value(argv, &mut index, "--port")?
+                        .parse()
+                        .map_err(|_| CliError::new("INVALID_OPTION", "--port must be a number."))?,
+                )
+            }
+            "--username" => flags.username = Some(option_value(argv, &mut index, "--username")?),
+            "--password" => flags.password = Some(option_value(argv, &mut index, "--password")?),
+            "--ssl" => flags.ssl = true,
+            "--driver-profile" => flags.driver_profile = Some(option_value(argv, &mut index, "--driver-profile")?),
+            "--proxy" => flags.proxy = true,
+            "--proxy-type" => flags.proxy_type = Some(option_value(argv, &mut index, "--proxy-type")?),
+            "--proxy-host" | "-H" => flags.proxy_host = Some(option_value(argv, &mut index, "--proxy-host")?),
+            "--proxy-port" => {
+                flags.proxy_port = Some(
+                    option_value(argv, &mut index, "--proxy-port")?
+                        .parse()
+                        .map_err(|_| CliError::new("INVALID_OPTION", "--proxy-port must be a number."))?,
+                )
+            }
+            "--proxy-username" => flags.proxy_username = Some(option_value(argv, &mut index, "--proxy-username")?),
+            "--proxy-password" => flags.proxy_password = Some(option_value(argv, &mut index, "--proxy-password")?),
+            "--proxy-profile-id" | "--proxy-profiles" => {
+                flags
+                    .proxy_profile_ids
+                    .push(option_value(argv, &mut index, "--proxy-profile-id")?)
+            }
+            "--proxy-profile-name" => {
+                flags
+                    .proxy_profile_names
+                    .push(option_value(argv, &mut index, "--proxy-profile-name")?)
+            }
             value if value.starts_with('-') => {
                 return Err(CliError::new("UNKNOWN_OPTION", format!("Unknown option: {value}")))
             }
@@ -587,8 +1421,11 @@ fn db_type_name(db_type: DatabaseType) -> String {
 fn format_connections(connections: &[ConnectionConfig], format: OutputFormat) -> Result<String, CliError> {
     let rows: Vec<Value> = connections
         .iter()
-        .map(|connection| {
+        .enumerate()
+        .map(|(idx, connection)| {
             optional_object([
+                ("index", Some(json!(idx + 1))),
+                ("id", Some(json!(connection.id))),
                 ("name", Some(json!(connection.name))),
                 ("type", Some(json!(db_type_name(connection.db_type)))),
                 ("host", Some(json!(connection.host))),
@@ -599,13 +1436,13 @@ fn format_connections(connections: &[ConnectionConfig], format: OutputFormat) ->
         .collect();
     match format {
         OutputFormat::Json => json_string(&json!({ "connections": rows })),
-        OutputFormat::Csv => Ok(csv_table(&["name", "type", "host", "port", "database"], &rows)),
+        OutputFormat::Csv => Ok(csv_table(&["index", "id", "name", "type", "host", "port", "database"], &rows)),
         OutputFormat::Table => Ok(format!(
             "{}\n",
             markdown_table(
-                &["Name", "Type", "Host", "Port", "Database"],
+                &["#", "ID", "Name", "Type", "Host", "Port", "Database"],
                 &rows,
-                &["name", "type", "host", "port", "database"]
+                &["index", "id", "name", "type", "host", "port", "database"]
             )
         )),
     }
@@ -831,7 +1668,7 @@ fn csv_cell(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "Usage:\n  dbx doctor [--json]\n  dbx capabilities [--json]\n  dbx connections list [--json]\n  dbx schema list <connection> [--schema name] [--json]\n  dbx schema describe <connection> <table> [--schema name] [--json]\n  dbx query <connection> <sql> [--file path] [--limit n] [--timeout 10s] [--allow-writes] [--allow-dangerous-sql] [--json]\n  dbx context <connection> [--schema name] [--tables a,b] [--max-tables n] [--json]\n  dbx open <connection> <table> [--schema name] [--database name] [--json]"
+    "Usage:\n  dbx doctor [-j, --json]\n  dbx capabilities [-j, --json]\n  dbx connections list [-j, --json]\n  dbx connections add --name <name> --type <db_type> --host <host> [--port n] [--username u] [--password p] [-d, --database db] [--ssl] [--driver-profile x]\n      [--proxy] [--proxy-type socks5|http] [-H, --proxy-host h] [--proxy-port n] [--proxy-username u] [--proxy-password p]\n      [--proxy-profile-id id|#|1,2,3|#1-#3 | --proxy-profiles ... | --proxy-profile-name name (repeatable)] [-j, --json]\n  dbx connections remove <connection|#> [-j, --json]\n  dbx proxies list [-j, --json]\n  dbx stats <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [--proxy-profile-id ... | --proxy-profiles ... | --proxy-profile-name ...] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx report <connection|#|range> [-s, --schema name] [-d, --database name] [-t, --timeout 60s] [-P, --parallel [n]] [--skip-unsupported|--no-skip-unsupported] [--proxy-profile-id ... | --proxy-profiles ... | --proxy-profile-name ...] [-q, --quiet] [-v, --verbose] [-j, --json] [-n, --no-save] [-o, --output path]\n  dbx schema list <connection|#|range> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx schema describe <connection|#|range> <table> [-s, --schema name] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx query <connection|#|range> <sql> [--file path] [--limit n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [--proxy-profile-id id|# | --proxy-profile-name name|#] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx redis <connection|#|range> <command...> [-d, --database n] [-t, --timeout 10s] [--allow-writes] [--allow-dangerous-sql] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx context <connection|#|range> [-s, --schema name] [--tables a,b] [--max-tables n] [-P, --parallel [n]] [-q, --quiet] [-v, --verbose] [-j, --json]\n  dbx open <connection|#|range> <table> [-s, --schema name] [-d, --database name] [-P, --parallel [n]] [-j, --json]\n\nOptions:\n  -j, --json           JSON output\n  -q, --quiet          Suppress progress on stderr\n  -v, --verbose        Extra progress detail (e.g. SQL text)\n  -P, --parallel [n]   Concurrent batch (default concurrency 15)\n  -d, --database NAME  Target database\n  -s, --schema NAME    Target schema\n  -t, --timeout DUR    Query timeout (e.g. 500ms, 60s, 1m)\n  -H, --proxy-host H   Proxy host (connections add)\n  -o, --output PATH    Report output file or batch directory\n  -n, --no-save        Skip saving report to file\n  --skip-unsupported   stats/report: treat unsupported types as skipped (default)\n  --no-skip-unsupported stats/report: treat unsupported types as failures"
 }
 
 #[cfg(test)]
@@ -934,6 +1771,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_short_flags_and_parallel() {
+        let flags = parse_flags(&args(&["stats", "1-3", "-j", "-q", "-P", "3", "-t", "60s", "-d", "db"])).unwrap();
+        assert_eq!(flags.args, args(&["stats", "1-3"]));
+        assert!(flags.format == OutputFormat::Json);
+        assert!(flags.quiet);
+        assert_eq!(flags.parallel, Some(3));
+        assert_eq!(flags.timeout_ms, Some(60_000));
+        assert_eq!(flags.database.as_deref(), Some("db"));
+    }
+
+    #[test]
     fn preserves_double_dash_sql() {
         let flags = parse_flags(&args(&["query", "local", "--json", "--", "-- comment\nselect 1"])).unwrap();
         assert_eq!(flags.args, args(&["query", "local", "-- comment\nselect 1"]));
@@ -967,7 +1815,7 @@ mod tests {
             "--json",
         ]))
         .unwrap();
-        let output = run_with_backend(&MongoBackend::new(), flags).await.unwrap();
+        let output = outcome_text(run_with_backend(Arc::new(MongoBackend::new()), flags).await.unwrap());
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["connection"], "local-mongo");
         assert_eq!(value["row_count"], 2);
@@ -978,7 +1826,7 @@ mod tests {
     async fn blocks_mongo_writes_without_explicit_permission() {
         let flags =
             parse_flags(&args(&["query", "local-mongo", "db.products.insertOne({name: 'demo'})", "--json"])).unwrap();
-        let error = run_with_backend(&MongoBackend::new(), flags).await.unwrap_err();
+        let error = run_with_backend(Arc::new(MongoBackend::new()), flags).await.unwrap_err();
         assert_eq!(error.code, "SQL_BLOCKED");
     }
 
@@ -1009,7 +1857,7 @@ mod tests {
         .unwrap();
         connection.url_params = Some("authSource=admin".to_string());
         storage.save_connections(&[connection]).await.expect("save connection");
-        let backend = LocalBackend::open(&db_path).await.expect("open local backend");
+        let backend: Arc<dyn DbxBackend> = Arc::new(LocalBackend::open(&db_path).await.expect("open local backend"));
 
         let cleanup = parse_flags(&args(&[
             "query",
@@ -1018,7 +1866,7 @@ mod tests {
             "--allow-writes",
         ]))
         .unwrap();
-        run_with_backend(&backend, cleanup).await.expect("initial cleanup");
+        run_with_backend(Arc::clone(&backend), cleanup).await.expect("initial cleanup");
 
         let insert = parse_flags(&args(&[
             "query",
@@ -1028,7 +1876,7 @@ mod tests {
             "--json",
         ]))
         .unwrap();
-        let inserted: Value = serde_json::from_str(&run_with_backend(&backend, insert).await.unwrap()).unwrap();
+        let inserted: Value = serde_json::from_str(&outcome_text(run_with_backend(Arc::clone(&backend), insert).await.unwrap())).unwrap();
         assert_eq!(inserted["row_count"], 2);
 
         let find = parse_flags(&args(&[
@@ -1038,7 +1886,7 @@ mod tests {
             "--json",
         ]))
         .unwrap();
-        let found: Value = serde_json::from_str(&run_with_backend(&backend, find).await.unwrap()).unwrap();
+        let found: Value = serde_json::from_str(&outcome_text(run_with_backend(Arc::clone(&backend), find).await.unwrap())).unwrap();
         assert_eq!(found["row_count"], 2);
         assert_eq!(found["rows"][0]["name"], "Ada");
         assert_eq!(found["rows"][1]["name"], "Grace");
@@ -1050,6 +1898,6 @@ mod tests {
             "--allow-writes",
         ]))
         .unwrap();
-        run_with_backend(&backend, cleanup).await.expect("final cleanup");
+        run_with_backend(Arc::clone(&backend), cleanup).await.expect("final cleanup");
     }
 }

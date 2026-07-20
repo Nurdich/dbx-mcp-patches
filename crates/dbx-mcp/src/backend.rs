@@ -6,7 +6,7 @@ use dbx_core::{
     agent_tools::{self, AgentSqlPermissions},
     connection::AppState,
     db::{redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
-    models::connection::{ConnectionConfig, DatabaseType},
+    models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig},
     storage::{McpGlobalPolicy, McpGlobalPolicyState, Storage},
 };
 use serde::{Deserialize, Serialize};
@@ -71,6 +71,9 @@ pub trait DbxBackend: Send + Sync {
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String>;
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+    async fn load_tunnel_profiles(&self) -> Result<Vec<TransportLayerConfig>, String> {
+        Ok(Vec::new())
+    }
     async fn execute_agent_tool(
         &self,
         connection: &ConnectionConfig,
@@ -286,6 +289,10 @@ impl DbxBackend for LocalBackend {
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         self.state.storage.load_connections().await
+    }
+
+    async fn load_tunnel_profiles(&self) -> Result<Vec<TransportLayerConfig>, String> {
+        self.state.storage.load_tunnel_profiles().await
     }
 
     async fn execute_agent_tool(
@@ -627,6 +634,14 @@ impl DbxBackend for WebBackend {
             .json()
             .await
             .map_err(|error| format!("Invalid connection list response: {error}"))
+    }
+
+    async fn load_tunnel_profiles(&self) -> Result<Vec<TransportLayerConfig>, String> {
+        self.request(reqwest::Method::GET, "/api/tunnel-profiles/list", None)
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid tunnel profile list response: {error}"))
     }
 
     async fn execute_agent_tool(
