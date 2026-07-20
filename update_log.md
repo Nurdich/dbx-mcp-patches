@@ -1,5 +1,26 @@
 ﻿# Update Log
 
+## 2026-07-21 — 废弃 Node 0.4.x 补丁树（Rust-only）
+
+### 决策
+
+上游官方不再更新 Node 版 MCP/CLI 工具实现；npm `@dbx-app/mcp-server` / `@dbx-app/cli` 仅为薄 launcher → 平台 Rust 二进制。本仓库此后 **仅维护 Rust**。
+
+### 变更
+
+| 项 | 处理 |
+|----|------|
+| `legacy-node-packages/`（约 56MB，含 cli / mcp-server / node-core 0.4.31） | **删除**（git 历史可追溯） |
+| `packages/mcp-server`、`packages/cli` | **保留**（上游薄 launcher，无工具逻辑） |
+| `crates/dbx-mcp`、`crates/dbx-cli` | **保留**（全部功能真源） |
+| `dbx-core` 相关补丁 | 仍在完整 monorepo / `dbx-main-rust` |
+| 文档 | `README.md` / `PATCHES.md` / `LEGACY.md` / 本日志 |
+
+### 构建
+
+未执行编译或运行（按用户要求）。
+
+---
 ## 2026-07-21 — 多代理故障转移（failover group，非跳级链）
 
 ### 语义

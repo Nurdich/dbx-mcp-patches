@@ -12,8 +12,9 @@ Local enhancements on top of upstream [t8y2/dbx](https://github.com/t8y2/dbx) **
 | MCP | `crates/dbx-mcp` 0.4.38 |
 | CLI | `crates/dbx-cli` 0.4.38 |
 | npm | Thin launchers only (`packages/mcp-server`, `packages/cli`) |
+| Node 0.4.x | **Abandoned** — see [LEGACY.md](./LEGACY.md); tree `legacy-node-packages/` removed |
 
-Previous Node baseline (`packages-v0.4.31` / `5206750`) is archived in `legacy-node-packages/`.
+Previous Node baseline (`packages-v0.4.31` / `5206750`) is no longer maintained; all features live in Rust crates (+ `dbx-core` patches).
 
 ## What we patched (not in upstream Rust)
 
@@ -71,7 +72,7 @@ cargo build -p dbx-mcp --release
 cargo build -p dbx-cli --release --no-default-features
 ```
 
-**Do not** expect the old Node `packages/mcp-server/src/index.ts` path to work against packages ≥0.4.38.
+**Do not** expect the old Node `packages/mcp-server/src/index.ts` / `node-core` path to work against packages ≥0.4.38 (Node patches abandoned).
 
 ## Remaining / optional gaps
 

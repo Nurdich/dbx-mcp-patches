@@ -1,7 +1,11 @@
-# Legacy Node packages
+# Legacy Node packages — abandoned
 
-The directories under `legacy-node-packages/` are the **pre-Rust** patches against `@dbx-app/{mcp-server,cli,node-core}@0.4.31`.
+**Status (2026-07-21):** Node 0.4.x MCP/CLI patches are **abandoned**. Upstream no longer maintains the Node `@dbx-app/node-core` tool implementation; official npm packages are thin launchers that spawn platform Rust binaries only.
 
-Upstream MCP/CLI are now Rust (`crates/dbx-mcp`, `crates/dbx-cli`, npm 0.4.38+ launchers). Do **not** merge these Node packages into modern DBX checkouts expecting them to be the MCP runtime.
+| Era | Location | Notes |
+|-----|----------|-------|
+| Active | `crates/dbx-mcp`, `crates/dbx-cli` (+ `dbx-core` patches in full monorepo / `dbx-main-rust`) | All features live here |
+| npm (kept) | `packages/mcp-server`, `packages/cli` | Upstream thin launchers only — no tool logic |
+| Removed | `legacy-node-packages/` (was ~56MB Node 0.4.31 tree) | Deleted from this repo; history remains in git |
 
-Kept only as a reference for feature behavior while finishing the Rust port.
+Do **not** expect old Node `packages/mcp-server/src/index.ts` / `node-core` patches to work against packages ≥0.4.38.

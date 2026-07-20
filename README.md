@@ -2,7 +2,7 @@
 
 Local enhancements for [DBX](https://github.com/t8y2/dbx) **Rust** MCP Server and CLI.
 
-**Upstream:** [t8y2/dbx](https://github.com/t8y2/dbx) — this repo contains **patched crate sources + thin npm launchers**, not the full DBX monorepo (`dbx-core` stays upstream).
+**Upstream:** [t8y2/dbx](https://github.com/t8y2/dbx) — this repo contains **patched crate sources + thin npm launchers**, not the full DBX monorepo (`dbx-core` stays upstream / see `dbx-main-rust`).
 
 ## Upstream change (2026-07-19 / v0.5.61+)
 
@@ -12,13 +12,13 @@ Local enhancements for [DBX](https://github.com/t8y2/dbx) **Rust** MCP Server an
 | MCP crate | `crates/dbx-mcp` **0.4.38** |
 | CLI crate | `crates/dbx-cli` **0.4.38** |
 | npm | `@dbx-app/mcp-server` / `@dbx-app/cli` **0.4.38** = thin Node launcher → platform Rust binary |
-| Deprecated | Node `@dbx-app/node-core` MCP implementation (archived under `legacy-node-packages/`) |
+| Node 0.4.x patches | **Abandoned** — official no longer updates Node tool impl; see [LEGACY.md](./LEGACY.md) |
 
 Release note highlight: **原生 MCP Server / 原生 DBX CLI** — tools run in Rust; npm only resolves `@dbx-app/mcp-<platform>` / `cli-<platform>` binaries.
 
 ## Strategy
 
-**A + thin launcher (B):** re-implement patch features in Rust (`crates/dbx-mcp`, `crates/dbx-cli`). Keep npm `packages/*/bin/*.js` as upstream launchers (no Node tool logic).
+**Rust-only going forward.** All patch features live in `crates/dbx-mcp` / `crates/dbx-cli` (plus `dbx-core` connect/proxy patches in the full monorepo). Keep npm `packages/*/bin/*.js` as upstream thin launchers only (no Node tool logic).
 
 ## Layout
 
@@ -28,7 +28,7 @@ Release note highlight: **原生 MCP Server / 原生 DBX CLI** — tools run in 
 | `crates/dbx-cli` | Patched Rust CLI (stats/report/proxies/parallel/short flags/add/remove/redis) |
 | `packages/mcp-server` | Upstream npm launcher (spawn Rust binary) |
 | `packages/cli` | Upstream npm launcher |
-| `legacy-node-packages/` | Previous Node 0.4.31 patches (reference only) |
+| `LEGACY.md` | Note: Node 0.4.x tree removed / abandoned |
 | `UPSTREAM_BASELINE.txt` | Exact upstream SHA |
 
 ## Features ported to Rust
