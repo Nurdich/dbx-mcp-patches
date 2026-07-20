@@ -25,7 +25,7 @@ Release note highlight: **原生 MCP Server / 原生 DBX CLI** — tools run in 
 | Path | Role |
 |------|------|
 | `crates/dbx-mcp` | Patched Rust MCP (tools + stats/report/proxy/list-index) |
-| `crates/dbx-cli` | Patched Rust CLI (`stats` / `report` / `proxies list`) |
+| `crates/dbx-cli` | Patched Rust CLI (stats/report/proxies/parallel/short flags/add/remove/redis) |
 | `packages/mcp-server` | Upstream npm launcher (spawn Rust binary) |
 | `packages/cli` | Upstream npm launcher |
 | `legacy-node-packages/` | Previous Node 0.4.31 patches (reference only) |
@@ -37,9 +37,11 @@ Release note highlight: **原生 MCP Server / 原生 DBX CLI** — tools run in 
 - `dbx_list_proxies` / `dbx proxies list`
 - `dbx_get_database_stats` / `dbx stats` (catalog `TABLE_ROWS` / estimates, no `COUNT(*)`)
 - `dbx_get_database_report` / `dbx report` (tables + comments + indexes; report saves to `{cwd}/reports/`)
-- Numeric list IDs + ranges (`1`, `#2`, `1-15`)
-- `skip_unsupported` for batch stats/report
-- One-shot `proxy_profile_*` override on stats/report
+- Numeric list IDs + ranges (`1`, `#2`, `1-15`) on MCP + CLI batch tools
+- `skip_unsupported` + Skipped vs Failures for batch stats/report
+- One-shot `proxy_profile_*` override on stats/report/**query**
+- MCP range batch: list_tables / describe / execute_query / schema_context (sequential + progress prepend)
+- CLI: `--parallel`/`-P`, short flags, `connections add|remove`, `dbx redis`, stderr progress, soft-fail exit
 
 See [PATCHES.md](./PATCHES.md) and [update_log.md](./update_log.md) for the gap matrix.
 

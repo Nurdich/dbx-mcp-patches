@@ -22,28 +22,30 @@ Previous Node baseline (`packages-v0.4.31` / `5206750`) is archived in `legacy-n
 | Feature | Status |
 |---------|--------|
 | `dbx_list_proxies` | **Ported** |
-| `dbx_get_database_stats` | **Ported** (catalog estimates; Redis/Mongo special-cased) |
-| `dbx_get_database_report` | **Ported** |
+| `dbx_get_database_stats` / `dbx_get_database_report` | **Ported** |
 | Numeric `#` / ranges on connection selectors | **Ported** |
 | `#` column in `dbx_list_connections` | **Ported** |
 | Inline proxy + `proxy_profile_*` on `dbx_add_connection` | **Ported** |
-| One-shot `proxy_profile_*` on stats/report | **Ported** |
-| Batch stats/report + `skip_unsupported` | **Ported** |
-| Proxy override on `dbx_execute_query` | **Pending** |
-| Streaming connection progress in tool text | **Pending** (catalog path is single-shot) |
-| Parallel batch (MCP) | N/A (CLI-only historically) |
+| One-shot `proxy_profile_*` on stats/report/**query** | **Ported** |
+| Batch ranges on list_tables / describe / query / schema_context / stats / report | **Ported** (sequential) |
+| `skip_unsupported` + Skipped vs Failures | **Ported** |
+| Progress prepend in tool text (`DBX_MCP_QUIET` / `DBX_MCP_VERBOSE`) | **Ported** |
+| Parallel batch (MCP) | N/A (CLI-only) |
 
 ### CLI (`crates/dbx-cli`)
 
 | Feature | Status |
 |---------|--------|
-| `dbx proxies list` | **Ported** |
-| `dbx stats` / `dbx report` | **Ported** |
-| List index / ranges | **Ported** |
-| Report save to `{cwd}/reports/` | **Ported** (`-n` / `--no-save`) |
-| `#` column in `connections list` | **Ported** |
-| `--parallel` / short-flag parity / `connections add` proxy flags | **Pending** |
-| `connections remove` / `dbx redis` | **Pending** (upstream CLI still narrower) |
+| `dbx proxies list` / `stats` / `report` | **Ported** |
+| List index / ranges + `#` column | **Ported** |
+| Report save to `{cwd}/reports/` (`-n` / `-o`) | **Ported** |
+| `--parallel` / `-P` (default concurrency 15) | **Ported** |
+| Short flags (`-j -d -s -t -P -n -o -v -q -H` …) | **Ported** |
+| `connections add` / `connections remove` | **Ported** |
+| `dbx redis` | **Ported** |
+| Proxy override on stats/report/query | **Ported** |
+| Streaming stderr progress + batch soft-fail exit | **Ported** |
+| Continue-on-error + Skipped vs Failures | **Ported** |
 
 ### Shared modules (inside `dbx-mcp` crate)
 
@@ -51,6 +53,8 @@ Previous Node baseline (`packages-v0.4.31` / `5206750`) is archived in `legacy-n
 - `tunnel_profiles.rs` — load/format/apply proxy profiles
 - `database_stats.rs` / `database_report.rs` — SQL builders + fetch
 - `resolve.rs` — connection + proxy resolution for tools
+- `batch.rs` — sequential / parallel batch runners
+- `progress.rs` — CLI stderr / MCP buffered progress
 
 ## Install into DBX monorepo
 
@@ -63,6 +67,14 @@ cargo build -p dbx-cli --release --no-default-features
 ```
 
 **Do not** expect the old Node `packages/mcp-server/src/index.ts` path to work against packages ≥0.4.38.
+
+## Remaining / optional gaps
+
+| Item | Notes |
+|------|-------|
+| MCP Redis range batch | CLI has ranges; MCP `dbx_execute_redis_command` still single-connection |
+| Deeper reuse of upstream catalog stats APIs | Optional optimization |
+| Validate against live multi-DB fleets | User-side `cargo build` + smoke |
 
 ## Contributing upstream
 

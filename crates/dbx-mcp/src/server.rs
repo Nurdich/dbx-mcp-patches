@@ -65,6 +65,12 @@ pub struct ExecuteQueryRequest {
     pub database: Option<String>,
     #[schemars(description = "SQL query to execute")]
     pub sql: String,
+    #[schemars(description = "Query timeout in milliseconds")]
+    pub timeout_ms: Option<u64>,
+    #[schemars(description = "One-shot proxy profile ID or list index (#)")]
+    pub proxy_profile_id: Option<String>,
+    #[schemars(description = "One-shot proxy profile name or list index (#)")]
+    pub proxy_profile_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -269,103 +275,139 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_list_tables", description = "List tables and views for a database connection")]
+    #[tool(
+        name = "dbx_list_tables",
+        description = "List tables and views for a database connection. Accepts connection ranges (e.g. 1-15); runs sequentially."
+    )]
     async fn list_tables(&self, Parameters(request): Parameters<ListTablesRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
+        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+            Ok(configs) => configs,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved.connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        match self.backend.list_tables(&resolved.connection, &database, &request.schema.unwrap_or_default()).await {
-            Ok(tables) if tables.is_empty() => text("No tables found."),
-            Ok(tables) => text(
-                tables
-                    .into_iter()
-                    .map(|table| {
-                        let comment = table
-                            .comment
-                            .filter(|comment| !comment.is_empty())
-                            .map(|comment| format!(" -- {comment}"))
-                            .unwrap_or_default();
-                        format!("- {} ({}){}", table.name, table.table_type, comment)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            Err(error) => tool_error("TABLE_LIST_ERROR", error),
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            let database = match self.resolve_database(request.database.clone(), &connection) {
+                Ok(database) => database,
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                    continue;
+                }
+            };
+            match self
+                .backend
+                .list_tables(&connection, &database, &request.schema.clone().unwrap_or_default())
+                .await
+            {
+                Ok(tables) if tables.is_empty() => parts.push(format!("{heading}No tables found.")),
+                Ok(tables) => {
+                    let body = tables
+                        .into_iter()
+                        .map(|table| {
+                            let comment = table
+                                .comment
+                                .filter(|comment| !comment.is_empty())
+                                .map(|comment| format!(" -- {comment}"))
+                                .unwrap_or_default();
+                            format!("- {} ({}){}", table.name, table.table_type, comment)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    parts.push(format!("{heading}{body}"));
+                }
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}Error [TABLE_LIST_ERROR]: {error}"));
+                }
+            }
         }
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
 
-    #[tool(name = "dbx_describe_table", description = "Get column definitions for a table")]
+
+    #[tool(
+        name = "dbx_describe_table",
+        description = "Get column definitions for a table. Accepts connection ranges (e.g. 1-15); runs sequentially."
+    )]
     async fn describe_table(&self, Parameters(request): Parameters<DescribeTableRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
+        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+            Ok(configs) => configs,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database, &resolved.connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        match self
-            .backend
-            .get_columns(&resolved.connection, &database, &request.schema.unwrap_or_default(), &request.table)
-            .await
-        {
-            Ok(columns) if columns.is_empty() => text("No columns found."),
-            Ok(columns) => text(format_columns(&columns)),
-            Err(error) => tool_error("TABLE_DESCRIPTION_ERROR", error),
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            let database = match self.resolve_database(request.database.clone(), &connection) {
+                Ok(database) => database,
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                    continue;
+                }
+            };
+            match self
+                .backend
+                .get_columns(&connection, &database, &request.schema.clone().unwrap_or_default(), &request.table)
+                .await
+            {
+                Ok(columns) if columns.is_empty() => parts.push(format!("{heading}No columns found.")),
+                Ok(columns) => parts.push(format!("{heading}{}", format_columns(&columns))),
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}Error [TABLE_DESCRIPTION_ERROR]: {error}"));
+                }
+            }
         }
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
+
 
     #[tool(
         name = "dbx_execute_query",
-        description = "Execute a SQL query on a database connection (max 100 rows returned)"
+        description = "Execute a SQL query on a database connection (max 100 rows returned). Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn execute_query(&self, Parameters(request): Parameters<ExecuteQueryRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
-            Err(error) => return error,
-        };
-        let connection = &resolved.connection;
-        if connection.db_type == dbx_core::models::connection::DatabaseType::Redis {
-            return tool_error(
-                "REDIS_COMMAND_REQUIRED",
-                "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
-            );
-        }
-        let database = match self.resolve_database(request.database, connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        if connection.db_type == DatabaseType::MongoDb {
-            let command = match validate_mongo_command(connection, &resolved.policy, &database, &request.sql) {
-                Ok(command) => command,
-                Err(error) => return error,
-            };
-            return match self.backend.execute_mongo_command(connection, &database, &command).await {
-                Ok(result) => text(format_query_result(&result, 100)),
-                Err(error) => backend_tool_error("QUERY_ERROR", error),
-            };
-        }
-        let permissions = match validate_sql_policy(connection, &resolved.policy, &database, &request.sql) {
-            Ok(permissions) => permissions,
-            Err(error) => return error,
-        };
-        let result = self
-            .backend
-            .execute_agent_tool(
-                connection,
-                &database,
-                "execute_query",
-                json!({ "sql": request.sql, "limit": 100 }),
-                permissions,
+        let configs = match self
+            .resolve_batch_configs(
+                &request.selector,
+                request.proxy_profile_id.clone(),
+                request.proxy_profile_name.clone(),
             )
-            .await;
-        agent_result(result)
+            .await
+        {
+            Ok(configs) => configs,
+            Err(error) => return error,
+        };
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            match self.execute_query_on_connection(&connection, &request).await {
+                Ok(body) => parts.push(format!("{heading}{body}")),
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                }
+            }
+        }
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
+
 
     #[tool(name = "dbx_execute_redis_command", description = "Execute a Redis command on a Redis connection")]
     async fn execute_redis_command(
@@ -436,50 +478,34 @@ impl DbxMcpServer {
         }
     }
 
-    #[tool(name = "dbx_get_schema_context", description = "Get compact table and column context for writing SQL")]
+    #[tool(
+        name = "dbx_get_schema_context",
+        description = "Get compact table and column context for writing SQL. Accepts connection ranges (e.g. 1-15); runs sequentially."
+    )]
     async fn get_schema_context(&self, Parameters(request): Parameters<SchemaContextRequest>) -> CallToolResult {
-        let resolved = match self.resolve_connection(&request.selector).await {
-            Ok(resolved) => resolved,
+        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+            Ok(configs) => configs,
             Err(error) => return error,
         };
-        let connection = &resolved.connection;
-        let database = match self.resolve_database(request.database, connection) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
-        let schema = request.schema.unwrap_or_default();
-        let max_tables = request.max_tables.unwrap_or(8).clamp(1, 20);
-        let available = match self.backend.list_tables(connection, &database, &schema).await {
-            Ok(tables) => tables,
-            Err(error) => return tool_error("SCHEMA_CONTEXT_ERROR", error),
-        };
-        let requested = request
-            .tables
-            .unwrap_or_default()
-            .into_iter()
-            .map(|name| name.to_ascii_lowercase())
-            .collect::<std::collections::HashSet<_>>();
-        let mut selected = if requested.is_empty() {
-            available.iter().collect::<Vec<_>>()
-        } else {
-            available.iter().filter(|table| requested.contains(&table.name.to_ascii_lowercase())).collect::<Vec<_>>()
-        };
-        let truncated = selected.len() > max_tables || (requested.is_empty() && available.len() > max_tables);
-        selected.truncate(max_tables);
-        if selected.is_empty() {
-            return text("No matching tables found.");
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
+        let total = configs.len();
+        let mut parts = Vec::new();
+        let mut failures = 0usize;
+        for (idx, connection) in configs.into_iter().enumerate() {
+            crate::progress::log_using_connection(&connection);
+            let heading = crate::batch::batch_heading(&connection, idx + 1, total);
+            match self.schema_context_on_connection(&connection, &request).await {
+                Ok(body) => parts.push(format!("{heading}{body}")),
+                Err(error) => {
+                    failures += 1;
+                    parts.push(format!("{heading}{}", call_tool_message(&error)));
+                }
+            }
         }
-        let mut tables = Vec::with_capacity(selected.len());
-        for table in selected {
-            // Keep metadata calls sequential because some embedded drivers expose a single physical connection.
-            let columns = match self.backend.get_columns(connection, &database, &schema, &table.name).await {
-                Ok(columns) => columns,
-                Err(error) => return tool_error("SCHEMA_CONTEXT_ERROR", error),
-            };
-            tables.push((table.clone(), columns));
-        }
-        text(format_schema_context(&connection.name, &database, &schema, &tables, truncated))
+        finish_batch_parts(parts, total, 0, failures, &progress)
     }
+
 
     #[tool(name = "dbx_add_connection", description = "Add a new database connection to DBX")]
     async fn add_connection(&self, Parameters(request): Parameters<AddConnectionRequest>) -> CallToolResult {
@@ -754,69 +780,159 @@ impl DbxMcpServer {
         report: bool,
     ) -> CallToolResult {
         let skip = skip_unsupported.unwrap_or(true);
-        let configs = match crate::resolve::resolve_connections(
-            self.backend.as_ref(),
-            &self.scope,
-            selector.connection_id.as_deref(),
-            selector.connection_name.as_deref(),
-        )
-        .await
+        let configs = match self
+            .resolve_batch_configs(&selector, proxy_profile_id, proxy_profile_name)
+            .await
         {
             Ok(configs) => configs,
             Err(error) => return error,
         };
+        let progress = crate::progress::mcp_progress_options();
+        let _guard = crate::progress::push_progress(progress.clone());
         let mut parts: Vec<String> = Vec::new();
         let mut failures = 0usize;
         let mut skipped = 0usize;
         let total = configs.len();
         for (idx, config) in configs.into_iter().enumerate() {
-            let config = match crate::resolve::apply_proxy_override_if_requested(
-                self.backend.as_ref(),
-                config,
-                proxy_profile_id.clone(),
-                proxy_profile_name.clone(),
-            )
-            .await
-            {
-                Ok(config) => config,
-                Err(error) => return error,
-            };
+            crate::progress::log_using_connection(&config);
             let options = crate::database_stats::DatabaseStatsOptions {
                 database: database.clone(),
                 schema: schema.clone(),
                 redis_db: None,
                 timeout_ms,
             };
-            let label = format!("[{}/{}] {}", idx + 1, total, config.name);
+            let heading = crate::batch::batch_heading(&config, idx + 1, total);
             let result = if report {
                 crate::database_report::fetch_database_report(self.backend.as_ref(), &config, options).await
             } else {
                 crate::database_stats::fetch_database_stats(self.backend.as_ref(), &config, options).await
             };
             match result {
-                Ok(body) => parts.push(format!("## {label}\n\n{body}")),
+                Ok(body) => parts.push(format!("{heading}{body}")),
                 Err(error) if skip && error.code == "UNSUPPORTED_DB_TYPE" => {
                     skipped += 1;
-                    parts.push(format!("## {label}\n\nSkipped [{}]: {}", error.code, error.message));
+                    parts.push(format!("{heading}Skipped [{}]: {}", error.code, error.message));
                 }
                 Err(error) => {
                     failures += 1;
-                    parts.push(format!("## {label}\n\nError [{}]: {}", error.code, error.message));
+                    parts.push(format!("{heading}Error [{}]: {}", error.code, error.message));
                 }
             }
         }
-        if total > 1 {
-            parts.push(format!(
-                "---\nBatch summary: {total} connection(s), {} ok, {skipped} skipped, {failures} failed.",
-                total - skipped - failures
+        finish_batch_parts(parts, total, skipped, failures, &progress)
+    }
+
+
+
+    async fn resolve_batch_configs(
+        &self,
+        selector: &ConnectionSelector,
+        proxy_profile_id: Option<String>,
+        proxy_profile_name: Option<String>,
+    ) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, CallToolResult> {
+        let configs = crate::resolve::resolve_connections(
+            self.backend.as_ref(),
+            &self.scope,
+            selector.connection_id.as_deref(),
+            selector.connection_name.as_deref(),
+        )
+        .await?;
+        let mut out = Vec::with_capacity(configs.len());
+        for config in configs {
+            out.push(
+                crate::resolve::apply_proxy_override_if_requested(
+                    self.backend.as_ref(),
+                    config,
+                    proxy_profile_id.clone(),
+                    proxy_profile_name.clone(),
+                )
+                .await?,
+            );
+        }
+        Ok(out)
+    }
+
+    async fn execute_query_on_connection(
+        &self,
+        connection: &dbx_core::models::connection::ConnectionConfig,
+        request: &ExecuteQueryRequest,
+    ) -> Result<String, CallToolResult> {
+        let policy = self.load_policy().await?;
+        if connection.db_type == DatabaseType::Redis {
+            return Err(tool_error(
+                "REDIS_COMMAND_REQUIRED",
+                "Redis connections do not accept SQL through dbx_execute_query. Use dbx_execute_redis_command.",
             ));
         }
-        let body = parts.join("\n\n");
-        if failures > 0 {
-            CallToolResult::error(vec![ContentBlock::text(body)])
-        } else {
-            text(body)
+        let database = self.resolve_database(request.database.clone(), connection)?;
+        crate::progress::log_query_sql(&request.sql);
+        if connection.db_type == DatabaseType::MongoDb {
+            let command = validate_mongo_command(connection, &policy, &database, &request.sql)?;
+            let result = self
+                .backend
+                .execute_mongo_command(connection, &database, &command)
+                .await
+                .map_err(|error| backend_tool_error("QUERY_ERROR", error))?;
+            return Ok(format_query_result(&result, 100));
         }
+        let permissions = validate_sql_policy(connection, &policy, &database, &request.sql)?;
+        let _ = request.timeout_ms;
+        let result = self
+            .backend
+            .execute_agent_tool(
+                connection,
+                &database,
+                "execute_query",
+                json!({ "sql": request.sql, "limit": 100 }),
+                permissions,
+            )
+            .await;
+        if result.is_error {
+            return Err(agent_result(result));
+        }
+        Ok(result.content)
+    }
+
+    async fn schema_context_on_connection(
+        &self,
+        connection: &dbx_core::models::connection::ConnectionConfig,
+        request: &SchemaContextRequest,
+    ) -> Result<String, CallToolResult> {
+        let database = self.resolve_database(request.database.clone(), connection)?;
+        let schema = request.schema.clone().unwrap_or_default();
+        let max_tables = request.max_tables.unwrap_or(8).clamp(1, 20);
+        let available = self
+            .backend
+            .list_tables(connection, &database, &schema)
+            .await
+            .map_err(|error| tool_error("SCHEMA_CONTEXT_ERROR", error))?;
+        let requested = request
+            .tables
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<std::collections::HashSet<_>>();
+        let mut selected = if requested.is_empty() {
+            available.iter().collect::<Vec<_>>()
+        } else {
+            available.iter().filter(|table| requested.contains(&table.name.to_ascii_lowercase())).collect::<Vec<_>>()
+        };
+        let truncated = selected.len() > max_tables || (requested.is_empty() && available.len() > max_tables);
+        selected.truncate(max_tables);
+        if selected.is_empty() {
+            return Ok("No matching tables found.".to_string());
+        }
+        let mut tables = Vec::new();
+        for table in selected {
+            let columns = self
+                .backend
+                .get_columns(connection, &database, &schema, &table.name)
+                .await
+                .map_err(|error| tool_error("SCHEMA_CONTEXT_ERROR", error))?;
+            tables.push((table.clone(), columns));
+        }
+        Ok(format_schema_context(&connection.name, &database, &schema, &tables, truncated))
     }
 
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
@@ -958,6 +1074,40 @@ impl ServerHandler for DbxMcpServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("dbx", env!("CARGO_PKG_VERSION")))
             .with_instructions("Use DBX connections to inspect schemas and query databases safely.")
+    }
+}
+
+
+fn call_tool_message(result: &CallToolResult) -> String {
+    result
+        .content
+        .first()
+        .and_then(|block| block.as_text())
+        .map(|text| text.text.clone())
+        .unwrap_or_else(|| "Error".to_string())
+}
+
+fn finish_batch_parts(
+    mut parts: Vec<String>,
+    total: usize,
+    skipped: usize,
+    failures: usize,
+    progress: &crate::progress::ProgressOptions,
+) -> CallToolResult {
+    if total > 1 {
+        parts.push(crate::batch::batch_summary(
+            total,
+            total.saturating_sub(skipped + failures),
+            skipped,
+            failures,
+        ));
+    }
+    let progress_text = crate::progress::format_progress_section(&crate::progress::collector_text(progress));
+    let body = format!("{progress_text}{}", parts.join("\n\n"));
+    if failures > 0 {
+        CallToolResult::error(vec![ContentBlock::text(body)])
+    } else {
+        text(body)
     }
 }
 

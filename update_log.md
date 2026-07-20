@@ -1,5 +1,45 @@
 ﻿# Update Log
 
+## 2026-07-21 — 第二波：query/并行/短参/进度/connections+redis
+
+### 完成
+
+**MCP (`crates/dbx-mcp`)**
+- `dbx_execute_query`：`proxy_profile_id/name` 一次性覆盖 + 连接范围批量（顺序）
+- `dbx_list_tables` / `dbx_describe_table` / `dbx_get_schema_context`：范围批量 + continue-on-error
+- stats/report：Skipped vs Failures 汇总；进度文本前置（`DBX_MCP_QUIET` / `DBX_MCP_VERBOSE`）
+- 新增 `batch.rs`、`progress.rs`
+
+**CLI (`crates/dbx-cli`)**
+- `--parallel` / `-P [n]`（默认并发 15）：stats/report/query/redis/schema/context/open
+- 短参：`-j -d -s -t -P -n -o -v -q -H` 等
+- `connections add`（含内联代理 / proxy-profile）与 `connections remove`
+- `dbx redis <connection|#|range> <command...>`
+- stderr 流式进度；批量部分失败时 stdout 输出摘要并以 exit 1 soft-fail
+- query/stats/report 支持一次性 `--proxy-profile-*` 覆盖
+
+### 仍受限 / 可选
+
+| 项 | 说明 |
+|----|------|
+| MCP Redis 范围批量 | MCP 工具仍为单连接；CLI 已支持范围 |
+| 实机多库验证 | 需用户本地 `cargo build` 后冒烟 |
+| 更深度复用上游 catalog stats API | 可选优化 |
+
+### 同步
+
+已将补丁源同步到 `C:\usr\local\dbx-main-rust\crates\{dbx-mcp,dbx-cli}`。
+
+### 构建（请自行编译，本代理未执行 cargo）
+
+```bash
+# 在完整 dbx 仓库（含 dbx-core）中：
+cargo build -p dbx-mcp --release
+cargo build -p dbx-cli --release --no-default-features
+```
+
+---
+
 ## 2026-07-21 — 迁移到上游 Rust MCP / CLI（packages 0.4.38）
 
 ### 上游变化
@@ -16,7 +56,7 @@
 
 **以 Rust 为 MCP/CLI 真源（策略 A）+ 保留 npm 薄封装（策略 B）**：在 `crates/dbx-mcp` / `crates/dbx-cli` 移植本地能力；旧 Node 补丁移至 `legacy-node-packages/` 仅作对照。
 
-### 已移植（Rust）
+### 第一波已移植（Rust）
 
 - `dbx_list_proxies` / `dbx proxies list`
 - `dbx_get_database_stats` / `dbx stats`（目录估算行数，无 COUNT(*)）
@@ -26,15 +66,6 @@
 - stats/report 一次性 `proxy_profile_*` 覆盖与 `skip_unsupported` 批量跳过
 - 列表输出 `#` 列
 
-### 待移植 / 缺口
-
-| 能力 | 状态 |
-|------|------|
-| query 工具的 proxy_profile 覆盖与范围批量 | 待办 |
-| CLI `--parallel`、短参数全量、`connections add/remove`、`dbx redis` | 待办 |
-| 流式连接进度输出 | 待办 |
-| 与上游 `dbx-core` 更深度复用表统计 API | 可选优化 |
-
 ### 仓库结构
 
 ```
@@ -43,17 +74,6 @@ crates/dbx-cli/     # 补丁后的 Rust CLI
 packages/mcp-server # 上游 npm launcher
 packages/cli
 legacy-node-packages/  # 原 Node 0.4.31 补丁归档
-```
-
-### 构建说明（需本地自行编译，代理未执行 cargo）
-
-```bash
-# 在完整 t8y2/dbx 仓库中覆盖 crates 后：
-cargo build -p dbx-mcp --release
-cargo build -p dbx-cli --release --no-default-features
-# 将 target/release/dbx-mcp(.exe) 替换到
-#   node_modules/@dbx-app/mcp-win32-x64/bin/
-# 或设置 DBX_MCP_BINARY
 ```
 
 ### 安装路径
