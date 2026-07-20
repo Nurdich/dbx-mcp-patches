@@ -919,22 +919,15 @@ impl DbxMcpServer {
                 .map_err(|error| backend_tool_error("QUERY_ERROR", error))?;
             return Ok(format_query_result(&result, 100));
         }
-        let permissions = validate_sql_policy(connection, &policy, &database, &request.sql)?;
-        let _ = request.timeout_ms;
+        let _permissions = validate_sql_policy(connection, &policy, &database, &request.sql)?;
+        // Same timeout conversion as stats/report: ms → ceil seconds for QueryExecutionOptions.
+        let timeout_secs = request.timeout_ms.map(|ms| (ms + 999) / 1000);
         let result = self
             .backend
-            .execute_agent_tool(
-                connection,
-                &database,
-                "execute_query",
-                json!({ "sql": request.sql, "limit": 100 }),
-                permissions,
-            )
-            .await;
-        if result.is_error {
-            return Err(agent_result(result));
-        }
-        Ok(result.content)
+            .execute_query(connection, &database, &request.sql, Some(100), timeout_secs)
+            .await
+            .map_err(|error| backend_tool_error("QUERY_ERROR", error))?;
+        Ok(format_query_result(&result, 100))
     }
 
     async fn schema_context_on_connection(

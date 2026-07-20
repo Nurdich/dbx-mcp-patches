@@ -1,5 +1,37 @@
 ﻿# Update Log
 
+## 2026-07-21 — dbx-core 故障转移源码入仓 + execute_query timeout_ms
+
+### 背景
+
+多代理 failover **运行时**此前只在本地 `dbx-main-rust` 工作区（未提交）。patches 仓仅有 MCP/CLI 配置侧。现将 `dbx-core` 相关模块纳入本仓，便于复制到完整 monorepo。
+
+### 变更
+
+| 项 | 处理 |
+|----|------|
+| `crates/dbx-core/src/connect_progress.rs` | **新增**（进度 hook） |
+| `crates/dbx-core/src/connection.rs` | **收录**（failover 尝试逻辑） |
+| `crates/dbx-core/src/lib.rs` | **收录**（`mod connect_progress`） |
+| `crates/dbx-core/src/db/proxy_tunnel.rs` | **收录**（`verify_proxy_connect`） |
+| `crates/dbx-core/APPLY.md` | 如何套用到完整 monorepo |
+| `patches/dbx-core-failover.patch` | 可选 unified diff |
+| `dbx_execute_query` `timeout_ms` | 不再 `let _ = …`；走 `backend.execute_query(..., timeout_secs)`，与 stats/report 相同（ms→ceil 秒） |
+| 文档 | `README.md` / `PATCHES.md` / 本日志 |
+
+### 套用
+
+见 [crates/dbx-core/APPLY.md](./crates/dbx-core/APPLY.md)。完整 monorepo 中覆盖上述四个文件即可；**不要**用本仓子集覆盖整个 `dbx-core` 目录。
+
+### 构建
+
+未执行编译或运行（按用户要求）。
+
+### 源
+
+捕获自 `C:\usr\local\dbx-main-rust` 相对 upstream `fe636d2d` 的未提交 diff；`dbx-main-rust` 保持脏工作区（另含同 timeout 修复），未强推 t8y2。
+
+---
 ## 2026-07-21 — 废弃 Node 0.4.x 补丁树（Rust-only）
 
 ### 决策

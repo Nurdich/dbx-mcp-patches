@@ -1,6 +1,6 @@
 # DBX MCP / CLI Patches (Rust era — 2026-07-21)
 
-Local enhancements on top of upstream [t8y2/dbx](https://github.com/t8y2/dbx) **Rust** MCP/CLI.
+Local enhancements on top of upstream [t8y2/dbx](https://github.com/t8y2/dbx) **Rust** MCP/CLI + **dbx-core** failover runtime subset.
 
 ## Upstream baseline
 
@@ -11,12 +11,23 @@ Local enhancements on top of upstream [t8y2/dbx](https://github.com/t8y2/dbx) **
 | Nearby tags | `v0.5.61` / `v0.5.62`, packages `0.4.38` |
 | MCP | `crates/dbx-mcp` 0.4.38 |
 | CLI | `crates/dbx-cli` 0.4.38 |
+| Core | `crates/dbx-core` subset (failover/progress) — [APPLY.md](./crates/dbx-core/APPLY.md) |
 | npm | Thin launchers only (`packages/mcp-server`, `packages/cli`) |
 | Node 0.4.x | **Abandoned** — see [LEGACY.md](./LEGACY.md); tree `legacy-node-packages/` removed |
 
-Previous Node baseline (`packages-v0.4.31` / `5206750`) is no longer maintained; all features live in Rust crates (+ `dbx-core` patches).
+Previous Node baseline (`packages-v0.4.31` / `5206750`) is no longer maintained; all features live in Rust crates **including** the `dbx-core` modules shipped here.
 
 ## What we patched (not in upstream Rust)
+
+### Core (`crates/dbx-core` subset)
+
+| Feature | Status |
+|---------|--------|
+| Multi-proxy **failover group** runtime (`connection_host_port`) | **In patches** |
+| `connect_progress` hook + emit | **In patches** |
+| `verify_proxy_connect` for pure-proxy failover | **In patches** |
+
+See [crates/dbx-core/APPLY.md](./crates/dbx-core/APPLY.md) and optional [`patches/dbx-core-failover.patch`](./patches/dbx-core-failover.patch).
 
 ### MCP (`crates/dbx-mcp`)
 
@@ -27,8 +38,9 @@ Previous Node baseline (`packages-v0.4.31` / `5206750`) is no longer maintained;
 | Numeric `#` / ranges on connection selectors | **Ported** |
 | `#` column in `dbx_list_connections` | **Ported** |
 | Inline proxy + `proxy_profile_*` on `dbx_add_connection` | **Ported** |
-| Multi-proxy **failover group** (try-next, not chain) | **Ported** (MCP + CLI + `dbx-core` connect) |
+| Multi-proxy **failover group** (try-next, not chain) | **Ported** (MCP + CLI + `dbx-core`) |
 | One-shot `proxy_profile_*` on stats/report/**query** | **Ported** |
+| `dbx_execute_query` `timeout_ms` → query timeout | **Ported** (via `backend.execute_query`) |
 | Batch ranges on list_tables / describe / query / schema_context / stats / report | **Ported** (sequential) |
 | `skip_unsupported` + Skipped vs Failures | **Ported** |
 | Progress prepend in tool text (`DBX_MCP_QUIET` / `DBX_MCP_VERBOSE`) | **Ported** |
@@ -64,21 +76,23 @@ Previous Node baseline (`packages-v0.4.31` / `5206750`) is no longer maintained;
 # requires full checkout with crates/dbx-core
 rsync -a crates/dbx-mcp/ /path/to/dbx/crates/dbx-mcp/
 rsync -a crates/dbx-cli/ /path/to/dbx/crates/dbx-cli/
-# failover runtime also needs these upstream-core edits (already applied in dbx-main-rust):
-#   crates/dbx-core/src/connect_progress.rs
-#   crates/dbx-core/src/connection.rs (connection_host_port failover)
-#   crates/dbx-core/src/db/proxy_tunnel.rs (verify_proxy_connect)
+# dbx-core failover runtime (copy modules only — see crates/dbx-core/APPLY.md):
+cp crates/dbx-core/src/connect_progress.rs /path/to/dbx/crates/dbx-core/src/
+cp crates/dbx-core/src/connection.rs /path/to/dbx/crates/dbx-core/src/
+cp crates/dbx-core/src/lib.rs /path/to/dbx/crates/dbx-core/src/
+cp crates/dbx-core/src/db/proxy_tunnel.rs /path/to/dbx/crates/dbx-core/src/db/
 cargo build -p dbx-mcp --release
 cargo build -p dbx-cli --release --no-default-features
 ```
 
-**Do not** expect the old Node `packages/mcp-server/src/index.ts` / `node-core` path to work against packages ≥0.4.38 (Node patches abandoned).
+**Do not** expect the old Node `packages/mcp-server/src/index.ts` / `node-core` path to work against packages 0.4.38 (Node patches abandoned).
 
 ## Remaining / optional gaps
 
 | Item | Notes |
 |------|-------|
 | MCP Redis range batch | CLI has ranges; MCP `dbx_execute_redis_command` still single-connection |
+| WebBackend query timeout | Local backend honors `timeout_secs`; Web `/api/query/execute` may not forward timeout |
 | Deeper reuse of upstream catalog stats APIs | Optional optimization |
 | Validate against live multi-DB fleets | User-side `cargo build` + smoke |
 
