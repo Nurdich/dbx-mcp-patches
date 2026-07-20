@@ -1,5 +1,68 @@
-﻿# Update Log
+# Update Log
 
+## 2026-07-21 — 编译测试通过并本地合并 main
+
+### 构建（dbx-main-rust）
+
+- 工具链：`cargo +stable`（rustc 1.97；需优先 `.cargo\bin`，避免 Scoop shim 混用旧 rustc）
+- 稀疏检出补齐 `src-tauri` 后 workspace 可加载
+- 成功：
+  - `cargo +stable build -p dbx-mcp --release`
+  - `cargo +stable build -p dbx-cli --release --no-default-features`
+- 单测：`cargo +stable test -p dbx-mcp --release --lib` → **15 passed**
+
+### 编译修复（随 feat/mcp-patches 提交）
+
+- `McpScope::connection_scope_enabled` / `matches` → `pub(crate)`（供 `resolve.rs`）
+- `list_tables` / `describe_table` / `get_schema_context`：`resolve_batch_configs(..., ProxyProfileRefArgs::default())`
+- 工具数量断言：10→13、6→9；`Cargo.lock` 补 `dbx-mcp` 的 `uuid`
+
+### Git（仅本地，未 push t8y2）
+
+| 仓库 | 分支 | 状态 |
+|------|------|------|
+| `dbx-main-rust` | `main` / `feat/mcp-patches` | 均指向 `9fa69e46`；`main` ahead origin **2**（ff merge） |
+| `dbx-mcp-patches` | `main` | 同步 `server.rs` 编译修复 |
+
+二进制：
+
+- `C:\usr\local\dbx-main-rust\target\release\dbx-mcp.exe`
+- `C:\usr\local\dbx-main-rust\target\release\dbx.exe`
+
+---## 2026-07-21 — 已套用到 `dbx-main-rust`（APPLY 完成）
+
+### 操作
+
+按 [crates/dbx-core/APPLY.md](./crates/dbx-core/APPLY.md) 将本仓补丁同步进完整 monorepo `C:\usr\local\dbx-main-rust`：
+
+| 来源 | 目标 | 方式 |
+|------|------|------|
+| `crates/dbx-core` 四个模块 | `dbx-main-rust/crates/dbx-core/...` | 仅覆盖四文件，**未**整目录覆盖 |
+| `crates/dbx-mcp`（全文） | `dbx-main-rust/crates/dbx-mcp` | 全量同步 |
+| `crates/dbx-cli`（全文） | `dbx-main-rust/crates/dbx-cli` | 全量同步 |
+
+### 校验
+
+- SHA256：四文件 + `dbx-mcp`（15）+ `dbx-cli`（2）与 patches 源一致（mismatch=0）
+- 关键符号：`mod connect_progress`、failover / `timeout_ms` / proxies / stats / report 已在 main-rust 对应源中出现
+
+### Git（仅本地）
+
+- 分支：`feat/mcp-patches`（基于 `fe636d2d`）
+- 提交：`f2b2b31c` — `feat(mcp): apply mcp-patches (failover, timeout_ms, stats/report)`
+- **未** push 到 `origin`（t8y2/dbx）；`patches` remote 指向 Nurdich/dbx-mcp-patches（补丁仓），无 Nurdich monorepo remote，故 monorepo 提交仅本地保留
+
+### 构建
+
+未执行编译或运行（按用户要求）。请自行：
+
+```bash
+cd C:\usr\local\dbx-main-rust
+cargo build -p dbx-mcp --release
+cargo build -p dbx-cli --release --no-default-features
+```
+
+---
 ## 2026-07-21 — dbx-core 故障转移源码入仓 + execute_query timeout_ms
 
 ### 背景

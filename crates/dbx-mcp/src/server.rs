@@ -239,11 +239,11 @@ impl McpScope {
         self.connection_scope_enabled() || self.database.is_some()
     }
 
-    fn connection_scope_enabled(&self) -> bool {
+    pub(crate) fn connection_scope_enabled(&self) -> bool {
         !self.connection_ids.is_empty() || self.connection_name.is_some()
     }
 
-    fn matches(&self, connection: &dbx_core::models::connection::ConnectionConfig) -> bool {
+    pub(crate) fn matches(&self, connection: &dbx_core::models::connection::ConnectionConfig) -> bool {
         if !self.connection_ids.is_empty() {
             return self.connection_ids.iter().any(|id| id == &connection.id);
         }
@@ -296,7 +296,7 @@ impl DbxMcpServer {
         description = "List tables and views for a database connection. Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn list_tables(&self, Parameters(request): Parameters<ListTablesRequest>) -> CallToolResult {
-        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+        let configs = match self.resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default()).await {
             Ok(configs) => configs,
             Err(error) => return error,
         };
@@ -352,7 +352,7 @@ impl DbxMcpServer {
         description = "Get column definitions for a table. Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn describe_table(&self, Parameters(request): Parameters<DescribeTableRequest>) -> CallToolResult {
-        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+        let configs = match self.resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default()).await {
             Ok(configs) => configs,
             Err(error) => return error,
         };
@@ -503,7 +503,7 @@ impl DbxMcpServer {
         description = "Get compact table and column context for writing SQL. Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn get_schema_context(&self, Parameters(request): Parameters<SchemaContextRequest>) -> CallToolResult {
-        let configs = match self.resolve_batch_configs(&request.selector, None, None).await {
+        let configs = match self.resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default()).await {
             Ok(configs) => configs,
             Err(error) => return error,
         };
@@ -1516,7 +1516,7 @@ mod tests {
         );
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 13);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_tables"));
         assert!(names.contains(&"dbx_describe_table"));
@@ -1540,7 +1540,7 @@ mod tests {
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 9);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
