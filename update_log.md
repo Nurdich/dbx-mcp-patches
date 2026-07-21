@@ -1,5 +1,16 @@
 # Update Log
 
+## 2026-07-21 — 工作区迁移到 G:\rust
+
+- **方式**：复制（未删除 C:\ 原件）
+- **patches**：`git clone` 自 `C:\usr\local\dbx-mcp-patches` → `G:\rust\dbx-mcp-patches`；`origin` = `https://github.com/Nurdich/dbx-mcp-patches.git`
+- **monorepo**：`robocopy /E` `C:\usr\local\dbx-main-rust` → `G:\rust\dbx-main-rust`（含 `.git` + `target/` ≈ 3.2GB）
+- **二进制**：`G:\rust\dbx-main-rust\target\release\dbx-mcp.exe`、`dbx.exe`
+- **原件保留**：`C:\usr\local\dbx-mcp-patches`、`C:\usr\local\dbx-main-rust`（确认无用后再删）
+- 下文历史路径已改为 `G:\rust\...`（以本目录为规范工作区）
+
+---
+
 ## 2026-07-21 — 编译测试通过并本地合并 main
 
 ### 构建（dbx-main-rust）
@@ -26,14 +37,16 @@
 
 二进制：
 
-- `C:\usr\local\dbx-main-rust\target\release\dbx-mcp.exe`
-- `C:\usr\local\dbx-main-rust\target\release\dbx.exe`
+- `G:\rust\dbx-main-rust\target\release\dbx-mcp.exe`
+- `G:\rust\dbx-main-rust\target\release\dbx.exe`
 
----## 2026-07-21 — 已套用到 `dbx-main-rust`（APPLY 完成）
+---
+
+## 2026-07-21 — 已套用到 `dbx-main-rust`（APPLY 完成）
 
 ### 操作
 
-按 [crates/dbx-core/APPLY.md](./crates/dbx-core/APPLY.md) 将本仓补丁同步进完整 monorepo `C:\usr\local\dbx-main-rust`：
+按 [crates/dbx-core/APPLY.md](./crates/dbx-core/APPLY.md) 将本仓补丁同步进完整 monorepo `G:\rust\dbx-main-rust`：
 
 | 来源 | 目标 | 方式 |
 |------|------|------|
@@ -57,7 +70,7 @@
 未执行编译或运行（按用户要求）。请自行：
 
 ```bash
-cd C:\usr\local\dbx-main-rust
+cd G:\rust\dbx-main-rust
 cargo build -p dbx-mcp --release
 cargo build -p dbx-cli --release --no-default-features
 ```
@@ -92,7 +105,7 @@ cargo build -p dbx-cli --release --no-default-features
 
 ### 源
 
-捕获自 `C:\usr\local\dbx-main-rust` 相对 upstream `fe636d2d` 的未提交 diff；`dbx-main-rust` 保持脏工作区（另含同 timeout 修复），未强推 t8y2。
+捕获自 `G:\rust\dbx-main-rust` 相对 upstream `fe636d2d` 的未提交 diff；`dbx-main-rust` 保持脏工作区（另含同 timeout 修复），未强推 t8y2。
 
 ---
 ## 2026-07-21 — 废弃 Node 0.4.x 补丁树（Rust-only）
@@ -195,7 +208,7 @@ cargo build -p dbx-cli --release --no-default-features
 
 ### 同步
 
-已将补丁源同步到 `C:\usr\local\dbx-main-rust\crates\{dbx-mcp,dbx-cli}`。
+已将补丁源同步到 `G:\rust\dbx-main-rust\crates\{dbx-mcp,dbx-cli}`。
 
 ### 构建（请自行编译，本代理未执行 cargo）
 

@@ -1,4 +1,4 @@
-# Applying `dbx-core` failover / progress patches
+﻿# Applying `dbx-core` failover / progress patches
 
 These files are a **subset** of upstream [`t8y2/dbx`](https://github.com/t8y2/dbx) `crates/dbx-core`, captured from local `dbx-main-rust` working tree (baseline `fe636d2d`) with multi-proxy **failover** + connect **progress** runtime.
 
@@ -21,7 +21,7 @@ From a full DBX monorepo root (must already contain upstream `crates/dbx-core`):
 
 ```bash
 # Windows (PowerShell)
-$PATCHES = "C:\usr\local\dbx-mcp-patches"
+$PATCHES = "G:\rust\dbx-mcp-patches"
 Copy-Item -Force "$PATCHES\crates\dbx-core\src\connect_progress.rs" .\crates\dbx-core\src\
 Copy-Item -Force "$PATCHES\crates\dbx-core\src\connection.rs" .\crates\dbx-core\src\
 Copy-Item -Force "$PATCHES\crates\dbx-core\src\lib.rs" .\crates\dbx-core\src\
