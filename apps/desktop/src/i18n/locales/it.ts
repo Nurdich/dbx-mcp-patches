@@ -1143,6 +1143,7 @@ export default withEnglishFallback({
     objectsCount: "{current} / {total} oggetti",
     tablesCount: "{current} / {total} tabelle",
     statementsCount: "{done} riuscite, {failed} non riuscite",
+    elapsed: "Tempo trascorso: {duration}",
   },
   welcome: {
     title: "Area di Lavoro Database",

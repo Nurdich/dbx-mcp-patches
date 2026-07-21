@@ -1203,6 +1203,7 @@ export default {
     objectsCount: "{current} / {total} objects",
     tablesCount: "{current} / {total} tables",
     statementsCount: "{done} succeeded, {failed} failed",
+    elapsed: "Elapsed: {duration}",
   },
   welcome: {
     title: "Database Workspace",

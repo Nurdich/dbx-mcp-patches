@@ -1144,6 +1144,7 @@ export default withEnglishFallback({
     objectsCount: "{current} / {total} オブジェクト",
     tablesCount: "{current} / {total} テーブル",
     statementsCount: "{done}成功、{failed}失敗",
+    elapsed: "経過時間: {duration}",
   },
   welcome: {
     title: "データベースワークスペース",

@@ -1144,6 +1144,7 @@ export default withEnglishFallback({
     objectsCount: "{current} / {total} objetos",
     tablesCount: "{current} / {total} tablas",
     statementsCount: "{done} exitosas, {failed} fallidas",
+    elapsed: "Transcurrido: {duration}",
     delete: "Eliminar",
   },
   welcome: {

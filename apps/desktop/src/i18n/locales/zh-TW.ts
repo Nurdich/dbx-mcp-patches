@@ -1145,6 +1145,7 @@ export default withEnglishFallback({
     objectsCount: "{current} / {total} 個物件",
     tablesCount: "{current} / {total} 張資料表",
     statementsCount: "{done} 成功，{failed} 失敗",
+    elapsed: "耗時：{duration}",
   },
   welcome: {
     title: "資料庫工作檯",

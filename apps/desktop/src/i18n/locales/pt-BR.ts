@@ -1145,6 +1145,7 @@ export default withEnglishFallback({
     objectsCount: "{current} / {total} objetos",
     tablesCount: "{current} / {total} tabelas",
     statementsCount: "{done} com sucesso, {failed} com falha",
+    elapsed: "Decorrido: {duration}",
   },
   welcome: {
     title: "Área de Trabalho do Banco de Dados",

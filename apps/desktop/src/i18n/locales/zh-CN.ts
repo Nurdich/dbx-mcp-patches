@@ -1203,6 +1203,7 @@ export default withEnglishFallback({
     objectsCount: "{current} / {total} 个对象",
     tablesCount: "{current} / {total} 张表",
     statementsCount: "成功 {done}，失败 {failed}",
+    elapsed: "耗时：{duration}",
   },
   welcome: {
     title: "数据库工作台",
