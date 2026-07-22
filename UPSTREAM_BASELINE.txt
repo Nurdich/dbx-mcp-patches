@@ -1,6 +1,8 @@
 repo=https://github.com/t8y2/dbx
-commit=fe636d2dae92f9a184d688523ddfed753d792cd1
-tag_nearby=v0.5.62 / packages-v0.4.38
-dbx-mcp_version=0.4.38
-dbx-cli_version=see crates/dbx-cli/Cargo.toml
-fetched=2026-07-21T03:58:28.3121222+07:00
+commit=1b399a58d091e583e382e2ee79d03c08f2085f87
+tag_nearby=v0.5.63 / packages-v0.4.40
+dbx-mcp_version=0.4.40
+dbx-cli_version=0.4.40
+fetched=2026-07-22T10:48:00+07:00
+monorepo_local_merge=96f7fdaa513ef1738805ef4f6b0b41e1907cdac0
+note=synced from G:/rust/dbx-main-rust after merge(origin/main)+local MCP/CLI patches; did not push to t8y2/dbx

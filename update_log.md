@@ -1,5 +1,36 @@
 # Update Log
 
+## 2026-07-22 — 同步 monorepo MCP/CLI/core 到本 patches 仓
+
+### 来源
+
+- monorepo：`G:\rust\dbx-main-rust` @ `96f7fdaa`（已 merge `origin/main`=`1b399a58` + 本地补丁）
+- 目标：本仓 `https://github.com/Nurdich/dbx-mcp-patches`（**未** push 到 `t8y2/dbx`）
+
+### 同步路径
+
+| 路径 | 内容 |
+|------|------|
+| `crates/dbx-mcp/**` | Web 鉴权加固、`update_connection` 后端、env 默认 proxy profile、协议测试 |
+| `crates/dbx-cli/**` | `connections update` range + failover 写回 winner；`connections import` 批量直写 |
+| `crates/dbx-core/src/{connect_progress,connection,lib,storage,db/proxy_tunnel}.rs` | failover + `update_connection_for_mcp`；基线对齐 upstream |
+| `crates/dbx-core/APPLY.md` | 增加 `storage.rs`；基线 `1b399a58` |
+| `UPSTREAM_BASELINE.txt` / `PATCHES.md` / `update_log.md` | 基线与功能表更新 |
+| `packages/{mcp-server,cli}/package.json` | 版本 → 0.4.40（thin launcher） |
+
+### 本仓不含（需全量 monorepo 部署）
+
+- **`dbx-web`**：`POST /connection/mcp/update` — 线上 `DBX_WEB_URL` 仍 405 时，必须重新编译并部署 monorepo 的 `dbx-web`，只更新 `dbx.exe` 不够
+- **duckdb `1.10504.0`**：在 monorepo `crates/dbx-core/Cargo.toml` / `src-tauri`（MSVC 14.51）；本仓不存完整 Cargo.toml
+
+### 新能力摘要
+
+- CLI `connections update <range>`：多代理 failover，成功写回 winner
+- CLI `connections import --file`：JSON 批量直写，不探测连通性
+- MCP：`DBX_PROXY_PROFILE_IDS` / `NAMES` 进程默认；Web `dbx_session` 鉴权加固
+
+---
+
 ## 2026-07-21 — 工作区迁移到 G:\rust
 
 - **方式**：复制（未删除 C:\ 原件）
@@ -1381,4 +1412,18 @@ dbx proxies list
 ```
 
 修复后 CLI 与 MCP 的 node-core dist 哈希完全一致（各 32 个文件）。
+
+
+---
+
+## 2026-07-21 — AI / 记忆配置迁到 G:\rust
+
+- **方式**：复制（未删除 C: 原件）
+- **来源**：`C:\usr\local\node_modules\@dbx-app\mcp-server\.omc`、`.cursorignore`；Claude project `c--usr-local-node-modules--dbx-app-mcp-server`；`~\.omc` 中与 dbx 相关 notepad 摘录
+- **落点**：
+  - `G:\rust\dbx-mcp-patches\.omc` / `.cursorignore`
+  - `G:\rust\dbx-main-rust\.omc`（新建 pointer memory；C: 原仓库无 .omc）
+  - `G:\rust\.omc`、`G:\rust\ai-config\`、`G:\rust\AI-MEMORY.md`、`G:\rust\README-AI.md`
+- **缺失未迁**：dbx-mcp-patches / dbx-main-rust 在 C: 无 `.cursor` rules/hooks；Cursor project 目录无 `.omc`/AGENTS.md
+- **说明**：详见 `G:\rust\README-AI.md`
 
