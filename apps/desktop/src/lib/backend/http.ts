@@ -109,6 +109,7 @@ import type {
   DroppedFilePreviewSqlOptions,
   MongoGridFsFileInfo,
   AppSupportInfo,
+  PromptTemplate,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
@@ -199,6 +200,16 @@ async function get<T>(url: string): Promise<T> {
 
 async function del<T>(url: string): Promise<T> {
   const res = await fetch(apiUrl(url), { method: "DELETE" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function put<T>(url: string, body: unknown): Promise<T> {
+  const res = await fetch(apiUrl(url), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -1401,6 +1412,31 @@ export async function loadAiConversations(): Promise<AiConversation[]> {
 
 export async function deleteAiConversation(id: string): Promise<void> {
   return del(`/api/ai/conversation/${id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Prompt Templates
+// ---------------------------------------------------------------------------
+
+export async function loadPromptTemplates(): Promise<PromptTemplate[]> {
+  return get("/api/prompt-templates");
+}
+
+export async function savePromptTemplate(id: string, name: string, content: string): Promise<PromptTemplate> {
+  return post("/api/prompt-templates", { id, name, content });
+}
+
+export async function deletePromptTemplate(id: string): Promise<void> {
+  return del(`/api/prompt-templates/${encodeURIComponent(id)}`);
+}
+
+export async function getAiGlobalCustomInstructions(): Promise<string> {
+  const result = await get<{ content: string }>("/api/prompt-templates/global-instructions");
+  return result.content ?? "";
+}
+
+export async function setAiGlobalCustomInstructions(content: string): Promise<void> {
+  return put("/api/prompt-templates/global-instructions", { content });
 }
 
 // ---------------------------------------------------------------------------

@@ -287,6 +287,13 @@ export const saveAiConversation = forward("saveAiConversation");
 export const loadAiConversations = forward("loadAiConversations");
 export const deleteAiConversation = forward("deleteAiConversation");
 
+// Prompt Templates
+export const loadPromptTemplates = forward("loadPromptTemplates");
+export const savePromptTemplate = forward("savePromptTemplate");
+export const deletePromptTemplate = forward("deletePromptTemplate");
+export const getAiGlobalCustomInstructions = forward("getAiGlobalCustomInstructions");
+export const setAiGlobalCustomInstructions = forward("setAiGlobalCustomInstructions");
+
 // System
 export const listSystemFonts = forward("listSystemFonts");
 export const listSshConfigHosts = forward("listSshConfigHosts");
@@ -527,6 +534,7 @@ export type {
   AiModelInfo,
   AiChatMessage,
   AiConversation,
+  PromptTemplate,
   AgentDriverInfo,
   DriverStoreUsage,
   DriverStoreUsageItem,

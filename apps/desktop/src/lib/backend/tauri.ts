@@ -677,6 +677,36 @@ export async function deleteAiConversation(id: string): Promise<void> {
   return invoke("delete_ai_conversation", { id });
 }
 
+// --- Prompt Templates ---
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function loadPromptTemplates(): Promise<PromptTemplate[]> {
+  return invoke("load_prompt_templates");
+}
+
+export async function savePromptTemplate(id: string, name: string, content: string): Promise<PromptTemplate> {
+  return invoke("save_prompt_template", { id, name, content });
+}
+
+export async function deletePromptTemplate(id: string): Promise<void> {
+  return invoke("delete_prompt_template", { id });
+}
+
+export async function getAiGlobalCustomInstructions(): Promise<string> {
+  return invoke("get_ai_global_custom_instructions");
+}
+
+export async function setAiGlobalCustomInstructions(content: string): Promise<void> {
+  return invoke("set_ai_global_custom_instructions", { content });
+}
+
 export async function testConnection(config: ConnectionConfig): Promise<string> {
   return invoke("test_connection", { config });
 }

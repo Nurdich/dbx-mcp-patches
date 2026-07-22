@@ -19,6 +19,7 @@ use crate::history::{
     HistorySearchRequest, HistorySearchResult, MAX_HISTORY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType, TransportLayerConfig};
+use crate::prompt_template::PromptTemplate;
 use crate::saved_sql::{SavedSqlFile, SavedSqlFolder, SavedSqlLibrary};
 
 const SSH_TUNNEL_SECRET_PREFIX: &str = "ssh_tunnels.";
@@ -28,6 +29,7 @@ const APP_STATE_EDITOR_SETTINGS_KEY: &str = "editor_settings";
 const APP_STATE_OPEN_TABS_KEY: &str = "open_tabs";
 const APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY: &str = "saved_sql_editor_positions";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
+const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const USER_DATA_TABLES: &[&str] = &[
     "connections",
     "connection_secrets",
@@ -371,6 +373,13 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         models TEXT NOT NULL DEFAULT '[]',
         config_json TEXT NOT NULL,
         is_default INTEGER NOT NULL DEFAULT 0
+    )",
+    "CREATE TABLE IF NOT EXISTS prompt_templates (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        content TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
     )",
 ];
 
@@ -1630,6 +1639,24 @@ impl Storage {
         self.load_app_state_value(APP_STATE_SAVED_SQL_EDITOR_POSITIONS_KEY).await
     }
 
+    pub async fn save_ai_global_custom_instructions(&self, content: &str) -> Result<(), String> {
+        let trimmed = content.trim();
+        if trimmed.chars().count() > 8000 {
+            return Err("global instructions too long (max 8000 chars)".to_string());
+        }
+        self.save_app_state_value(APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY, &serde_json::Value::String(trimmed.to_string()))
+            .await
+    }
+
+    pub async fn load_ai_global_custom_instructions(&self) -> Result<String, String> {
+        let value = self.load_app_state_value(APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY).await?;
+        Ok(match value {
+            Some(serde_json::Value::String(s)) => s,
+            None | Some(serde_json::Value::Null) => String::new(),
+            other => other.map(|v| v.to_string()).unwrap_or_default(),
+        })
+    }
+
     pub async fn load_or_create_local_device_secret(&self) -> Result<String, String> {
         let mut settings = self.load_app_settings_json().await?;
         if let Some(secret) = settings.get("local_device_secret").and_then(|value| value.as_str()) {
@@ -1769,6 +1796,108 @@ impl Storage {
         let id = id.to_string();
         self.with_conn(move |conn| {
             conn.execute("DELETE FROM ai_conversations WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    // Prompt Templates
+
+    pub async fn load_prompt_templates(&self) -> Result<Vec<PromptTemplate>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name, content, created_at, updated_at \
+                     FROM prompt_templates ORDER BY created_at, id",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(PromptTemplate {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        content: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn save_prompt_template(&self, id: &str, name: &str, content: &str) -> Result<PromptTemplate, String> {
+        let id = id.to_string();
+        let name = name.trim().to_string();
+        let content = content.to_string();
+
+        // Validation
+        if name.is_empty() {
+            return Err("template name cannot be empty".to_string());
+        }
+        if name.chars().count() > 50 {
+            return Err("template name too long (max 50 chars)".to_string());
+        }
+        if content.chars().count() > 8000 {
+            return Err("template content too long (max 8000 chars)".to_string());
+        }
+
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        self.with_conn(move |conn| {
+            // Case-insensitive duplicate name check (Unicode-aware).
+            // SQLite LOWER() is ASCII-only, so we compare in Rust where
+            // str::to_lowercase() handles full Unicode case folding.
+            let name_lower = name.to_lowercase();
+            let mut stmt = conn
+                .prepare("SELECT name FROM prompt_templates WHERE id != ?1")
+                .map_err(|e| e.to_string())?;
+            let duplicate = stmt
+                .query_map(params![id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .any(|existing| existing.to_lowercase() == name_lower);
+            if duplicate {
+                return Err("duplicate template name".to_string());
+            }
+
+            // Check if row exists to decide INSERT vs UPDATE
+            let existing_created_at: Option<String> = conn
+                .query_row("SELECT created_at FROM prompt_templates WHERE id = ?1", params![id], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+
+            if let Some(created_at) = existing_created_at {
+                // UPDATE — preserve created_at
+                conn.execute(
+                    "UPDATE prompt_templates SET name = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
+                    params![name, content, now, id],
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(PromptTemplate { id, name, content, created_at, updated_at: now })
+            } else {
+                // INSERT
+                conn.execute(
+                    "INSERT INTO prompt_templates (id, name, content, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, name, content, now, now],
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(PromptTemplate { id, name, content, created_at: now.clone(), updated_at: now })
+            }
+        })
+        .await
+    }
+
+    pub async fn delete_prompt_template(&self, id: &str) -> Result<(), String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let rows =
+                conn.execute("DELETE FROM prompt_templates WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+            if rows == 0 {
+                Err("template not found".to_string())
+            } else {
+                Ok(())
+            }
         })
         .await
     }
@@ -4698,6 +4827,282 @@ mod tests {
         assert!(storage.load_ai_config().await.unwrap().is_none(), "ai_config should be deleted");
         let old_providers = storage.load_ai_provider_configs().await.unwrap();
         assert!(old_providers.is_empty(), "ai_provider_configs should be deleted");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    // --- Prompt Templates ---
+
+    #[tokio::test]
+    async fn prompt_template_save_new_creates_timestamps() {
+        let db = temp_db_path("pt-save-new");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let result = storage.save_prompt_template("t1", "Production Rules", "SELECT 1").await.unwrap();
+
+        assert_eq!(result.id, "t1");
+        assert_eq!(result.name, "Production Rules");
+        assert_eq!(result.content, "SELECT 1");
+        assert!(!result.created_at.is_empty());
+        assert_eq!(result.created_at, result.updated_at);
+
+        // Verify it's persisted in load
+        let templates = storage.load_prompt_templates().await.unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].id, "t1");
+        assert_eq!(templates[0].created_at, result.created_at);
+        assert_eq!(templates[0].updated_at, result.updated_at);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_save_update_preserves_created_at() {
+        let db = temp_db_path("pt-save-update");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let first = storage.save_prompt_template("t1", "Original Name", "Original content").await.unwrap();
+        // Ensure some time passes so updated_at changes
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let second = storage.save_prompt_template("t1", "Updated Name", "Updated content").await.unwrap();
+
+        assert_eq!(second.id, "t1");
+        assert_eq!(second.name, "Updated Name");
+        assert_eq!(second.content, "Updated content");
+        assert_eq!(second.created_at, first.created_at, "created_at must be preserved on update");
+        assert_ne!(second.updated_at, first.updated_at, "updated_at must change on update");
+
+        // Verify only one row exists
+        let templates = storage.load_prompt_templates().await.unwrap();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].name, "Updated Name");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_save_rejects_blank_name() {
+        let db = temp_db_path("pt-name-blank");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let err = storage.save_prompt_template("t1", "", "content").await.unwrap_err();
+        assert!(err.contains("cannot be empty"), "expected 'cannot be empty', got: {err}");
+
+        let err = storage.save_prompt_template("t1", "   ", "content").await.unwrap_err();
+        assert!(err.contains("cannot be empty"), "expected 'cannot be empty', got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_save_rejects_long_name() {
+        let db = temp_db_path("pt-name-long");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let long_name = "a".repeat(51);
+        let err = storage.save_prompt_template("t1", &long_name, "content").await.unwrap_err();
+        assert!(err.contains("too long") && err.contains("50"), "expected too long (max 50), got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_accepts_multi_byte_characters_within_char_limit() {
+        let db = temp_db_path("pt-multibyte-name");
+        let storage = Storage::open(&db).await.unwrap();
+
+        // 25 Chinese characters = 75 bytes but only 25 chars — should be allowed under 50 char limit
+        let name25 = "数".repeat(25); // 25 chars, 75 bytes
+        assert_eq!(name25.chars().count(), 25);
+        assert!(name25.len() > 50); // byte length exceeds 50
+
+        let result = storage.save_prompt_template("t1", &name25, "content").await.unwrap();
+        assert_eq!(result.name, name25);
+
+        // 51 Chinese characters = 153 bytes — should be rejected (51 chars > 50)
+        let name51 = "数".repeat(51);
+        assert_eq!(name51.chars().count(), 51);
+        let err = storage.save_prompt_template("t2", &name51, "content").await.unwrap_err();
+        assert!(err.contains("too long") && err.contains("50"), "expected too long (max 50), got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_save_rejects_long_content() {
+        let db = temp_db_path("pt-content-long");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let long_content = "a".repeat(8001);
+        let err = storage.save_prompt_template("t1", "Valid Name", &long_content).await.unwrap_err();
+        assert!(err.contains("too long") && err.contains("8000"), "expected too long (max 8000), got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_save_rejects_duplicate_name_case_insensitive() {
+        let db = temp_db_path("pt-dup-name");
+        let storage = Storage::open(&db).await.unwrap();
+
+        storage.save_prompt_template("t1", "Production Rules", "content 1").await.unwrap();
+
+        // Same name, different id → should fail
+        let err = storage.save_prompt_template("t2", "production rules", "content 2").await.unwrap_err();
+        assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
+
+        // Same name, same id → should update (not fail)
+        let update = storage.save_prompt_template("t1", "Production Rules", "updated").await.unwrap();
+        assert_eq!(update.id, "t1");
+        assert_eq!(update.content, "updated");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_save_rejects_duplicate_name_unicode_case_folding() {
+        let db = temp_db_path("pt-dup-unicode");
+        let storage = Storage::open(&db).await.unwrap();
+
+        // SQLite LOWER() is ASCII-only (U+00C4 'Ä' → no change), but Rust
+        // str::to_lowercase() does full Unicode case folding (Ä → ä).
+        // Both directions must detect the duplicate.
+        storage.save_prompt_template("t1", "Ä规则", "content-upper").await.unwrap();
+        let err = storage.save_prompt_template("t2", "ä规则", "content-lower").await.unwrap_err();
+        assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
+
+        // Reverse: lower-case first, upper-case second.
+        let db = temp_db_path("pt-dup-unicode-2");
+        let storage = Storage::open(&db).await.unwrap();
+        storage.save_prompt_template("t1", "ä规则", "content-lower").await.unwrap();
+        let err = storage.save_prompt_template("t2", "Ä规则", "content-upper").await.unwrap_err();
+        assert!(err.contains("duplicate"), "expected 'duplicate', got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_load_order_is_stable() {
+        let db = temp_db_path("pt-load-order");
+        let storage = Storage::open(&db).await.unwrap();
+
+        // Insert in reverse order of created_at by sleeping between inserts
+        storage.save_prompt_template("a", "Template A", "a").await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        storage.save_prompt_template("b", "Template B", "b").await.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        storage.save_prompt_template("c", "Template C", "c").await.unwrap();
+
+        let templates = storage.load_prompt_templates().await.unwrap();
+        assert_eq!(templates.len(), 3);
+        // Order should be by created_at ascending: A first, C last
+        assert_eq!(templates[0].id, "a");
+        assert_eq!(templates[1].id, "b");
+        assert_eq!(templates[2].id, "c");
+
+        // Insert with same created_at — tie-break by id
+        // We insert d right after c without delay
+        storage.save_prompt_template("d", "Template D", "d").await.unwrap();
+
+        let templates = storage.load_prompt_templates().await.unwrap();
+        assert_eq!(templates.len(), 4);
+        assert_eq!(templates[3].id, "d");
+
+        // Second load should give same order
+        let templates2 = storage.load_prompt_templates().await.unwrap();
+        assert_eq!(templates, templates2);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_delete_unknown_id_errors() {
+        let db = temp_db_path("pt-delete-unknown");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let err = storage.delete_prompt_template("nonexistent").await.unwrap_err();
+        assert!(err.contains("not found"), "expected 'not found', got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn prompt_template_delete_existing_removes() {
+        let db = temp_db_path("pt-delete-existing");
+        let storage = Storage::open(&db).await.unwrap();
+
+        storage.save_prompt_template("t1", "Template", "content").await.unwrap();
+        assert_eq!(storage.load_prompt_templates().await.unwrap().len(), 1);
+
+        storage.delete_prompt_template("t1").await.unwrap();
+        assert!(storage.load_prompt_templates().await.unwrap().is_empty());
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    // --- Global Custom Instructions ---
+
+    #[tokio::test]
+    async fn global_instructions_set_get_roundtrip() {
+        let db = temp_db_path("gi-roundtrip");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let instructions = "Amounts are in cents. Always filter by date range.";
+        storage.save_ai_global_custom_instructions(instructions).await.unwrap();
+
+        let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
+        assert_eq!(loaded, instructions);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn global_instructions_defaults_to_empty() {
+        let db = temp_db_path("gi-default");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
+        assert_eq!(loaded, "");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn global_instructions_rejects_too_long() {
+        let db = temp_db_path("gi-too-long");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let long = "a".repeat(8001);
+        let err = storage.save_ai_global_custom_instructions(&long).await.unwrap_err();
+        assert!(err.contains("too long") && err.contains("8000"), "expected too long (max 8000), got: {err}");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn global_instructions_empty_string_clears() {
+        let db = temp_db_path("gi-clear");
+        let storage = Storage::open(&db).await.unwrap();
+
+        storage.save_ai_global_custom_instructions("Some instructions").await.unwrap();
+        assert_eq!(storage.load_ai_global_custom_instructions().await.unwrap(), "Some instructions");
+
+        // Empty string (trimmed) is allowed — equivalent to clear
+        storage.save_ai_global_custom_instructions("").await.unwrap();
+        assert_eq!(storage.load_ai_global_custom_instructions().await.unwrap(), "");
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn global_instructions_whitespace_only_trims() {
+        let db = temp_db_path("gi-whitespace");
+        let storage = Storage::open(&db).await.unwrap();
+
+        storage.save_ai_global_custom_instructions("   \n  \t  ").await.unwrap();
+        let loaded = storage.load_ai_global_custom_instructions().await.unwrap();
+        assert_eq!(loaded, "");
 
         std::fs::remove_file(&db).ok();
     }
