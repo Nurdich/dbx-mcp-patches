@@ -12,6 +12,7 @@ use dbx_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::mongo::MongoCommand;
 
@@ -94,7 +95,13 @@ pub trait DbxBackend: Send + Sync {
         Err("SQL queries are not supported by this backend.".to_string())
     }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String>;
+    /// Probe whether a connection config can establish a DB session (used by CLI update failover).
+    async fn test_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
+        let _ = config;
+        Err("Connection testing is not supported by this backend.".to_string())
+    }
     async fn list_tables(
         &self,
         connection: &ConnectionConfig,
@@ -147,7 +154,8 @@ pub struct LocalBackend {
 #[derive(Default)]
 struct WebAuthState {
     session_cookie: Option<String>,
-    checked: bool,
+    /// Server reported auth is not required (password disabled).
+    auth_not_required: bool,
 }
 
 pub struct WebBackend {
@@ -170,14 +178,29 @@ impl WebBackend {
         Ok(Self { base_url, password, client, auth: Mutex::new(WebAuthState::default()) })
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn password_configured(&self) -> bool {
+        !self.password.is_empty()
+    }
+
     async fn ensure_auth(&self) -> Result<(), String> {
-        let mut auth = self.auth.lock().await;
-        if auth.session_cookie.is_some() || auth.checked {
-            return Ok(());
+        // Fast path: already have a session. Do not treat `checked` alone as authenticated —
+        // that previously allowed API calls without a cookie and surfaced as HTTP 401.
+        {
+            let auth = self.auth.lock().await;
+            if auth.session_cookie.is_some() {
+                return Ok(());
+            }
+            if auth.auth_not_required {
+                return Ok(());
+            }
         }
+
         #[derive(Deserialize)]
         struct AuthCheck {
-            authenticated: bool,
             required: bool,
             setup_required: bool,
         }
@@ -194,12 +217,19 @@ impl WebBackend {
         if check.setup_required {
             return Err("DBX Web password setup is required before MCP Web mode can access APIs.".to_string());
         }
-        if !check.required || check.authenticated {
-            auth.checked = true;
+        if !check.required {
+            let mut auth = self.auth.lock().await;
+            auth.auth_not_required = true;
+            auth.session_cookie = None;
             return Ok(());
         }
+        // Auth is required. Even if /auth/check somehow reports authenticated without our cookie,
+        // still log in when we have a password so subsequent API calls carry dbx_session.
         if self.password.is_empty() {
-            return Err("DBX Web authentication is required. Set DBX_WEB_PASSWORD for MCP Web mode.".to_string());
+            return Err(format!(
+                "DBX Web authentication is required for {}. Set DBX_WEB_PASSWORD in the MCP server env (same value as the Web login password).",
+                self.base_url
+            ));
         }
         let response = self
             .client
@@ -207,18 +237,33 @@ impl WebBackend {
             .json(&json!({ "password": self.password }))
             .send()
             .await
-            .map_err(|error| format!("Authentication failed: {error}"))?;
+            .map_err(|error| format!("Authentication login request failed: {error}"))?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(format!(
+                "Authentication login failed: 401 Unauthorized for {}. DBX_WEB_PASSWORD does not match the Web login password (or login is rate-limited after too many failures).",
+                self.base_url
+            ));
+        }
         if !response.status().is_success() {
-            return Err(format!("Authentication failed: {}", response.status()));
+            let status = response.status();
+            let details = response.text().await.unwrap_or_default();
+            return Err(format!("Authentication login failed: {status} {details}"));
         }
         let cookie = response
             .headers()
-            .get(reqwest::header::SET_COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(extract_session_cookie)
-            .ok_or_else(|| "Authentication failed: DBX Web did not return a session cookie.".to_string())?;
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(extract_session_cookie)
+            .ok_or_else(|| {
+                format!(
+                    "Authentication login succeeded but DBX Web did not return a dbx_session Set-Cookie from {}.",
+                    self.base_url
+                )
+            })?;
+        let mut auth = self.auth.lock().await;
         auth.session_cookie = Some(cookie);
-        auth.checked = true;
+        auth.auth_not_required = false;
         Ok(())
     }
 
@@ -254,7 +299,12 @@ impl WebBackend {
             }
             let status = response.status();
             let details = response.text().await.unwrap_or_default();
-            return Err(format!("API request {path} failed: {status} {details}"));
+            let hint = if status == reqwest::StatusCode::UNAUTHORIZED {
+                " (session missing/expired — check DBX_WEB_URL / DBX_WEB_PASSWORD in the MCP process env)"
+            } else {
+                ""
+            };
+            return Err(format!("API request {path} failed: {status}{hint} {details}"));
         }
     }
 
@@ -333,12 +383,30 @@ impl DbxBackend for LocalBackend {
         Ok(config)
     }
 
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        let config = self.state.storage.update_connection_for_mcp(config).await?;
+        self.state.remove_connection_pools_detached(&config.id).await;
+        self.state.reset_connection_transport_for_config(&config.id, &config).await;
+        self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        Ok(config)
+    }
+
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
         }
         Ok(removed)
+    }
+
+    async fn test_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
+        let temp_id = format!("__test_{}", Uuid::new_v4());
+        self.state.configs.write().await.insert(temp_id.clone(), config.clone());
+        let pool_result = self.state.get_or_create_pool(&temp_id, config.database.as_deref()).await;
+        self.state.remove_connection_pools(&temp_id).await;
+        self.state.reset_connection_transport_for_config(&temp_id, config).await;
+        self.state.configs.write().await.remove(&temp_id);
+        pool_result.map(|_| ())
     }
 
     async fn list_tables(
@@ -716,6 +784,14 @@ impl DbxBackend for WebBackend {
             .map_err(|error| format!("Invalid MCP connection response: {error}"))
     }
 
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        self.request(reqwest::Method::POST, "/api/connection/mcp/update", Some(json!({ "config": config })))
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         self.request(
             reqwest::Method::POST,
@@ -726,6 +802,12 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
+    async fn test_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
+        self.request(reqwest::Method::POST, "/api/connection/test", Some(json!({ "config": config })))
+            .await
+            .map(|_| ())
     }
 
     async fn list_tables(

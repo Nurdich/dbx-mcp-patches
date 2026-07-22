@@ -42,6 +42,10 @@ impl DbxBackend for EmptyBackend {
         Ok(config)
     }
 
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        Ok(config)
+    }
+
     async fn remove_connection_for_mcp(&self, _connection_id: &str) -> Result<bool, String> {
         Ok(true)
     }
@@ -80,6 +84,10 @@ impl DbxBackend for PolicyBackend {
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        Ok(config)
+    }
+
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
         Ok(config)
     }
 
