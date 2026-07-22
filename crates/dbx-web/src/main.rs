@@ -208,6 +208,7 @@ async fn main() {
         .route("/connection/save", post(routes::connection::save_connections))
         .route("/connection/list", get(routes::connection::load_connections))
         .route("/connection/mcp/add", post(routes::connection::mcp_add_connection))
+        .route("/connection/mcp/update", post(routes::connection::mcp_update_connection))
         .route("/connection/mcp/remove", post(routes::connection::mcp_remove_connection))
         .route("/plugins", get(routes::plugins::list_plugins))
         // JDBC

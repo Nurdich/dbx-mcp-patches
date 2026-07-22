@@ -12,6 +12,7 @@ use dbx_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::mongo::MongoCommand;
 
@@ -94,7 +95,13 @@ pub trait DbxBackend: Send + Sync {
         Err("SQL queries are not supported by this backend.".to_string())
     }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String>;
+    /// Probe whether a connection config can establish a DB session (used by CLI update failover).
+    async fn test_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
+        let _ = config;
+        Err("Connection testing is not supported by this backend.".to_string())
+    }
     async fn list_tables(
         &self,
         connection: &ConnectionConfig,
@@ -376,12 +383,30 @@ impl DbxBackend for LocalBackend {
         Ok(config)
     }
 
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        let config = self.state.storage.update_connection_for_mcp(config).await?;
+        self.state.remove_connection_pools_detached(&config.id).await;
+        self.state.reset_connection_transport_for_config(&config.id, &config).await;
+        self.state.configs.write().await.insert(config.id.clone(), config.clone());
+        Ok(config)
+    }
+
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
         }
         Ok(removed)
+    }
+
+    async fn test_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
+        let temp_id = format!("__test_{}", Uuid::new_v4());
+        self.state.configs.write().await.insert(temp_id.clone(), config.clone());
+        let pool_result = self.state.get_or_create_pool(&temp_id, config.database.as_deref()).await;
+        self.state.remove_connection_pools(&temp_id).await;
+        self.state.reset_connection_transport_for_config(&temp_id, config).await;
+        self.state.configs.write().await.remove(&temp_id);
+        pool_result.map(|_| ())
     }
 
     async fn list_tables(
@@ -759,6 +784,14 @@ impl DbxBackend for WebBackend {
             .map_err(|error| format!("Invalid MCP connection response: {error}"))
     }
 
+    async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        self.request(reqwest::Method::POST, "/api/connection/mcp/update", Some(json!({ "config": config })))
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
     async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         self.request(
             reqwest::Method::POST,
@@ -769,6 +802,12 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid MCP connection response: {error}"))
+    }
+
+    async fn test_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
+        self.request(reqwest::Method::POST, "/api/connection/test", Some(json!({ "config": config })))
+            .await
+            .map(|_| ())
     }
 
     async fn list_tables(

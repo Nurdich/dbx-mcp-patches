@@ -280,6 +280,17 @@ pub async fn mcp_add_connection(
     Ok(Json(saved))
 }
 
+pub async fn mcp_update_connection(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<McpAddConnectionRequest>,
+) -> Result<Json<ConnectionConfig>, AppError> {
+    let saved = state.app.storage.update_connection_for_mcp(body.config).await.map_err(AppError)?;
+    state.app.remove_connection_pools_detached(&saved.id).await;
+    state.app.reset_connection_transport_for_config(&saved.id, &saved).await;
+    state.app.configs.write().await.insert(saved.id.clone(), saved.clone());
+    Ok(Json(saved))
+}
+
 pub async fn mcp_remove_connection(
     State(state): State<Arc<WebState>>,
     Json(body): Json<McpRemoveConnectionRequest>,

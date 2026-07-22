@@ -1755,6 +1755,26 @@ impl Storage {
         .await
     }
 
+    /// Replace an existing connection by id (MCP/CLI update). Fails if the id is missing.
+    pub async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        let config = config.canonicalized();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&config.id))?;
+            let existed =
+                tx.execute("DELETE FROM connections WHERE id = ?1", [&config.id]).map_err(|e| e.to_string())? > 0;
+            if !existed {
+                return Err(format!("Connection not found: {}", config.id));
+            }
+            tx.execute("DELETE FROM connection_secrets WHERE connection_id = ?1", [&config.id])
+                .map_err(|e| e.to_string())?;
+            persist_connection_in_tx(&tx, &config)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(config)
+        })
+        .await
+    }
+
     pub async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         let connection_id = connection_id.to_string();
         self.with_conn(move |conn| {
