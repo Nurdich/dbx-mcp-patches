@@ -8,7 +8,8 @@ use crate::backend::DbxBackend;
 use crate::list_index::{parse_list_index, parse_list_index_range};
 use crate::server::McpScope;
 use crate::tunnel_profiles::{
-    apply_proxy_profiles_failover, has_proxy_profile_ref, resolve_proxy_profiles, ProxyProfileRefArgs,
+    apply_proxy_profiles_failover, has_proxy_profile_ref, resolve_proxy_profiles, with_env_defaults,
+    ProxyProfileRefArgs,
 };
 
 fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
@@ -169,6 +170,7 @@ pub async fn apply_proxy_override_with_args(
     config: ConnectionConfig,
     args: ProxyProfileRefArgs,
 ) -> Result<ConnectionConfig, CallToolResult> {
+    let args = with_env_defaults(args);
     if !has_proxy_profile_ref(&args) {
         return Ok(config);
     }

@@ -41,6 +41,40 @@ pub fn has_proxy_profile_ref(args: &ProxyProfileRefArgs) -> bool {
         || args.proxy_profile_names.as_ref().is_some_and(|v| v.iter().any(|s| !s.trim().is_empty()))
 }
 
+/// Apply process-wide defaults from env when no explicit proxy refs were provided.
+///
+/// - `DBX_PROXY_PROFILE_IDS` — comma list / range / UUIDs (same syntax as `--proxy-profile-id`)
+/// - `DBX_PROXY_PROFILE_NAMES` — comma-separated profile names
+///
+/// Explicit CLI flags or MCP tool args always win. If both env vars are set, IDs take precedence.
+pub fn with_env_defaults(mut args: ProxyProfileRefArgs) -> ProxyProfileRefArgs {
+    if has_proxy_profile_ref(&args) {
+        return args;
+    }
+    if let Ok(ids) = std::env::var("DBX_PROXY_PROFILE_IDS") {
+        let ids = ids.trim();
+        if !ids.is_empty() {
+            args.proxy_profile_ids = Some(vec![ids.to_string()]);
+            return args;
+        }
+    }
+    if let Ok(names) = std::env::var("DBX_PROXY_PROFILE_NAMES") {
+        let names = names.trim();
+        if !names.is_empty() {
+            let list: Vec<String> = names
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+            if !list.is_empty() {
+                args.proxy_profile_names = Some(list);
+            }
+        }
+    }
+    args
+}
+
 pub fn has_inline_proxy_params(args: &InlineProxyArgs) -> bool {
     args.proxy_enabled == Some(true)
         || args.proxy_host.as_deref().is_some_and(|v| !v.trim().is_empty())
