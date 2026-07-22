@@ -1,5 +1,165 @@
 # Update Log
 
+## 2026-07-22 — 修复 Web 模式 `connections update` 持久化 405
+
+### 现象
+
+`DBX_WEB_URL` 下执行 `dbx connections update … --proxy-profile-id …`：多代理 failover 试连可通（如 Connected via proxy #2），但写回失败：
+
+`API request /api/connection/mcp/update failed: 405 Method Not Allowed` → `0 updated, N failed`。
+
+### 根因
+
+- CLI / `WebBackend::update_connection_for_mcp` 调用 **`POST /api/connection/mcp/update`**
+- 已部署的 `dbx-web` 只注册了 `mcp/add`、`mcp/remove`，**没有** `mcp/update`
+- 未命中 API 时落到静态资源 `ServeDir` fallback；对静态路径发 POST → **405 Method Not Allowed**（不是单纯 404）
+
+### 改动
+
+- `crates/dbx-web/src/main.rs`：注册 `POST /connection/mcp/update`
+- `crates/dbx-web/src/routes/connection.rs`：`mcp_update_connection`（对齐 add/remove，走 `storage.update_connection_for_mcp`，并清 pool / 重置 transport）
+- 配套链路（同批 WIP）：`WebBackend` → 该 API；`LocalBackend` / `Storage::update_connection_for_mcp` 本地直写
+
+### 部署注意
+
+修的是 **dbx-web API**。远端（如 `47.99…`）必须 **重新编译并部署 dbx-web** 后 405 才会消失。只更新本地 `dbx.exe`、远端仍是旧 API → 照样 405。
+
+---
+
+## 2026-07-22 — CLI `connections update` 支持 range 批量
+
+### 问题
+
+`dbx connections update 1-10 --proxy-profile-id 1,2,3` 若 PATH 上是旧版 `dbx`（如 npm 全局包），Usage 里看不到 `connections update`。源码侧此前已有单条 update + 多代理 failover，但 **不接受 range**（`find_connection` 对 `1-10` 直接报 CONNECTION_RANGE）。
+
+### 改动
+
+- `run_connections_update` 改为 `select_connections`，支持 `1-10` / `#1:#10` 等 range 批量
+- 每条连接独立：多代理 failover 试连，成功则写回 winner，失败则该条保持原配置；批量有失败时 soft-fail
+- range 下禁止 `--name`（一次只能改一个名字）
+- Usage 更新为 `<connection|#|range>`
+
+### 怎么跑
+
+PATH 上的 npm `dbx` 不会带这次改动。需用仓库二进制（自行编译后）：
+
+```powershell
+& G:\rust\dbx-main-rust\target\release\dbx.exe connections update 1-10 --proxy-profile-id 1,2,3
+```
+
+---
+
+## 2026-07-22 — CLI `connections import` 批量直写（不试连）
+
+### 背景
+
+大量连接配置要导入时，逐条 `connections add` / 试连太慢。`add` 本身已直写 storage、不试连；此前缺少 **JSON 批量导入** 命令。
+
+### 行为
+
+- 新增 `dbx connections import --file <path.json>`：从 JSON **批量写入**连接，**永不试连**
+- 写入路径与 `add` 相同：`add_connection_for_mcp` → 本地 `dbx.db`；若设置了 `DBX_WEB_URL` 则经 Web API 写入远端 store
+- 同名连接 **跳过**（不覆盖），其它条目继续；有失败条目时以 soft-fail（非 0 退出）并输出明细
+- 支持代理：`proxy_url`（如 `socks5://user:pass@host:1080` / `http://host:8080`）或拆分字段 `proxy_host`/`proxy_port`/`proxy_type`，或 `proxy_profile_id` / `proxy_profile_name`（引用已保存隧道配置，同样不试连）
+
+### JSON 格式
+
+数组，或 `{ "connections": [ ... ] }`：
+
+```json
+[
+  {
+    "name": "pg-prod",
+    "type": "postgres",
+    "host": "10.0.0.1",
+    "port": 5432,
+    "username": "u",
+    "password": "p",
+    "database": "app",
+    "proxy_url": "socks5://127.0.0.1:1080"
+  },
+  {
+    "name": "mysql-edge",
+    "type": "mysql",
+    "host": "10.0.0.2",
+    "proxy_host": "127.0.0.1",
+    "proxy_port": 7890,
+    "proxy_type": "http"
+  }
+]
+```
+
+字段别名：`type` / `dbType`、`db`、`proxyUrl`、`proxyProfileId` 等。
+
+### 用法示例
+
+```powershell
+dbx connections import --file .\connections.json
+dbx connections import --file .\connections.json -j
+# 经 Web 写入（不落本地 db）
+$env:DBX_WEB_URL = "http://127.0.0.1:7429"
+dbx connections import --file .\connections.json -j
+```
+
+### 改动文件
+
+- `crates/dbx-cli/src/main.rs` — `connections import` + `proxy_url` 解析 + 单测（同文件）
+- `update_log.md` — 本条
+
+### 请你本地验证
+
+```powershell
+# 准备 JSON 后
+dbx connections import --file .\connections.json -j
+dbx connections list -j
+```
+
+---
+
+## 2026-07-22 — CLI `connections update` 多代理 failover 试连写回
+
+### 行为
+
+- 新增 `dbx connections update <connection|#>`：可改 host/port/凭证等字段，并支持多代理参数（与 `add` / MCP 约定一致）
+- 指定多个代理时按顺序 **failover 试连**（不是多跳串代理）；**第一个成功的代理**写入存储，替换该连接 `transport_layers` 里原有的 proxy 部分（最终只持久化 winner，不保留整组 failover stub）
+- 全部失败则报错，**不修改**原连接配置
+- 仅改字段、不带代理参数时：直接更新，不强制试连
+
+### 用法示例
+
+```powershell
+# 列表序号 1,2,3 依次试连，成功者写回
+dbx connections update my-pg --proxy-profile-id 1,2,3
+
+# UUID / #序号 / 名称（可重复 flag）；也可 --proxy-profiles
+dbx connections update #2 --proxy-profile-id <uuid-a>,<uuid-b>
+dbx connections update my-pg --proxy-profile-name edge-a --proxy-profile-name edge-b
+
+# 同时改 host，并试多代理
+dbx connections update my-pg --host 10.0.0.5 --proxy-profile-id "#1-#3" -j
+
+# 内联单代理（试通后写回）
+dbx connections update my-pg --proxy --proxy-type socks5 -H 127.0.0.1 --proxy-port 1080
+```
+
+### 改动文件
+
+- `crates/dbx-cli/src/main.rs` — `connections update` + failover 选 winner 写回 + help
+- `crates/dbx-core/src/storage.rs` — `update_connection_for_mcp`
+- `crates/dbx-mcp/src/backend.rs` — `update_connection_for_mcp` / `test_connection_config`（Local + Web）
+- `crates/dbx-web/src/routes/connection.rs` + `main.rs` — `POST /api/connection/mcp/update`
+- 测试 mock：`dbx-mcp` server/protocol、`dbx-cli` MongoBackend
+
+### 请你本地验证
+
+```powershell
+dbx proxies list
+dbx connections update <name|#> --proxy-profile-id 1,2,3 -v
+dbx connections list -j
+```
+
+---
+
 ## 2026-07-22 — MCP Web 模式 401：鉴权加固 + 启动诊断
 
 ### 现象

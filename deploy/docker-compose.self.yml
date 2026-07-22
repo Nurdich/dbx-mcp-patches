@@ -1,0 +1,25 @@
+# Self-built DBX image via WSLC (not Docker Desktop, not t8y2/dbx Hub).
+# From repo root:
+#   wslc-compose -f deploy/docker-compose.self.yml build
+#   wslc-compose -f deploy/docker-compose.self.yml up -d
+# Or:
+#   wslc build -f deploy/Dockerfile.self -t dbx-self:latest .
+
+services:
+  dbx:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.self
+    image: dbx-self:latest
+    container_name: dbx-self
+    ports:
+      - "4224:4224"
+    environment:
+      - DBX_PASSWORD=changeme
+      # Uncomment for reverse-proxy subpath:
+      # - DBX_PUBLIC_BASE_PATH=/dbx
+    volumes:
+      - dbx-self-data:/app/data
+
+volumes:
+  dbx-self-data:
