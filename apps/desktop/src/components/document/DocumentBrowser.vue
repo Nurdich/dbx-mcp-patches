@@ -84,6 +84,7 @@ type ViewMode = "document" | "table";
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
+const mongoCopyDocumentsAvailable = ref(false);
 const lastGridColumns = ref<string[]>([]);
 const total = ref<number | undefined>(undefined);
 const totalIsExact = ref(true);
@@ -112,6 +113,7 @@ const sortInput = ref("");
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
+const mongoUpdateTarget = computed(() => (props.databaseType === "mongodb" && mongoCopyDocumentsAvailable.value ? { collection: props.collection, idColumn: "_id" as const } : undefined));
 const documentViewerRef = ref<HTMLElement>();
 const documentSearchInputRef = ref<HTMLInputElement>();
 const documentSearchOpen = ref(false);
@@ -822,9 +824,11 @@ async function load() {
             }
           })
         : result.documents.map(asRecord);
-    const nextCopyDocuments = result.extended_documents?.length === nextDocuments.length ? result.extended_documents.map(asRecord) : nextDocuments;
+    const hasTypePreservingCopyDocuments = result.extended_documents?.length === nextDocuments.length;
+    const nextCopyDocuments = hasTypePreservingCopyDocuments ? result.extended_documents!.map(asRecord) : nextDocuments;
     documents.value = nextDocuments;
     copyDocuments.value = nextCopyDocuments;
+    mongoCopyDocumentsAvailable.value = hasTypePreservingCopyDocuments;
     if (nextDocuments.length > 0) {
       const keySet = new Set<string>();
       keySet.add("_id");
@@ -1569,6 +1573,7 @@ defineExpose({ focusSearch });
       :result="gridResult"
       context="results"
       :database-type="props.databaseType"
+      :mongo-update-target="mongoUpdateTarget"
       editable
       :custom-save-handler="customSaveHandler"
       :loading="loading"

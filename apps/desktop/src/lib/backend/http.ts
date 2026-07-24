@@ -19,6 +19,9 @@
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
+  ConstraintInfo,
+  PartitionInfo,
+  SubpartitionInfo,
   ExtensionInfo,
   FunctionInfo,
   SequenceInfo,
@@ -685,6 +688,18 @@ export async function listForeignKeys(connectionId: string, database: string, sc
 
 export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<TriggerInfo[]> {
   return get(`/api/schema/triggers?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+}
+
+export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ConstraintInfo[]> {
+  return get(`/api/schema/constraints?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+}
+
+export async function listPartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<PartitionInfo[]> {
+  return get(`/api/schema/partitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
+}
+
+export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
+  return get(`/api/schema/subpartitions?${qs({ connection_id: connectionId, database, schema, table, catalog })}`);
 }
 
 export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {

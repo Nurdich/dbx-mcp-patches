@@ -386,6 +386,39 @@ pub async fn list_triggers(
 }
 
 #[tauri::command]
+pub async fn list_constraints(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<dbx_core::db::ConstraintInfo>, String> {
+    dbx_core::schema::list_constraints_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_partitions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<dbx_core::db::PartitionInfo>, String> {
+    dbx_core::schema::list_partitions_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
+pub async fn list_subpartitions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Vec<dbx_core::db::SubpartitionInfo>, String> {
+    dbx_core::schema::list_subpartitions_core(&state, &connection_id, &database, &schema, &table).await
+}
+
+#[tauri::command]
 pub async fn get_table_ddl(
     state: State<'_, Arc<AppState>>,
     connection_id: String,

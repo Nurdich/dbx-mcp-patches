@@ -89,7 +89,6 @@ jobs:
           name: agent-jars
           path: |
             agents/drivers/*/build/libs/dbx-agent-*.jar
-            !agents/drivers/kingbase/build/libs/dbx-agent-kingbase.jar
 
   build-oracle-native:
     needs: [bump-versions]
@@ -306,7 +305,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p release
-          find artifacts/agent-jars -name '*.jar' ! -name 'dbx-agent-kingbase.jar' -exec cp {} release/ \;
+          find artifacts/agent-jars -name '*.jar' -exec cp {} release/ \;
           find artifacts/oracle-native -type f -name 'dbx-agent-oracle-*' -exec cp {} release/ \;
           find artifacts/xugu-native -type f -name 'dbx-agent-xugu-*' -exec cp {} release/ \;
           find artifacts/kingbase-native -type f -name 'dbx-agent-kingbase-*' -exec cp {} release/ \;

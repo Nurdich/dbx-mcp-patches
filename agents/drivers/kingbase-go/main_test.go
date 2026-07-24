@@ -22,6 +22,8 @@ var registerExpressionFallbackDriver sync.Once
 var expressionFallbackState atomic.Pointer[fallbackDriverState]
 var registerModeDetectionDriver sync.Once
 var modeDetectionState atomic.Pointer[modeDetectionDriverState]
+var registerMetadataDriver sync.Once
+var metadataState atomic.Pointer[metadataDriverState]
 
 type fakeDriverState struct {
 	queryArgs int
@@ -50,17 +52,29 @@ type fallbackConn struct {
 }
 
 type modeDetectionDriverState struct {
-	mu            sync.Mutex
-	queries       []string
-	databaseMode  *string
-	sqlModeExists bool
-	databaseErr   error
+	mu                  sync.Mutex
+	queries             []string
+	databaseMode        *string
+	backtickIdentifiers bool
+	databaseErr         error
 }
 
 type modeDetectionDriver struct{}
 
 type modeDetectionConn struct {
 	state *modeDetectionDriverState
+}
+
+type metadataDriverState struct {
+	mu      sync.Mutex
+	queries []string
+	query   func(string) (driver.Rows, error)
+}
+
+type metadataDriver struct{}
+
+type metadataConn struct {
+	state *metadataDriverState
 }
 
 type valueRows struct {
@@ -178,15 +192,31 @@ func (connection *modeDetectionConn) QueryContext(_ context.Context, query strin
 			rows = append(rows, []driver.Value{*connection.state.databaseMode})
 		}
 		return &valueRows{columns: []string{"setting"}, rows: rows}, nil
-	case strings.Contains(query, "LOWER(name) = 'sql_mode'"):
-		rows := [][]driver.Value{}
-		if connection.state.sqlModeExists {
-			rows = append(rows, []driver.Value{int64(1)})
+	case strings.Contains(query, "AS `dbx_identifier_probe`"):
+		if !connection.state.backtickIdentifiers {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42601"), Message: "syntax error at or near `"}
 		}
-		return &valueRows{columns: []string{"value"}, rows: rows}, nil
+		return &valueRows{columns: []string{"dbx_identifier_probe"}, rows: [][]driver.Value{{int64(1)}}}, nil
 	default:
 		return nil, errors.New("unexpected query: " + query)
 	}
+}
+
+func (metadataDriver) Open(string) (driver.Conn, error) {
+	return &metadataConn{state: metadataState.Load()}, nil
+}
+
+func (*metadataConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*metadataConn) Close() error { return nil }
+
+func (*metadataConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection *metadataConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	connection.state.mu.Lock()
+	connection.state.queries = append(connection.state.queries, query)
+	connection.state.mu.Unlock()
+	return connection.state.query(query)
 }
 
 func (rows *valueRows) Columns() []string { return rows.columns }
@@ -221,6 +251,19 @@ func openModeDetectionDB(t *testing.T, state *modeDetectionDriverState) *sql.DB 
 	registerModeDetectionDriver.Do(func() { sql.Register("kingbase-mode-detection-test", modeDetectionDriver{}) })
 	modeDetectionState.Store(state)
 	db, err := sql.Open("kingbase-mode-detection-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func openMetadataDB(t *testing.T, state *metadataDriverState) *sql.DB {
+	t.Helper()
+	registerMetadataDriver.Do(func() { sql.Register("kingbase-metadata-test", metadataDriver{}) })
+	metadataState.Store(state)
+	db, err := sql.Open("kingbase-metadata-test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +360,106 @@ func TestMetadataNormalizationHelpers(t *testing.T) {
 	}
 	if boundedVarcharLength("text") != nil {
 		t.Fatal("unbounded type returned a length")
+	}
+}
+
+func TestListDatabasesFallsBackToPostgresCatalog(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		switch {
+		case strings.Contains(query, "sys_catalog.sys_database"):
+			return nil, errors.New("sys catalog unavailable")
+		case strings.Contains(query, "pg_catalog.pg_database"):
+			return &valueRows{columns: []string{"datname"}, rows: [][]driver.Value{{"app"}, {"test"}}}, nil
+		default:
+			return nil, errors.New("unexpected query: " + query)
+		}
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.params.Database = "configured"
+
+	databases, err := server.listDatabases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(databases) != 2 || databases[0].Name != "app" || databases[1].Name != "test" {
+		t.Fatalf("unexpected databases: %#v", databases)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 2 || !strings.Contains(state.queries[0], "sys_catalog.sys_database") || !strings.Contains(state.queries[1], "pg_catalog.pg_database") {
+		t.Fatalf("catalog fallback order changed: %v", state.queries)
+	}
+}
+
+func TestListTablesPreservesKingbaseObjectTypesAndComments(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM sys_catalog.sys_class c") || !strings.Contains(query, "c.relkind IN ('r','p','v','m','f')") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"relname", "relkind", "comment"},
+			rows: [][]driver.Value{
+				{"orders", "TABLE", "orders table"},
+				{"sales_view", "VIEW", nil},
+				{"sales_cache", "MATERIALIZED_VIEW", "cached sales"},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	tables, err := server.listTables("public", metadataListConstraints{Filter: "sales", ObjectTypes: []string{"VIEW", "MATERIALIZED_VIEW"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != 2 || tables[0].TableType != "VIEW" || tables[1].TableType != "MATERIALIZED_VIEW" {
+		t.Fatalf("unexpected tables: %#v", tables)
+	}
+	if tables[1].Comment == nil || *tables[1].Comment != "cached sales" {
+		t.Fatalf("materialized view comment was lost: %#v", tables[1])
+	}
+}
+
+func TestListTriggersUsesCompatibilityCatalogAndDecodesTiming(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "FROM pg_catalog.pg_trigger") || !strings.Contains(query, "NOT tg.tgisinternal") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{
+			columns: []string{"tgname", "event", "tgtype"},
+			rows:    [][]driver.Value{{"orders_before", "INSERT,UPDATE", int64(2)}, {"orders_instead", "DELETE", int64(64)}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+	server.mode.postgresCatalog = true
+
+	triggers, err := server.listTriggers("public", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(triggers) != 2 || triggers[0].Timing != "BEFORE" || triggers[1].Timing != "INSTEAD OF" {
+		t.Fatalf("unexpected triggers: %#v", triggers)
+	}
+}
+
+func TestRoutineSourceUsesKingbaseCatalogFunction(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "SELECT sys_get_functiondef(p.oid)") || !strings.Contains(query, "FROM sys_catalog.sys_proc") {
+			return nil, errors.New("unexpected query: " + query)
+		}
+		return &valueRows{columns: []string{"source"}, rows: [][]driver.Value{{"CREATE FUNCTION public.format_name() RETURNS text AS $$ SELECT 'x'; $$"}}}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	source, err := server.getObjectSource("public", "format_name", "FUNCTION")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(source["source"].(string), "CREATE FUNCTION public.format_name()") {
+		t.Fatalf("unexpected routine source: %#v", source)
 	}
 }
 
@@ -562,11 +705,11 @@ func TestGetTableCommentUsesPostgresCatalogComment(t *testing.T) {
 	}
 }
 
-func TestDetectMySQLCompatModePrefersDatabaseModeOverSQLModePresence(t *testing.T) {
+func TestDetectMySQLCompatModePrefersDatabaseModeOverSyntaxProbe(t *testing.T) {
 	oracle := "oracle"
 	state := &modeDetectionDriverState{
-		databaseMode:  &oracle,
-		sqlModeExists: true,
+		databaseMode:        &oracle,
+		backtickIdentifiers: true,
 	}
 	db := openModeDetectionDB(t, state)
 
@@ -578,6 +721,22 @@ func TestDetectMySQLCompatModePrefersDatabaseModeOverSQLModePresence(t *testing.
 	defer state.mu.Unlock()
 	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "database_mode") {
 		t.Fatalf("database_mode should be authoritative when present: %v", state.queries)
+	}
+}
+
+func TestDetectMySQLCompatModeAcceptsExplicitMySQLMode(t *testing.T) {
+	mysql := "mysql"
+	state := &modeDetectionDriverState{databaseMode: &mysql}
+	db := openModeDetectionDB(t, state)
+
+	if !detectMySQLCompatMode(db) {
+		t.Fatal("database_mode=mysql should use MySQL compatibility")
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if len(state.queries) != 1 || !strings.Contains(state.queries[0], "database_mode") {
+		t.Fatalf("explicit MySQL mode should not need the syntax probe: %v", state.queries)
 	}
 }
 
@@ -607,18 +766,27 @@ func TestConnectionInfoReportsCompatibilityIdentifierQuote(t *testing.T) {
 	}
 }
 
-func TestDetectMySQLCompatModeFallsBackToSQLModeWhenDatabaseModeMissing(t *testing.T) {
-	state := &modeDetectionDriverState{sqlModeExists: true}
+func TestDetectMySQLCompatModeProbesBacktickSyntaxWhenDatabaseModeMissing(t *testing.T) {
+	state := &modeDetectionDriverState{backtickIdentifiers: true}
 	db := openModeDetectionDB(t, state)
 
 	if !detectMySQLCompatMode(db) {
-		t.Fatal("legacy server with sql_mode but no database_mode should still use MySQL compatibility")
+		t.Fatal("legacy server accepting backtick identifiers should use MySQL compatibility")
 	}
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if len(state.queries) != 2 {
-		t.Fatalf("expected database_mode probe followed by sql_mode fallback, got: %v", state.queries)
+	if len(state.queries) != 2 || !strings.Contains(state.queries[1], "dbx_identifier_probe") {
+		t.Fatalf("expected database_mode probe followed by backtick syntax probe, got: %v", state.queries)
+	}
+}
+
+func TestDetectMySQLCompatModeRejectsSQLModeWithoutBacktickSyntax(t *testing.T) {
+	state := &modeDetectionDriverState{}
+	db := openModeDetectionDB(t, state)
+
+	if detectMySQLCompatMode(db) {
+		t.Fatal("legacy server rejecting backtick identifiers must not use MySQL compatibility")
 	}
 }
 

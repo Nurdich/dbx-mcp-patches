@@ -344,6 +344,16 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand unwraps EJSON.deserialize values", () => {
+  assert.deepEqual(parseMongoWriteCommand('db.products.updateOne({_id: ObjectId("507f1f77bcf86cd799439011")}, {$set: {price: EJSON.deserialize({"$numberDecimal":"12.34"}), payload: EJSON.deserialize({"$binary":{"base64":"AQI=","subType":"00"}})}})'), {
+    kind: "update",
+    collection: "products",
+    filter: '{"_id": {"$oid":"507f1f77bcf86cd799439011"}}',
+    update: '{"$set": {"price": {"$numberDecimal":"12.34"}, "payload": {"$binary":{"base64":"AQI=","subType":"00"}}}}',
+    many: false,
+  });
+});
+
 test("parseMongoWriteCommand accepts legacy insert commands", () => {
   assert.deepEqual(
     parseMongoWriteCommand(`db.getCollection("accounting_reconciliations").insert({
@@ -934,6 +944,17 @@ test("mongoDocumentsToQueryResult turns mongo documents into grid rows", () => {
   assert.equal(result.affected_rows, 12);
   assert.equal(result.execution_time_ms, 5);
   assert.equal(result.truncated, true);
+});
+
+test("mongoDocumentsToQueryResult keeps aligned extended documents for copying", () => {
+  const documents = [{ _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" }, createdAt: 'ISODate("2026-07-24T00:00:00Z")' }];
+  const copyDocuments = [{ _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" }, createdAt: { $date: "2026-07-24T00:00:00Z" } }];
+
+  const result = mongoDocumentsToQueryResult(documents, 5, 1, copyDocuments);
+
+  assert.deepEqual(result.mongo_documents, documents);
+  assert.deepEqual(result.mongo_copy_documents, copyDocuments);
+  assert.equal(mongoDocumentsToQueryResult(documents, 5, 1, []).mongo_copy_documents, undefined);
 });
 
 test("mongoDocumentsToQueryResult displays ids without losing raw type metadata", () => {

@@ -744,6 +744,14 @@ const driverProfiles: Record<
     icon: "postgres",
     urlParams: "",
   },
+  cloudberry: {
+    type: "postgres",
+    port: 5432,
+    user: "postgres",
+    label: "Apache Cloudberry",
+    icon: "cloudberry",
+    urlParams: "",
+  },
   redis: { type: "redis", port: 6379, user: "", label: "Redis", icon: "redis" },
   sqlite: { type: "sqlite", port: 0, user: "", label: "SQLite", icon: "sqlite" },
   rqlite: { type: "rqlite", port: 4001, user: "", label: "RQLite", icon: "rqlite" },
@@ -2108,6 +2116,7 @@ function isH2FileJdbcUrlLikePath(value: string): boolean {
 const iconTypeMap: Record<string, string> = {
   mysql: "mysql",
   postgres: "postgres",
+  cloudberry: "cloudberry",
   sqlite: "sqlite",
   rqlite: "rqlite",
   turso: "turso",
@@ -2190,6 +2199,7 @@ const iconTypeMap: Record<string, string> = {
 
 const dbOptions: DbOption[] = [
   { value: "postgres", label: "PostgreSQL" },
+  { value: "cloudberry", label: "Apache Cloudberry" },
   { value: "mysql", label: "MySQL" },
   { value: "mongodb", label: "MongoDB" },
   { value: "redis", label: "Redis" },
@@ -2282,7 +2292,7 @@ const dbCategoryDefinitions: Array<{
   {
     key: "analytics",
     titleKey: "connection.databaseCategoryAnalytics",
-    optionValues: ["clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "spark", "bigquery", "kylin", "dremio"],
+    optionValues: ["cloudberry", "clickhouse", "doris", "starrocks", "databend", "selectdb", "databricks", "saphana", "teradata", "vertica", "exasol", "redshift", "snowflake", "trino", "prestosql", "hive", "spark", "bigquery", "kylin", "dremio"],
   },
   {
     key: "domestic",
@@ -5877,29 +5887,35 @@ function openExternalUrl(url: string) {
                     </label>
                   </div>
 
-                  <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-center gap-4">
+                  <div v-if="supportsGenericUrlParams" class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.urlParams") }}</Label>
-                    <Input
-                      v-model="form.url_params"
-                      class="col-span-3"
-                      :placeholder="
-                        form.db_type === 'mysql'
-                          ? 'charset=utf8mb4'
-                          : form.db_type === 'saphana'
-                            ? 'databaseName=TENANT_DB'
-                            : form.db_type === 'clickhouse'
-                              ? 'secure=true'
-                              : form.db_type === 'bigquery'
-                                ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
-                                : form.db_type === 'informix'
-                                  ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
-                                  : form.db_type === 'spark'
-                                    ? 'catalog=paimon_catalog'
-                                    : form.db_type === 'cassandra'
-                                      ? 'localdatacenter=dc1'
-                                      : 'sslmode=prefer'
-                      "
-                    />
+                    <div class="col-span-3 space-y-1.5">
+                      <Input
+                        v-model="form.url_params"
+                        :placeholder="
+                          form.db_type === 'mysql'
+                            ? 'charset=utf8mb4'
+                            : form.db_type === 'doris' || form.db_type === 'starrocks'
+                              ? 'sessionVariables=query_timeout=60'
+                              : form.db_type === 'saphana'
+                                ? 'databaseName=TENANT_DB'
+                                : form.db_type === 'clickhouse'
+                                  ? 'secure=true'
+                                  : form.db_type === 'bigquery'
+                                    ? 'OAuthType=0;OAuthServiceAcctEmail=svc@project.iam.gserviceaccount.com;OAuthPvtKeyPath=/path/key.json'
+                                    : form.db_type === 'informix'
+                                      ? 'CLIENT_LOCALE=en_US.utf8;DB_LOCALE=en_US.utf8'
+                                      : form.db_type === 'spark'
+                                        ? 'catalog=paimon_catalog'
+                                        : form.db_type === 'cassandra'
+                                          ? 'localdatacenter=dc1'
+                                          : 'sslmode=prefer'
+                        "
+                      />
+                      <p v-if="form.db_type === 'mysql' || form.db_type === 'doris' || form.db_type === 'starrocks'" class="text-xs leading-5 text-muted-foreground">
+                        {{ t("connection.localInfilePathHint") }}
+                      </p>
+                    </div>
                   </div>
 
                   <template v-if="isPrestoSqlConnection">

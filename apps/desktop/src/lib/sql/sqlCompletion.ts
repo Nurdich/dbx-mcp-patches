@@ -1255,6 +1255,7 @@ function sqlAliasKeywordWords(...sources: Array<string | undefined>): string[] {
 
 export interface SqlCompletionTable {
   name: string;
+  catalog?: string;
   database?: string;
   schema?: string;
   type?: SqlObjectNavigationType;

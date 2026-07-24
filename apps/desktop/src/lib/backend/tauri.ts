@@ -22,6 +22,9 @@ import type {
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
+  ConstraintInfo,
+  PartitionInfo,
+  SubpartitionInfo,
   FunctionInfo,
   SequenceInfo,
   RuleInfo,
@@ -1175,6 +1178,18 @@ export async function listForeignKeys(connectionId: string, database: string, sc
 
 export async function listTriggers(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<TriggerInfo[]> {
   return invoke("list_triggers", { connectionId, database, schema, table, catalog });
+}
+
+export async function listConstraints(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ConstraintInfo[]> {
+  return invoke("list_constraints", { connectionId, database, schema, table, catalog });
+}
+
+export async function listPartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<PartitionInfo[]> {
+  return invoke("list_partitions", { connectionId, database, schema, table, catalog });
+}
+
+export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
+  return invoke("list_subpartitions", { connectionId, database, schema, table, catalog });
 }
 
 export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
