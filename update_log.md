@@ -1,15 +1,14 @@
 # Update Log
 
-## 2026-07-24 — 技能：connection-url（自包含明文列表）
+## 2026-07-24 — 技能：connection-url（文本抽凭证 → 生成 URL）
 
 ### 背景
 
-用户要求把 `connectionUrl.test.ts` 里的契约**直接写进技能**，运行时不再去读测试/源码；输出明文字段列表，不脱敏。
+技能目标纠正为：从用户**粘贴的杂乱文本**分析用户名/密码/主机等，再**按格式生成连接 URL**；不是去解析/对照仓库测试文件。
 
 ### 交付
 
-- [`skills/connection-url/SKILL.md`](skills/connection-url/SKILL.md) — scheme 表 + 全套输入→结果样例（自包含）
-- 已删 `schemes.md`（避免再跳转读文件）
+- [`skills/connection-url/SKILL.md`](skills/connection-url/SKILL.md) — 抽取规则 + 各库 URL 模板；输出为一行一个纯链接
 
 ---
 
