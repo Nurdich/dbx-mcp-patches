@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   ConnectionConfig,
   ConnectionTestResult,
   DatabaseConnectionInfo,
@@ -132,6 +132,7 @@ import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions 
 import { loadBrowserAppState, saveBrowserAppState } from "@/lib/backend/browserAppStateStorage";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
 import { apiUrl, apiWebSocketUrl } from "@/lib/common/webPath";
+import { apiFetch, createApiEventSource, ensureRemoteAuth, withRemoteSessionQuery } from "@/lib/backend/remoteApiAuth";
 import type { DataGridSavePreparation } from "@/lib/backend/tauri";
 import type {
   NacosConfigHistoryKey,
@@ -179,7 +180,7 @@ const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
 };
 
 async function post<T>(url: string, body: unknown): Promise<T> {
-  const res = await fetch(apiUrl(url), {
+  const res = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -189,13 +190,13 @@ async function post<T>(url: string, body: unknown): Promise<T> {
 }
 
 async function get<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url));
+  const res = await apiFetch(url);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 async function del<T>(url: string): Promise<T> {
-  const res = await fetch(apiUrl(url), { method: "DELETE" });
+  const res = await apiFetch(url, { method: "DELETE" });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -217,7 +218,7 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
 }
 
 export async function testConnectionWithInfo(config: ConnectionConfig): Promise<ConnectionTestResult> {
-  const response = await fetch(apiUrl("/api/connection/test-info"), {
+  const response = await apiFetch("/api/connection/test-info", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ config }),
@@ -330,7 +331,7 @@ export async function importJdbcDrivers(pathsOrFiles: (string | File)[]): Promis
       formData.append("files", blob, fileName);
     }
   }
-  const res = await fetch(apiUrl("/api/jdbc/drivers"), { method: "POST", body: formData });
+  const res = await apiFetch("/api/jdbc/drivers", { method: "POST", body: formData });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -376,7 +377,7 @@ export async function installJdbcPluginLocal(pathOrFile: string | File): Promise
   }
   const formData = new FormData();
   formData.append("file", blob, fileName);
-  const uploadRes = await fetch(apiUrl("/api/jdbc/plugin/install-local"), { method: "POST", body: formData });
+  const uploadRes = await apiFetch("/api/jdbc/plugin/install-local", { method: "POST", body: formData });
   if (!uploadRes.ok) throw new Error(await uploadRes.text());
   return uploadRes.json();
 }
@@ -451,7 +452,7 @@ export async function importAgentsFromZip(fileOrPath: string | File): Promise<nu
   }
   const formData = new FormData();
   formData.append("file", fileOrPath);
-  const res = await fetch(apiUrl("/api/agents/import-offline"), { method: "POST", body: formData });
+  const res = await apiFetch("/api/agents/import-offline", { method: "POST", body: formData });
   if (!res.ok) throw new Error(await res.text());
   const result: { count: number } = await res.json();
   return result.count;
@@ -470,7 +471,7 @@ export async function importAgentDriver(dbType: string, pathOrFile: string | Fil
   const formData = new FormData();
   formData.append("dbType", dbType);
   formData.append("file", blob, fileName);
-  const uploadRes = await fetch(apiUrl("/api/agents/import-driver"), { method: "POST", body: formData });
+  const uploadRes = await apiFetch("/api/agents/import-driver", { method: "POST", body: formData });
   if (!uploadRes.ok) throw new Error(await uploadRes.text());
 }
 
@@ -485,7 +486,8 @@ export async function uninstallJre(jreKey: string): Promise<void> {
 }
 
 export async function listenAgentInstallProgress(handler: (progress: DriverInstallProgress) => void): Promise<() => void> {
-  const es = new EventSource(apiUrl("/api/agents/progress/global"));
+  await ensureRemoteAuth();
+  const es = createApiEventSource("/api/agents/progress/global");
   es.onmessage = (event) => {
     try {
       handler(JSON.parse(event.data));
@@ -1021,7 +1023,7 @@ export async function aiComplete(request: AiCompletionRequest): Promise<string> 
 }
 
 export async function aiStream(sessionId: string, request: AiCompletionRequest, onChunk: (chunk: AiStreamChunk) => void): Promise<void> {
-  const res = await fetch(apiUrl("/api/ai/stream"), {
+  const res = await apiFetch("/api/ai/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, request }),
@@ -1076,7 +1078,7 @@ function isAgentEvent(v: unknown): v is import("@/lib/backend/tauri").AgentEvent
 }
 
 export async function aiAgentStream(sessionId: string, request: AiCompletionRequest, connectionId: string, database: string, dbType: string, onEvent: (event: import("@/lib/backend/tauri").AgentEvent) => void, mode?: string, allowWriteSql = false, signal?: AbortSignal): Promise<string> {
-  const res = await fetch(apiUrl("/api/ai/agent-stream"), {
+  const res = await apiFetch("/api/ai/agent-stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sessionId, request, connectionId, database, dbType, mode: mode || "ask", allowWriteSql }),
@@ -1175,7 +1177,7 @@ export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
 }
 
 export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
-  const res = await fetch(apiUrl("/api/app-settings/mcp-policy"), {
+  const res = await apiFetch("/api/app-settings/mcp-policy", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(policy),
@@ -1411,7 +1413,7 @@ export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFile
   }
   const formData = new FormData();
   formData.append("file", fileOrPath);
-  const res = await fetch(apiUrl("/api/sql-file/preview"), { method: "POST", body: formData });
+  const res = await apiFetch("/api/sql-file/preview", { method: "POST", body: formData });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -1473,7 +1475,7 @@ export async function listSqlFilesInFolder(_folderPath: string): Promise<SqlFile
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void): Promise<void> {
   // 1. POST to start the transfer
-  const res = await fetch(apiUrl("/api/transfer/start"), {
+  const res = await apiFetch("/api/transfer/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
@@ -1482,7 +1484,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
-    const es = new EventSource(apiUrl(`/api/transfer/progress/${request.transferId}`));
+    const es = createApiEventSource(`/api/transfer/progress/${request.transferId}`);
     es.onmessage = (e) => {
       const progress: TransferProgress = JSON.parse(e.data);
       onProgress(progress);
@@ -1530,7 +1532,7 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
     if (!options.sourceRef) {
       throw new Error("previewTableImportFile in web mode requires a File object for new uploads");
     }
-    const res = await fetch(apiUrl("/api/import/preview"), {
+    const res = await apiFetch("/api/import/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ request: { ...options, filePath: fileOrPath } }),
@@ -1543,14 +1545,14 @@ export async function previewTableImportFile(fileOrPath: string | File | TableIm
   if (options.sourceFormat) formData.append("sourceFormat", options.sourceFormat);
   if (options.parseOptions) formData.append("parseOptions", JSON.stringify(options.parseOptions));
   if (options.previewLimit != null) formData.append("previewLimit", String(options.previewLimit));
-  const res = await fetch(apiUrl("/api/import/preview"), { method: "POST", body: formData });
+  const res = await apiFetch("/api/import/preview", { method: "POST", body: formData });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
 export async function importTableFile(request: TableImportRequest, onProgress: (progress: TableImportProgress) => void): Promise<TableImportSummary> {
   // 1. POST to start the import
-  const res = await fetch(apiUrl("/api/import/execute"), {
+  const res = await apiFetch("/api/import/execute", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
@@ -1559,7 +1561,7 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
-    const es = new EventSource(apiUrl(`/api/import/progress/${request.importId}`));
+    const es = createApiEventSource(`/api/import/progress/${request.importId}`);
     let summary: TableImportSummary | null = null;
     es.onmessage = (e) => {
       const progress: TableImportProgress = JSON.parse(e.data);
@@ -1598,7 +1600,7 @@ export async function beginDatabaseBackupSnapshot(_connectionId: string, _databa
 
 export async function exportDatabaseSql(request: DatabaseExportRequest, onProgress: (progress: ExportProgress) => void): Promise<void> {
   // 1. POST to start the export
-  const res = await fetch(apiUrl("/api/export/database"), {
+  const res = await apiFetch("/api/export/database", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ request }),
@@ -1607,7 +1609,7 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
 
   // 2. SSE to listen for progress
   return new Promise((resolve, reject) => {
-    const es = new EventSource(apiUrl(`/api/export/database/progress/${request.exportId}`));
+    const es = createApiEventSource(`/api/export/database/progress/${request.exportId}`);
     es.onmessage = (e) => {
       const progress: ExportProgress = JSON.parse(e.data);
       onProgress(progress);
@@ -1630,7 +1632,7 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
 
 function downloadDatabaseExportFile(exportId: string): void {
   const a = document.createElement("a");
-  a.href = apiUrl(`/api/export/database/download/${exportId}`);
+  a.href = withRemoteSessionQuery(apiUrl(`/api/export/database/download/${exportId}`));
   a.click();
 }
 
@@ -1642,11 +1644,12 @@ export async function cancelDatabaseExport(exportId: string): Promise<void> {
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {
   const { exportId } = request;
+  await ensureRemoteAuth();
 
   return new Promise((resolve, reject) => {
     let started = false;
     let settled = false;
-    const eventSource = new EventSource(apiUrl(`/api/export/table/progress/${exportId}`));
+    const eventSource = createApiEventSource(`/api/export/table/progress/${exportId}`);
 
     const finish = (callback: () => void) => {
       if (settled) return;
@@ -1688,7 +1691,7 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
 function downloadTableExportFile(exportId: string, format: string): void {
   const ext = format === "markdown" || format === "md" ? "md" : format;
   const a = document.createElement("a");
-  a.href = apiUrl(`/api/export/table/download/${exportId}`);
+  a.href = withRemoteSessionQuery(apiUrl(`/api/export/table/download/${exportId}`));
   a.download = `table_export_${exportId}.${ext}`;
   a.click();
 }
@@ -1699,11 +1702,12 @@ export async function cancelTableExport(exportId: string): Promise<void> {
 
 export async function startQueryResultExport(request: QueryResultExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {
   const { exportId } = request;
+  await ensureRemoteAuth();
 
   return new Promise((resolve, reject) => {
     let started = false;
     let settled = false;
-    const eventSource = new EventSource(apiUrl(`/api/export/query-result/progress/${exportId}`));
+    const eventSource = createApiEventSource(`/api/export/query-result/progress/${exportId}`);
 
     const finish = (callback: () => void) => {
       if (settled) return;
@@ -1743,7 +1747,7 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
 
 function downloadQueryResultExportFile(exportId: string, format: string): void {
   const a = document.createElement("a");
-  a.href = apiUrl(`/api/export/query-result/download/${exportId}`);
+  a.href = withRemoteSessionQuery(apiUrl(`/api/export/query-result/download/${exportId}`));
   a.download = `query_result_export_${exportId}.${format}`;
   a.click();
 }
@@ -1933,7 +1937,8 @@ export async function redisPubSubPublish(connectionId: string, db: number, chann
 }
 
 export async function redisPubSubConnect(connectionId: string): Promise<WebSocket> {
-  return new WebSocket(apiWebSocketUrl(`/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`));
+  await ensureRemoteAuth();
+  return new WebSocket(withRemoteSessionQuery(apiWebSocketUrl(`/api/redis/pubsub/ws?connectionId=${encodeURIComponent(connectionId)}`)));
 }
 
 export async function redisSlowlogGet(connectionId: string, count: number, nodeHost?: string, nodePort?: number): Promise<RedisSlowlogEntry[]> {
@@ -2135,7 +2140,7 @@ export async function documentDeleteGridFsBucket(connectionId: string, database:
 }
 
 export async function documentDownloadGridFsFile(connectionId: string, database: string, bucket: string, fileId: string): Promise<Uint8Array> {
-  const res = await fetch(apiUrl("/api/document-store/download-gridfs-file"), {
+  const res = await apiFetch("/api/document-store/download-gridfs-file", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ connectionId, database, bucket, fileId }),
@@ -2155,7 +2160,7 @@ export async function documentUploadGridFsFile(connectionId: string, database: s
   const bytes = new Uint8Array(data.byteLength);
   bytes.set(data);
   body.append("file", new Blob([bytes], { type: contentType || "application/octet-stream" }), fileName);
-  const res = await fetch(apiUrl("/api/document-store/upload-gridfs-file"), {
+  const res = await apiFetch("/api/document-store/upload-gridfs-file", {
     method: "POST",
     body,
   });

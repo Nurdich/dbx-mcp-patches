@@ -21,7 +21,7 @@
     "directory": "packages/cli"
   },
   "bin": {
-    "dbx": "bin/dbx.js"
+    "dbx-cli": "bin/dbx.js"
   },
   "files": [
     "bin"

@@ -25,7 +25,7 @@ if (!packageName) {
 let binary;
 try {
   const packageJson = require.resolve(`${packageName}/package.json`);
-  binary = join(dirname(packageJson), "bin", process.platform === "win32" ? "dbx.exe" : "dbx");
+  binary = join(dirname(packageJson), "bin", process.platform === "win32" ? "dbx-cli.exe" : "dbx-cli");
 } catch {
   console.error(`The optional package ${packageName} was not installed. Reinstall @dbx-app/cli without --no-optional.`);
   process.exit(1);

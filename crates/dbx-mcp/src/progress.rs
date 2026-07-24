@@ -125,8 +125,8 @@ pub fn log_using_connection(config: &ConnectionConfig) {
             .collect();
         connection_log(
             format!(
-                "Proxy failover group (try next on failure, not chained): {}",
-                labels.join(" → ")
+                "Proxy failover candidates: {} (try next on failure, not multi-hop chained)",
+                labels.join(", ")
             ),
             false,
         );

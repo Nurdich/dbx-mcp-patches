@@ -1863,6 +1863,7 @@ name = "dbx-cli"
 version = "0.4.40"
 dependencies = [
  "async-trait",
+ "csv",
  "dbx-core",
  "dbx-mcp",
  "serde",

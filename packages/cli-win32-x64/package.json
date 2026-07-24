@@ -15,7 +15,7 @@
     "x64"
   ],
   "bin": {
-    "dbx-native": "bin/dbx.exe"
+    "dbx-native": "bin/dbx-cli.exe"
   },
   "files": [
     "bin"

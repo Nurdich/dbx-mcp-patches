@@ -12,6 +12,7 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher};
 use axum::extract::DefaultBodyLimit;
+use axum::http::{header, HeaderName, Method};
 use axum::middleware;
 use axum::routing::{delete, get, post};
 use axum::Router;
@@ -21,6 +22,7 @@ use state::WebState;
 use tokio::sync::RwLock;
 use tower_http::compression::predicate::{DefaultPredicate, NotForContentType, Predicate};
 use tower_http::compression::CompressionLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 const XLSX_CONTENT_TYPE: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
@@ -602,11 +604,21 @@ async fn main() {
         .with_state(web_state.clone());
 
     // Build app
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            HeaderName::from_static("x-dbx-session"),
+        ]);
+
     let mut app = Router::new()
         .nest("/api", api)
         .layer(DefaultBodyLimit::max(web_body_limit_bytes()))
         .layer(CompressionLayer::new().compress_when(web_compression_predicate()))
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(cors);
 
     // Static file serving
     if let Ok(static_dir) = std::env::var("DBX_STATIC_DIR") {

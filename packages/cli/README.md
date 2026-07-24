@@ -36,9 +36,9 @@ Verify the downloaded archive with `CLI-SHA256SUMS`, extract it, and run the nat
 
 ```bash
 tar -xzf dbx-cli-linux-x64-gnu.tar.gz
-chmod +x dbx
-./dbx --version
-./dbx connections list --json
+chmod +x dbx-cli
+./dbx-cli --version
+./dbx-cli connections list --json
 ```
 
 Standalone binaries do not require Node.js. They read the same DBX connection storage as the desktop application; set `DBX_DATA_DIR` when using a custom or portable data directory.
@@ -46,33 +46,33 @@ Standalone binaries do not require Node.js. They read the same DBX connection st
 ## Usage
 
 ```bash
-dbx doctor
-dbx capabilities
-dbx connections list --json
-dbx connections list --format csv
-dbx schema list local --json
-dbx schema describe local users --json
-dbx query local "select count(*) as total from users" --json
-dbx query local "select id, name from users" --format csv
-dbx query local "select * from users" --limit 50 --timeout 10s --json
-dbx query local --file ./query.sql --json
-dbx context local --tables users,orders
-dbx open local users
+dbx-cli doctor
+dbx-cli capabilities
+dbx-cli connections list --json
+dbx-cli connections list --format csv
+dbx-cli schema list local --json
+dbx-cli schema describe local users --json
+dbx-cli query local "select count(*) as total from users" --json
+dbx-cli query local "select id, name from users" --format csv
+dbx-cli query local "select * from users" --limit 50 --timeout 10s --json
+dbx-cli query local --file ./query.sql --json
+dbx-cli context local --tables users,orders
+dbx-cli open local users
 ```
 
 ## Commands
 
 | Command                                     | Description                                           |
 | ------------------------------------------- | ----------------------------------------------------- |
-| `dbx doctor`                                | Show local DBX config and desktop bridge diagnostics  |
-| `dbx capabilities`                          | Show direct-query and desktop-bridge database support |
-| `dbx connections list`                      | List DBX connections without printing secrets         |
-| `dbx schema list <connection>`              | List tables and views                                 |
-| `dbx schema describe <connection> <table>`  | Show table columns                                    |
-| `dbx query <connection> <sql>`              | Execute one SQL statement                             |
-| `dbx query <connection> --file ./query.sql` | Execute SQL from a file                               |
-| `dbx context <connection>`                  | Print compact schema context for prompts              |
-| `dbx open <connection> <table>`             | Open a table in DBX Desktop                           |
+| `dbx-cli doctor`                                | Show local DBX config and desktop bridge diagnostics  |
+| `dbx-cli capabilities`                          | Show direct-query and desktop-bridge database support |
+| `dbx-cli connections list`                      | List DBX connections without printing secrets         |
+| `dbx-cli schema list <connection>`              | List tables and views                                 |
+| `dbx-cli schema describe <connection> <table>`  | Show table columns                                    |
+| `dbx-cli query <connection> <sql>`              | Execute one SQL statement                             |
+| `dbx-cli query <connection> --file ./query.sql` | Execute SQL from a file                               |
+| `dbx-cli context <connection>`                  | Print compact schema context for prompts              |
+| `dbx-cli open <connection> <table>`             | Open a table in DBX Desktop                           |
 
 ## Output
 
@@ -82,7 +82,7 @@ Errors are written to stderr and return a non-zero exit code.
 
 ## Query Controls
 
-`dbx query` is read-only by default.
+`dbx-cli query` is read-only by default.
 
 Use `--limit <n>` to control returned query rows and `--timeout <duration>` to control query timeout. Durations accept `ms`, `s`, or `m`, such as `500ms`, `10s`, or `1m`.
 
@@ -91,7 +91,7 @@ Use `--allow-writes` for non-dangerous write statements. Dangerous SQL such as `
 For SQL that starts with a dash, pass `--` before the SQL:
 
 ```bash
-dbx query local --json -- "-- comment
+dbx-cli query local --json -- "-- comment
 select 1"
 ```
 
@@ -100,8 +100,8 @@ select 1"
 Set `DBX_CONNECTION` to omit the connection name for query and context commands:
 
 ```bash
-DBX_CONNECTION=local dbx query "select 1" --json
-DBX_CONNECTION=local dbx context --tables users,orders
+DBX_CONNECTION=local dbx-cli query "select 1" --json
+DBX_CONNECTION=local dbx-cli context --tables users,orders
 ```
 
 ## Desktop App Requirements
@@ -116,7 +116,7 @@ Some CLI commands can run without DBX Desktop:
 
 Direct execution supports PostgreSQL/Redshift, MySQL-compatible databases (MySQL, Doris, StarRocks), and SQLite. Other database types use the DBX Desktop bridge or DBX Agent/JDBC infrastructure.
 
-Use `dbx doctor` to check whether the DBX connection database, connection table, native SQLite loader, and desktop bridge are available. Use `dbx capabilities` to list direct-query and bridge-required database types.
+Use `dbx-cli doctor` to check whether the DBX connection database, connection table, native SQLite loader, and desktop bridge are available. Use `dbx-cli capabilities` to list direct-query and bridge-required database types.
 
 If the optional platform package was not installed, reinstall without `--no-optional`:
 
@@ -147,6 +147,6 @@ CLI JSON errors use stable codes:
 Codex can call the CLI directly from shell tools:
 
 ```bash
-dbx schema describe local users --json
-dbx context local --tables users,orders | codex exec "Write a retention query"
+dbx-cli schema describe local users --json
+dbx-cli context local --tables users,orders | codex exec "Write a retention query"
 ```

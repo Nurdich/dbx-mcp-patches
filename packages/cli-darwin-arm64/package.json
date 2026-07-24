@@ -15,7 +15,7 @@
     "arm64"
   ],
   "bin": {
-    "dbx-native": "bin/dbx"
+    "dbx-native": "bin/dbx-cli"
   },
   "files": [
     "bin"

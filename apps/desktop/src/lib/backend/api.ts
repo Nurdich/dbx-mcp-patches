@@ -1,6 +1,7 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
+import { isRemoteApiConfigured } from "@/lib/backend/remoteApiConfig";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
@@ -12,9 +13,16 @@ type Backend = typeof TauriModule;
 
 let _backend: Backend | null = null;
 
+/** Clear cached backend so the next call re-resolves (e.g. after Remote API settings change). */
+export function resetBackend(): void {
+  _backend = null;
+}
+
 async function getBackend(): Promise<Backend> {
   if (_backend) return _backend;
-  _backend = isTauriRuntime(globalThis) ? await import("@/lib/backend/tauri") : await import("@/lib/backend/http");
+  // Remote API mode: local UI (including Tauri) talks to dbx-web over HTTP.
+  const useHttp = isRemoteApiConfigured() || !isTauriRuntime(globalThis);
+  _backend = useHttp ? await import("@/lib/backend/http") : await import("@/lib/backend/tauri");
   return _backend;
 }
 

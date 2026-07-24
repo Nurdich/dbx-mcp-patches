@@ -1,10 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { apiUrl, apiWebSocketUrl, dbxWebBasePath, webPath } from "@/lib/common/webPath";
+import { REMOTE_API_URL_KEY } from "@/lib/backend/remoteApiConfig";
 
 describe("webPath", () => {
+  afterEach(() => {
+    localStorage.removeItem(REMOTE_API_URL_KEY);
+  });
+
   it("keeps root deployments on root-relative API paths", () => {
     expect(dbxWebBasePath("/", "/")).toBe("");
     expect(apiUrl("/api/auth/check", "")).toBe("/api/auth/check");
+  });
+
+  it("prefixes absolute remote API base when DBX_WEB_URL is configured", () => {
+    localStorage.setItem(REMOTE_API_URL_KEY, "https://dbx.example.com/tools/dbx");
+    expect(apiUrl("/api/auth/check", "")).toBe("https://dbx.example.com/tools/dbx/api/auth/check");
+    expect(apiWebSocketUrl("/redis/session/123", "")).toBe("wss://dbx.example.com/tools/dbx/api/redis/session/123");
   });
 
   it("uses an explicit build base path", () => {

@@ -109,7 +109,12 @@ pub async fn login(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     state.sessions.write().await.insert(token.clone());
 
     let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
-    Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
+    Ok((
+        StatusCode::OK,
+        [("set-cookie", cookie.as_str())],
+        Json(serde_json::json!({"ok": true, "session": token})),
+    )
+        .into_response())
 }
 
 pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginRequest>) -> Result<Response, StatusCode> {
@@ -143,7 +148,12 @@ pub async fn setup(State(state): State<Arc<WebState>>, Json(body): Json<LoginReq
     state.sessions.write().await.insert(token.clone());
 
     let cookie = format!("dbx_session={token}; Path={}; HttpOnly; SameSite=Lax", session_cookie_path(&state));
-    Ok((StatusCode::OK, [("set-cookie", cookie.as_str())], Json(serde_json::json!({"ok": true}))).into_response())
+    Ok((
+        StatusCode::OK,
+        [("set-cookie", cookie.as_str())],
+        Json(serde_json::json!({"ok": true, "session": token})),
+    )
+        .into_response())
 }
 
 pub async fn check(State(state): State<Arc<WebState>>, req: Request<axum::body::Body>) -> Json<AuthCheckResponse> {
@@ -202,6 +212,27 @@ pub async fn logout(State(state): State<Arc<WebState>>, req: Request<axum::body:
 }
 
 fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
+    if let Some(header) = req.headers().get("x-dbx-session").and_then(|value| value.to_str().ok()) {
+        let token = header.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            if parts.next() == Some("dbx_session") {
+                if let Some(value) = parts.next() {
+                    let decoded = urlencoding_decode(value);
+                    if !decoded.is_empty() {
+                        return Some(decoded);
+                    }
+                }
+            }
+        }
+    }
+
     let cookie_header = req.headers().get("cookie")?.to_str().ok()?;
     for pair in cookie_header.split(';') {
         let pair = pair.trim();
@@ -212,6 +243,34 @@ fn extract_session_token<B>(req: &Request<B>) -> Option<String> {
         }
     }
     None
+}
+
+fn urlencoding_decode(value: &str) -> String {
+    percent_encoding_decode(value).unwrap_or_else(|| value.to_string())
+}
+
+fn percent_encoding_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 pub async fn auth_middleware(

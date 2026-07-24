@@ -1,6 +1,8 @@
 # WSLC-oriented local image build (native amd64, no BuildKit cache mounts / --platform).
-# Build:
+# Build from repo root (uses root `.dockerignore` — excludes **/node_modules, target, etc.):
 #   wslc build -f deploy/Dockerfile.self -t dbx-self:latest .
+# Or:
+#   wslc-compose -f deploy/docker-compose.self.yml build
 
 # Stage 1: Frontend
 FROM node:22-slim AS frontend

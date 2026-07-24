@@ -1,0 +1,27 @@
+# Used when build context is repo root (e.g. `wslc build -f deploy/Dockerfile.self … .`).
+# Nested node_modules symlinks break WSLC/Windows readlink — must exclude them.
+
+**/node_modules
+**/node_modules/**
+node_modules/
+target/
+**/target/
+src-tauri/target/
+dist/
+**/dist/
+.git/
+.github/
+.claude/
+.omc/
+.ai/
+ai-config/
+*.exe
+*.pdb
+*.log
+*.d
+.DS_Store
+.env
+.env.*
+tmp/
+Untitled
+wslc-build.log.err

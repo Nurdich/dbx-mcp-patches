@@ -1,5 +1,460 @@
 # Update Log
 
+## 2026-07-24 — 技能：connection-url（自包含明文列表）
+
+### 背景
+
+用户要求把 `connectionUrl.test.ts` 里的契约**直接写进技能**，运行时不再去读测试/源码；输出明文字段列表，不脱敏。
+
+### 交付
+
+- [`skills/connection-url/SKILL.md`](skills/connection-url/SKILL.md) — scheme 表 + 全套输入→结果样例（自包含）
+- 已删 `schemes.md`（避免再跳转读文件）
+
+---
+
+## 2026-07-23 — 本地脚本：结构克隆 + 样例 SQL（不改 report 产品）
+
+### 背景
+
+用户要「全表结构 + 少量最新样例」，但明确：**不要**改成 `dbx report` / MCP report 产品能力；写成**本机脚本**，用现有 `dbx-cli` 生成可复制的 **SQL**（DDL + 样例 SELECT/INSERT）。
+
+### 交付
+
+- 唯一脚本：[`scripts/schema-clone-sample.ps1`](scripts/schema-clone-sample.ps1)
+- **未改** `database_report` / CLI report / MCP report
+
+### 行为
+
+1. `dbx-cli schema list` 列表面
+2. 每表 `schema describe -j` → 拼 `CREATE TABLE IF NOT EXISTS`（字段名/类型/可空/默认/注释 + PRIMARY KEY）
+3. 有数据的基表：`ORDER BY` 单列 PK，否则时间列（`updated_at`/`create_time`/…），再否则无序；`LIMIT` 默认 **20**
+4. 写出样例 `SELECT`（注释）+ `INSERT` 行到 `schema-clone.sql`
+
+### 用法
+
+```powershell
+# 默认输出到 .\schema-clone-<连接名>-<时间戳>\schema-clone.sql
+.\scripts\schema-clone-sample.ps1 -Connection whatsapp_call
+
+# 指定库 / 样例行数 / 输出目录
+.\scripts\schema-clone-sample.ps1 -Connection 12 -Database mydb -SampleRows 10 -OutDir .\out\clone
+
+# 仅 stdout
+.\scripts\schema-clone-sample.ps1 -Connection whatsapp_call -Stdout
+
+# 指定 dbx-cli
+.\scripts\schema-clone-sample.ps1 -Connection myconn -DbxCli .\target\release\dbx-cli.exe
+```
+
+依赖：已有 `target\release\dbx-cli.exe`（或 PATH / `-DbxCli`）。脚本**不** cargo build。
+
+### 倒序选列
+
+1. 唯一主键列；复合主键取第一个 PK
+2. 否则按名匹配：`updated_at` / `update_time` / `created_at` / `create_time` / `id` 等
+3. 否则任意 `date|time|timestamp` 类型列
+4. 都没有 → `SELECT * … LIMIT n`（无 ORDER BY）
+
+---
+
+## 2026-07-23 — 代理 failover 日志去掉误导性 `→`
+
+### 背景
+
+跑 `query`/`stats` 时日志出现：
+`Proxy failover group ...: #1 (21087-2) → #2 (21087-3)`，用户误以为代理被串联（multi-hop）。
+
+### 核实结论
+
+1. **日志出处**：`crates/dbx-mcp/src/progress.rs` 的 `log_using_connection`（非 `tunnel_profiles`）。`→` 仅是 `labels.join(" → ")` 的展示分隔符。
+2. **运行时不是串联**：`connection.rs` 的 `transport_layer_failover_attempts` 识别「首个 Proxy `enabled=true`、后续 `enabled=false`」为 failover 组；每次 attempt 只塞 **一个** Proxy + 非 Proxy 层。`start_transport_layers` 在单次 attempt 里才会链式连接多层。
+3. **import stubs 路径正确**：`apply_proxy_profiles_failover` 存的就是上述 stub 约定；`Using connection` 日志与 runtime 都按 failover 处理，不会把禁用 stub 当成链式 hop。
+
+### 改动
+
+- 日志改为：`Proxy failover candidates: #1 (A), #2 (B) (try next on failure, not multi-hop chained)`，去掉 `→`。
+
+### 涉及文件
+
+- `crates/dbx-mcp/src/progress.rs`
+- `update_log.md`
+
+---
+
+## 2026-07-23 — import 支持 jdbc: / 自动 name / 无表头 URL 列表
+
+### 背景
+
+用户批量导入 JDBC URL（`jdbc:postgresql://` / `jdbc:mysql://`）时报 `name is required`；纯文本「每行一个 URL」无 CSV 表头也无法导入。密码中的 `@` 需提醒编码。
+
+### 改动
+
+1. **`jdbc:` 前缀**：`connection_url.rs` 解析前 strip `jdbc:`，与 `mysql` / `postgresql` / `mariadb` 等 scheme 对齐；补充单测与 scheme 列表（`jdbc:mysql` / `jdbc:postgresql` / `jdbc:mariadb`）。
+2. **缺 name 自动生成**：import 时若无 `name` 列且 URL 无 `name=`，从 `host` 或 `host/database` 生成；与已有连接/同批冲突时加 `-2`、`-3`… 后缀。
+3. **无表头 URL 列表**：`.txt` / `.csv` 若每行都是连接 URL（可含 `#` 注释行），按「一行一个 url」导入，无需表头。
+4. **密码含 `@`**：authority 取最后一个 `@` 分隔 userinfo/host（常见写法可用）；文档与错误提示仍要求将密码中的 `@` 编为 `%40`，避免跨工具歧义。不静默猜错。
+
+### 用法提示
+
+- CSV **推荐带 `name` 列**（可读性好）；不带也能导入。
+- 已支持 `jdbc:mysql://` / `jdbc:postgresql://` / `jdbc:mariadb://` 等。
+- 密码特殊字符请 URL 编码（`@` → `%40`）。
+
+```text
+jdbc:postgresql://u:p@10.0.0.1:5432/app
+jdbc:mysql://root:s@10.0.0.2:3306/db
+```
+
+```powershell
+dbx-cli connections import --file urls.txt
+dbx-cli connections import --file connections.csv
+```
+
+### 涉及文件
+
+- `crates/dbx-core/src/connection_url.rs`
+- `crates/dbx-cli/src/main.rs`
+- `update_log.md`
+
+---
+
+## 2026-07-23 — connections import 主推 CSV（JSON 兼容）
+
+### 背景
+
+批量导入连接时，JSON 对人类编辑不够友好。改为 **CSV 主推**（JSON 仍兼容）；写库逻辑不变，**不试连、同名跳过**。
+
+### 格式识别
+
+1. `--format csv|json` 强制指定输入格式（`-j/--json` 仍只控制**输出**）
+2. 否则按扩展名：`.csv` → CSV，`.json` → JSON
+3. 否则按内容：以 `[` / `{` 开头 → JSON，其余 → CSV
+
+### CSV 表头（英文）
+
+| 列 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 可选（推荐） | 连接显示名；缺省时从 host[/database] 自动生成；也可写在 URL 的 `name=` 参数里 |
+| `url` | 推荐 | 数据库连接 URL（如 `mysql://u:p@h:3306/db` 或 `jdbc:postgresql://...`）；别名 `connection_url` / `dsn` |
+| `type` | 无 url 时 | 数据库类型；也可写 `db_type` |
+| `host` / `port` / `username` / `password` / `database` / `ssl` / `driver_profile` | 无 url 时 | 拆分字段；可与 url 并存（显式列覆盖 URL） |
+| `proxy_profile_id` | 可选 | 已保存代理，支持 `1` 或 `1,2,3` |
+| `proxy_url` | 可选 | 单条内联代理，如 `socks5://127.0.0.1:1080`（勿与 profile 混用） |
+
+含逗号/引号的字段请用 RFC4180 双引号包裹（内部 `"` 写成 `""`）。
+
+### CSV 示例
+
+```csv
+name,url,proxy_profile_id
+prod-mysql,mysql://root:secret@10.0.0.1:3306/app,1
+pg-warehouse,postgres://u:p@db.example:5432/warehouse?sslmode=require,
+"note,prod","mysql://root:a,b@10.0.0.1:3306/app","1,2"
+```
+
+第三行演示：名称/URL/代理 ID 含逗号时用双引号（RFC4180）。拆分列写法：
+
+```csv
+name,type,host,port,username,password,database,ssl
+legacy,mysql,10.0.0.2,3307,u,p,app,true
+```
+
+```powershell
+dbx-cli connections import --file connections.csv
+dbx-cli connections import --file connections.txt --format csv -j
+dbx-cli connections import --file connections.json   # 仍可用
+```
+
+### 涉及文件
+
+- `crates/dbx-cli/src/main.rs`
+- `crates/dbx-cli/Cargo.toml`（`csv`）
+- `update_log.md`
+
+---
+
+## 2026-07-23 — connections import / add 支持数据库连接 URL
+
+### 背景
+
+`connections import` 原先要求 JSON 显式写 `type` / `host` / `port` 等字段。桌面端已有 `parseConnectionUrl`（`apps/desktop/src/lib/connection/connectionUrl.ts`），Rust 侧此前只有「拼 URL」、没有「解析 URL」。本次在 `dbx-core` 增加等价解析，供 CLI 批量导入与 `connections add` 使用。
+
+**注意：这是数据库连接 URL / DSN，不是 `proxy_url`（SOCKS/HTTP 代理）。二者可并存。**
+
+### 改动
+
+- 新增 `crates/dbx-core/src/connection_url.rs`：`parse_connection_url` / `parse_connection_url_with_profile`
+- `dbx-cli connections import`：JSON 条目支持 `url` / `connection_url` / `connectionUrl` / `dsn`
+- 解析出 `type` / `host` / `port` / `username` / `password` / `database` / `ssl` / `driver_profile` 等；显式字段可覆盖 URL
+- 仍可同时写 `proxy_profile_id` / `proxy_url`（代理）；批量导入**不试连、直写**
+- `connections add` 增加 `--url` / `--connection-url` / `--dsn`（有半成品时可用 URL 代替 `--type`/`--host` 等）
+- usage 已更新；单测覆盖 URL 导入与 flag 别名
+
+### 支持的 URL scheme（与桌面端一致）
+
+| Scheme | 映射类型 | 默认端口 |
+| --- | --- | --- |
+| `mysql` / `mariadb` | mysql | 3306 |
+| `postgres` / `postgresql` | postgres | 5432 |
+| `redshift` | redshift | 5439 |
+| `redis` / `rediss` | redis | 6379 |
+| `mongodb` / `mongodb+srv` | mongodb | 27017 |
+| `sqlserver` / `mssql` / `jdbc:sqlserver://…` | sqlserver | 1433 |
+| `oracle` / `jdbc:oracle:thin:@…` | oracle | 1521 |
+| `clickhouse` / `elasticsearch` / `qdrant` / `milvus` / `weaviate` / `chromadb` | 同名 | 各默认 |
+| `dm` / `dameng` | dameng | 5236 |
+| `kingbase` / `kingbase8` | kingbase | 54321 |
+| `gaussdb` / `opengauss` | gaussdb | 5432 |
+| `kwdb` / `questdb` / `tdengine` / `taos-ws` / `etcd` / `zookeeper` / `gbase` / `yashandb` / `oscar` / `xugu` / `iotdb` / `iris` / `informix-sqli` / `gbasedbt-sqli` | 见解析表 | 各默认 |
+| `http` / `https` | 需配合 `driver_profile`（clickhouse / elasticsearch 等） | — |
+
+**不支持（无通用 URL 惯例，请用显式 JSON 字段）：** SQLite / DuckDB 文件路径、BigQuery、Snowflake、Hive/Spark/Trino 专用 JDBC 形态、MQ、Access/H2 等桌面端另有专用解析但 CLI 本次未全量移植的类型。
+
+### JSON 示例
+
+```json
+[
+  {
+    "name": "prod-mysql",
+    "url": "mysql://root:secret@10.0.0.1:3306/app?ssl-mode=required",
+    "proxy_url": "socks5://127.0.0.1:1080"
+  },
+  {
+    "dsn": "postgres://u:p@db.example:5432/warehouse?sslmode=require&name=pg-warehouse",
+    "proxy_profile_id": "1"
+  },
+  {
+    "name": "legacy",
+    "type": "mysql",
+    "host": "10.0.0.2",
+    "port": 3307,
+    "username": "u",
+    "password": "p",
+    "database": "app"
+  }
+]
+```
+
+```powershell
+dbx-cli connections import --file connections.json --json
+
+# 单条添加（URL 填 type/host/port/user/pass/db）
+dbx-cli connections add --name mydb --url "mysql://user:pass@host:3306/dbname"
+```
+
+### 涉及文件
+
+- `crates/dbx-core/src/connection_url.rs`（新）
+- `crates/dbx-core/src/lib.rs`
+- `crates/dbx-cli/src/main.rs`
+- `update_log.md`
+
+### 说明
+
+- **本次未编译**（按用户要求）
+
+---
+
+## 2026-07-23 — 多代理 failover：数据库鉴权失败立即停止
+
+### 问题
+
+`connections update` 多代理 failover 时，若数据库账号/密码错误（如 MySQL 1045、Postgres `password authentication failed`），仍会继续试后续代理，浪费时间且误导排查。
+
+### 改动
+
+- 在 `apply_proxy_failover_pick_winner` 中：SOCKS/代理连不上/超时仍试下一个；**数据库鉴权失败立即停止**
+- 新增 `is_auth_failure`（大小写不敏感）：匹配 `1045`、`Access denied`、`auth user failed`、`password authentication failed` 等；**排除** SOCKS/SSH 传输层鉴权错
+- 错误码：`AUTH_FAILED`；**不修改**原连接，不试剩余代理
+- 单测：`detects_db_auth_failures_for_proxy_failover_stop`
+
+### 示例错误输出
+
+```text
+[dbx] Trying proxy #1 (office-socks)...
+[dbx] Proxy #1 failed: ERROR 1045 (28000): Access denied for user 'root'@'...' (using password: YES)
+Error [AUTH_FAILED]: Database authentication failed via proxy #1 (office-socks); not trying remaining proxies. Original connection was not modified. ERROR 1045 ...
+```
+
+```json
+{
+  "error": {
+    "code": "AUTH_FAILED",
+    "message": "Database authentication failed via proxy #1 (...); not trying remaining proxies. Original connection was not modified. ..."
+  }
+}
+```
+
+### 涉及文件
+
+- `crates/dbx-cli/src/main.rs`
+- `update_log.md`
+
+### 说明
+
+- **本次未编译**（按用户要求）
+
+---
+
+## 2026-07-23 — `connections update` 支持连接级并行（`-P`）
+
+### 哪个工程
+
+代理「试连 + 写回 winner」在 **`crates/dbx-cli`** 的 `connections update`（依赖 `dbx-mcp` / `dbx-core` 的 proxy failover）。不是桌面、不是单独新工程。
+
+### 改动
+
+- `connections update` 对齐 `stats` / `report` / `query`：支持 **`-P` / `--parallel [n]`**（默认并发 15）
+- 并行粒度 = **多条 connection**；单条连接内多代理仍 **按序 failover**（试 1 失败再 2），避免同连接竞态写库
+- 未传 `-P` 时仍串行（行为与改前一致）
+- usage 已补充说明
+
+### 用法
+
+```powershell
+# 对连接 1-10 并行试代理 1、2，每条连接内仍按序 failover，写回 winner
+dbx-cli connections update 1-10 --proxy-profile-id 1,2 -P 5
+
+# 默认并发 15（省略 n）
+dbx-cli connections update 1-10 --proxy-profile-id 1,2 -P
+```
+
+### 涉及文件
+
+- `crates/dbx-cli/src/main.rs`
+- `update_log.md`
+
+### 说明
+
+- **本次未编译**（按用户要求）
+
+---
+
+## 2026-07-22 — 补全 `ProxyTunnelConfig::test_target` 初始化遗漏
+
+- `ProxyTunnelConfig` 新增字段 `test_target: Option<String>`（默认 `None`）后，`tunnel_profiles.rs` / `proxy_profiles.rs` 构造处未赋值导致 E0063。
+- 已在上述两处（含测试）统一补上 `test_target: None`。
+
+## 2026-07-22 — CLI 二进制改名为 `dbx-cli`（避免与桌面主程序同名覆盖）
+
+### 问题
+
+桌面主程序（`src-tauri`，package `dbx`）与 CLI（`crates/dbx-cli`，原 `[[bin]] name = "dbx"`）都产出 `target/.../dbx` / `dbx.exe`，后编译者覆盖前者。
+
+### 改动
+
+- CLI 可执行文件改为 **`dbx-cli`**（Windows：`dbx-cli.exe`）
+- 桌面主程序仍为 **`dbx` / `dbx.exe`**（未改）
+- MCP 本就是 `dbx-mcp`，无冲突
+- 帮助 / usage / npm launcher / 平台包 bin 路径 / 发布工作流 / skill / 文档已对齐为 `dbx-cli`
+
+### 用法
+
+```powershell
+# 本地 cargo 产出后
+& G:\rust\dbx-main-rust\target\release\dbx-cli.exe connections update 1-10 --proxy-profile-id 1,2,3
+
+# npm 全局安装后（命令名亦为 dbx-cli）
+dbx-cli connections list --json
+```
+
+### 涉及文件
+
+- `crates/dbx-cli/Cargo.toml`、`src/main.rs`
+- `packages/cli/bin/dbx.js`、`package.json`、`README.md`
+- `packages/cli-*/package.json`
+- `.github/workflows/mcp-release.yml`
+- `skills/dbx/SKILL.md`、`README.md`、`crates/README.md`
+
+### 说明
+
+- **本次未编译**（按用户要求）
+- 仅改 monorepo；若有独立 patches 仓依赖旧 `dbx` CLI 二进制名，需自行同步为 `dbx-cli`
+
+---
+
+## 2026-07-22 — 桌面 Remote API：本地 UI 连接远程 dbx-web
+
+### 目标
+
+服务器只跑 `dbx-web` API；本机跑桌面 UI / CLI / MCP，通过远程 API 基址访问连接存储与执行能力（类似「AI API」连法）。
+
+### 用法（桌面）
+
+设置 → **Remote API / 远程 API**：
+
+1. **API 基址**：例如 `https://dbx.example.com` 或带上下文路径 `https://dbx.example.com/tools/dbx`
+2. **Web 登录密码**：与远程 Web 登录密码相同
+3. 点「保存并重载」；清空 URL 或点「改回本地后端」恢复 Tauri 本地后端
+
+配置持久化在 localStorage：`DBX_WEB_URL` / `DBX_WEB_PASSWORD`（键名与 CLI/MCP 环境变量对齐）。
+
+### 与 CLI / MCP 对应
+
+| 客户端 | 配置 |
+|--------|------|
+| 桌面 Settings | `DBX_WEB_URL` + `DBX_WEB_PASSWORD`（localStorage） |
+| 桌面调试覆盖 | `VITE_DBX_WEB_URL` / `VITE_DBX_WEB_PASSWORD`（构建/启动时注入，优先生效） |
+| CLI / MCP | 环境变量 `DBX_WEB_URL` + `DBX_WEB_PASSWORD` |
+
+### 鉴权 / CORS
+
+- 登录 `POST /api/auth/login`，响应 JSON 增加 `session`；远程客户端用请求头 `X-DBX-Session`（SSE/下载/WebSocket 用查询参数 `dbx_session`，因无法设自定义头）
+- Cookie `dbx_session` 仍用于同源 Web UI；MCP/CLI 继续用 Cookie
+- `dbx-web` 增加宽松 CORS（`Allow-Origin: *`，允许 `X-DBX-Session`），便于 `tauri://` / 本地 UI 跨域访问远程 API
+
+### 部署注意
+
+- 服务器可只跑 API（不设 `DBX_STATIC_DIR` 即不托管前端静态资源）
+- 若前面有反向代理，基址需包含 `DBX_PUBLIC_BASE_PATH` 对应前缀
+- 跨域依赖上述 CORS；勿再强制浏览器 Cookie 跨站（已改用 session header）
+
+### 主要改动文件
+
+- `apps/desktop/src/lib/backend/remoteApiConfig.ts` / `remoteApiAuth.ts`（新建）
+- `apps/desktop/src/lib/backend/api.ts`、`http.ts`、`webPath.ts`
+- `apps/desktop/src/components/editor/EditorSettingsDialog.vue` + i18n
+- `crates/dbx-web/src/auth.rs`、`main.rs`（CORS）
+
+---
+
+## 2026-07-22 — 修复 WSLC `Dockerfile.self` context 扫到 node_modules symlink
+
+### 现象
+
+```
+wslc build -f deploy/Dockerfile.self -t dbx-self:latest .
+```
+
+失败：`readlink …/packages/mongo-shell/node_modules/typescript: operation not permitted`
+
+### 根因
+
+build context 为仓库根 `.` 时，sender 会遍历宿主上的 `node_modules`（含 Windows/WSL 挂载下不可 readlink 的 symlink）。`-f deploy/Dockerfile.self` 默认吃的是**根目录** `.dockerignore`；原先只有 `deploy/Dockerfile.self.dockerignore`，根目录没有，嵌套 `node_modules` 未被排除。
+
+### 改动
+
+- 新增根目录 [`.dockerignore`](.dockerignore)：排除 `**/node_modules`、`target`、`.git`、`*.exe`、`.omc`、日志等
+- 同步加强 [`deploy/Dockerfile.self.dockerignore`](deploy/Dockerfile.self.dockerignore)
+- [`deploy/Dockerfile.self`](deploy/Dockerfile.self) 注释写明从仓库根构建；frontend 仍 `COPY packages/mongo-shell` 后靠镜像内 `pnpm install` 装依赖（不依赖宿主 node_modules）
+
+### 正确构建命令
+
+在仓库根执行：
+
+```powershell
+wslc build -f deploy/Dockerfile.self -t dbx-self:latest .
+```
+
+或：
+
+```powershell
+wslc-compose -f deploy/docker-compose.self.yml build
+```
+
+---
+
 ## 2026-07-22 — 修复 Web 模式 `connections update` 持久化 405
 
 ### 现象

@@ -15,6 +15,7 @@ pub mod ai_codex_cli;
 pub mod changelog;
 pub mod cloud_sync;
 pub mod connection;
+pub mod connection_url;
 pub mod connection_secrets;
 pub mod connect_progress;
 pub mod csv_export;

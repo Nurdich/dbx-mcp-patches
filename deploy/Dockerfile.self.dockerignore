@@ -1,12 +1,28 @@
-target/
+# Sidecar ignore for BuildKit when Dockerfile is deploy/Dockerfile.self.
+# Prefer also keeping the repo-root .dockerignore in sync (context `.` always
+# consults root .dockerignore; some WSLC builds may only honor that file).
+
+**/node_modules
+**/node_modules/**
 node_modules/
-dist/
+target/
+**/target/
 src-tauri/target/
+dist/
+**/dist/
 .git/
 .github/
 .claude/
+.omc/
+.ai/
+ai-config/
+*.exe
+*.pdb
 *.log
+*.d
 .DS_Store
 .env
 .env.*
 tmp/
+Untitled
+wslc-build.log.err

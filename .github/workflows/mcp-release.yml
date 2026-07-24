@@ -222,32 +222,32 @@ jobs:
             target: aarch64-apple-darwin
             package-dir: cli-darwin-arm64
             package-name: "@dbx-app/cli-darwin-arm64"
-            binary: dbx
+            binary: dbx-cli
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             package-dir: cli-darwin-x64
             package-name: "@dbx-app/cli-darwin-x64"
-            binary: dbx
+            binary: dbx-cli
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             package-dir: cli-linux-arm64-gnu
             package-name: "@dbx-app/cli-linux-arm64-gnu"
-            binary: dbx
+            binary: dbx-cli
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             package-dir: cli-linux-x64-gnu
             package-name: "@dbx-app/cli-linux-x64-gnu"
-            binary: dbx
+            binary: dbx-cli
           - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             package-dir: cli-win32-arm64
             package-name: "@dbx-app/cli-win32-arm64"
-            binary: dbx.exe
+            binary: dbx-cli.exe
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
             package-dir: cli-win32-x64
             package-name: "@dbx-app/cli-win32-x64"
-            binary: dbx.exe
+            binary: dbx-cli.exe
 
     steps:
       - uses: actions/checkout@v5
@@ -646,7 +646,7 @@ jobs:
 
           Native archives run without Node.js. Download the archive matching your operating system and CPU, verify it with \`SHA256SUMS\`, extract \`dbx-mcp\` (or \`dbx-mcp.exe\`), and configure your MCP client to run it directly.
 
-          The CLI archives use the \`dbx-cli-*\` prefix. Verify them with \`CLI-SHA256SUMS\`, extract \`dbx\` (or \`dbx.exe\`), and run it directly without Node.js.
+          The CLI archives use the \`dbx-cli-*\` prefix. Verify them with \`CLI-SHA256SUMS\`, extract \`dbx-cli\` (or \`dbx-cli.exe\`), and run it directly without Node.js.
 
           This package release is separate from the DBX desktop application release and is intentionally not marked as the repository's latest release.
           EOF
@@ -693,9 +693,9 @@ jobs:
             tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
             tar -xzf "${tarball}" -C "${work_dir}"
             mkdir -p "${work_dir}/archive"
-            cp "${work_dir}/package/bin/dbx" "${work_dir}/archive/dbx"
-            chmod +x "${work_dir}/archive/dbx"
-            tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx
+            cp "${work_dir}/package/bin/dbx-cli" "${work_dir}/archive/dbx-cli"
+            chmod +x "${work_dir}/archive/dbx-cli"
+            tar -C "${work_dir}/archive" -czf "release-assets/${asset_name}.tar.gz" dbx-cli
           }
 
           pack_windows() {
@@ -705,7 +705,7 @@ jobs:
             npm pack "${package_name}@${VERSION}" --pack-destination "${work_dir}" --json > "${work_dir}/pack.json"
             tarball="${work_dir}/$(jq -r '.[0].filename' "${work_dir}/pack.json")"
             tar -xzf "${tarball}" -C "${work_dir}"
-            zip -j "release-assets/${asset_name}.zip" "${work_dir}/package/bin/dbx.exe"
+            zip -j "release-assets/${asset_name}.zip" "${work_dir}/package/bin/dbx-cli.exe"
           }
 
           pack_unix "@dbx-app/cli-darwin-arm64" "dbx-cli-darwin-arm64"
@@ -792,8 +792,8 @@ jobs:
             end
 
             test do
-              assert_path_exists bin/"dbx"
-              system bin/"dbx", "doctor"
+              assert_path_exists bin/"dbx-cli"
+              system bin/"dbx-cli", "doctor"
             end
           end
           RUBY_EOF

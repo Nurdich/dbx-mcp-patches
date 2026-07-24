@@ -189,8 +189,8 @@ DBX also provides a dedicated CLI package for terminal, script, and Codex workfl
 npm install -g @dbx-app/cli
 # or via Homebrew
 brew tap t8y2/dbx && brew install dbx-cli
-dbx connections list --json
-dbx query local "select 1" --json
+dbx-cli connections list --json
+dbx-cli query local "select 1" --json
 ```
 
 See the [MCP server README](packages/mcp-server/README.md) and [CLI README](packages/cli/README.md) for details.

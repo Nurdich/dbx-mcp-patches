@@ -1,3 +1,5 @@
+import { getRemoteApiBaseUrl } from "@/lib/backend/remoteApiConfig";
+
 function normalizeBasePath(value: string | undefined): string {
   const trimmed = (value ?? "").trim();
   if (!trimmed || trimmed === "." || trimmed === "./" || trimmed === "/") return "";
@@ -25,15 +27,29 @@ export function webPath(path: string, basePath = dbxWebBasePath()): string {
   return `${base}${normalizedPath}` || "/";
 }
 
-export function apiUrl(path: string, basePath = dbxWebBasePath()): string {
+function normalizeApiPath(path: string): string {
   const pathWithLeadingSlash = path.startsWith("/") ? path : `/${path}`;
-  const normalizedPath = pathWithLeadingSlash === "/api" || pathWithLeadingSlash.startsWith("/api/") || pathWithLeadingSlash.startsWith("/api?") ? pathWithLeadingSlash : `/api${pathWithLeadingSlash}`;
+  return pathWithLeadingSlash === "/api" || pathWithLeadingSlash.startsWith("/api/") || pathWithLeadingSlash.startsWith("/api?") ? pathWithLeadingSlash : `/api${pathWithLeadingSlash}`;
+}
+
+export function apiUrl(path: string, basePath = dbxWebBasePath()): string {
+  const normalizedPath = normalizeApiPath(path);
+  const remoteBase = getRemoteApiBaseUrl();
+  if (remoteBase) return `${remoteBase}${normalizedPath}`;
   return webPath(normalizedPath, basePath);
 }
 
 type WebSocketLocation = Pick<Location, "protocol" | "host"> | undefined;
 
 export function apiWebSocketUrl(path: string, basePath = dbxWebBasePath(), currentLocation: WebSocketLocation = globalThis.location): string {
+  const normalizedPath = normalizeApiPath(path);
+  const remoteBase = getRemoteApiBaseUrl();
+  if (remoteBase) {
+    const remote = new URL(remoteBase.includes("://") ? remoteBase : `http://${remoteBase}`);
+    const protocol = remote.protocol === "https:" ? "wss:" : "ws:";
+    const basePathPart = remote.pathname.replace(/\/+$/, "");
+    return `${protocol}//${remote.host}${basePathPart}${normalizedPath}`;
+  }
   const protocol = currentLocation?.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${currentLocation?.host ?? ""}${apiUrl(path, basePath)}`;
+  return `${protocol}//${currentLocation?.host ?? ""}${webPath(normalizedPath, basePath)}`;
 }
