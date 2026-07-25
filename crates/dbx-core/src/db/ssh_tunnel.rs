@@ -163,7 +163,7 @@ async fn connect_and_authenticate(
 async fn try_authenticate_with_agent(
     session: &mut Handle<SshClient>,
     ssh_user: &str,
-    ssh_agent_sock_path: &str,
+    #[cfg_attr(windows, allow(unused_variables))] ssh_agent_sock_path: &str,
     connect_timeout: &Duration,
 ) -> Result<(), String> {
     #[cfg(unix)]
