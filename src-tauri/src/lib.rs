@@ -7,6 +7,8 @@ mod models;
 mod window_state_guard;
 
 use commands::connection::AppState;
+use dbx_core::sql_dialect::dialect_loader::{register_core_dialects, DialectPluginLoader, DialectRegistry};
+use dbx_core::sql_dialect::hot_reload::DialectHotReload;
 use dbx_core::storage::{maybe_import_user_data_db, DesktopIconTheme, DesktopSettings, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -546,6 +548,7 @@ enum LocaleFamily {
     SimplifiedChinese,
     TraditionalChinese,
     Japanese,
+    Korean,
     Spanish,
     Italian,
     Portuguese,
@@ -568,6 +571,8 @@ fn locale_family(locale: &str) -> LocaleFamily {
         }
     } else if is_language("ja") {
         LocaleFamily::Japanese
+    } else if is_language("ko") {
+        LocaleFamily::Korean
     } else if is_language("es") {
         LocaleFamily::Spanish
     } else if is_language("it") {
@@ -584,6 +589,7 @@ fn tray_menu_labels_for_locale(locale: &str) -> (&'static str, &'static str) {
         LocaleFamily::SimplifiedChinese => ("显示 DBX", "退出 DBX"),
         LocaleFamily::TraditionalChinese => ("顯示 DBX", "退出 DBX"),
         LocaleFamily::Japanese => ("DBXを表示", "DBXを終了"),
+        LocaleFamily::Korean => ("DBX 표시", "DBX 종료"),
         LocaleFamily::Spanish => ("Mostrar DBX", "Salir de DBX"),
         LocaleFamily::Italian => ("Mostra DBX", "Esci da DBX"),
         LocaleFamily::Portuguese => ("Mostrar DBX", "Sair do DBX"),
@@ -598,6 +604,7 @@ fn app_menu_copy_support_info_label(locale: &str) -> &'static str {
         LocaleFamily::SimplifiedChinese => "复制支持信息",
         LocaleFamily::TraditionalChinese => "複製支援資訊",
         LocaleFamily::Japanese => "サポート情報をコピー",
+        LocaleFamily::Korean => "지원 정보 복사",
         LocaleFamily::Spanish => "Copiar información",
         LocaleFamily::Italian => "Copia informazioni",
         LocaleFamily::Portuguese => "Copiar informações",
@@ -610,6 +617,7 @@ fn app_menu_quit_label(locale: &str, app_name: &str) -> String {
     match locale_family(locale) {
         LocaleFamily::SimplifiedChinese | LocaleFamily::TraditionalChinese => format!("退出 {app_name}"),
         LocaleFamily::Japanese => format!("{app_name}を終了"),
+        LocaleFamily::Korean => format!("{app_name} 종료"),
         LocaleFamily::Spanish => format!("Salir de {app_name}"),
         LocaleFamily::Italian => format!("Esci da {app_name}"),
         LocaleFamily::Portuguese => format!("Sair do {app_name}"),
@@ -815,12 +823,12 @@ mod tests {
         assert_eq!(tray_menu_labels_for_locale("zh-Hant-HK"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("zh-MO"), ("顯示 DBX", "退出 DBX"));
         assert_eq!(tray_menu_labels_for_locale("ja-JP"), ("DBXを表示", "DBXを終了"));
+        assert_eq!(tray_menu_labels_for_locale("ko-KR"), ("DBX 표시", "DBX 종료"));
         assert_eq!(tray_menu_labels_for_locale("es-ES"), ("Mostrar DBX", "Salir de DBX"));
         assert_eq!(tray_menu_labels_for_locale("it-IT"), ("Mostra DBX", "Esci da DBX"));
         assert_eq!(tray_menu_labels_for_locale("pt-BR"), ("Mostrar DBX", "Sair do DBX"));
         assert_eq!(tray_menu_labels_for_locale("en-US"), ("Show DBX", "Quit DBX"));
         // Unknown and empty locales fall back to English; "ita" must not match "it".
-        assert_eq!(tray_menu_labels_for_locale("ko-KR"), ("Show DBX", "Quit DBX"));
         assert_eq!(tray_menu_labels_for_locale("ita"), ("Show DBX", "Quit DBX"));
         assert_eq!(tray_menu_labels_for_locale(""), ("Show DBX", "Quit DBX"));
     }
@@ -830,10 +838,12 @@ mod tests {
         assert_eq!(app_menu_quit_label("zh-CN", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("zh-TW", "DBX"), "退出 DBX");
         assert_eq!(app_menu_quit_label("ja-JP", "DBX"), "DBXを終了");
+        assert_eq!(app_menu_quit_label("ko-KR", "DBX"), "DBX 종료");
         assert_eq!(app_menu_quit_label("en-US", "DBX"), "Quit DBX");
         assert_eq!(app_menu_quit_label("", "DBX"), "Quit DBX");
         assert_eq!(app_menu_copy_support_info_label("zh-CN"), "复制支持信息");
         assert_eq!(app_menu_copy_support_info_label("zh-TW"), "複製支援資訊");
+        assert_eq!(app_menu_copy_support_info_label("ko-KR"), "지원 정보 복사");
         assert_eq!(app_menu_copy_support_info_label("en-US"), "Copy Support Info");
     }
 
@@ -1218,6 +1228,29 @@ pub fn run() {
             apply_debug_log_level(desktop_settings.debug_logging_enabled);
             eprintln!("[STARTUP] storage ready in {:?}", t.elapsed());
 
+            // Initialize core dialect registry and load external plugin dialects
+            let dialect_init_start = Instant::now();
+            register_core_dialects();
+            let registry = DialectRegistry::global();
+            let plugin_dirs = vec![data_dir.join("plugins").join("dialects")];
+            let load_result = DialectPluginLoader::scan_and_load(registry, &plugin_dirs);
+            eprintln!(
+                "[STARTUP] dialect plugins loaded: {} success, {} errors, {} skipped in {:?}",
+                load_result.loaded.len(),
+                load_result.errors.len(),
+                load_result.skipped.len(),
+                dialect_init_start.elapsed()
+            );
+
+            // Start dialect YAML hot-reload watcher
+            let watch_dirs = plugin_dirs.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = DialectHotReload::run_forever(watch_dirs, DialectRegistry::global()).await {
+                    log::error!("[STARTUP] dialect hot-reload watcher exited: {e}");
+                }
+            });
+            eprintln!("[STARTUP] dialect hot-reload watcher started");
+
             let default_agent_dir = data_dir_resolution.uses_custom_data_dir().then(|| data_dir.join("agents"));
             let (plugin_dir, agent_dir) = commands::app_settings::resolve_driver_store_dirs_from_settings(
                 &desktop_settings,
@@ -1245,6 +1278,9 @@ pub fn run() {
             app.manage(commands::external_db::ExternalDbOpenState::default());
             app.manage(commands::deep_link::DeepLinkOpenState::default());
             app.manage(commands::update::PendingUpdateState::default());
+            app.manage(commands::ssh_prompt::SshPromptState::new());
+            commands::ssh_prompt::install_ssh_prompt_bridge(app.handle());
+            commands::ssh_prompt::install_ssh_notice_bridge(app.handle());
             #[cfg(target_os = "macos")]
             macos_app_delegate::install_dock_quit_handler(app.handle());
             let startup_links = commands::deep_link::connection_deep_links_from_args(std::env::args().skip(1));
@@ -1300,10 +1336,13 @@ pub fn run() {
             commands::ai::ai_cancel_stream,
             commands::ai::ai_test_connection,
             commands::ai::ai_list_models,
+            commands::ai::ai_resolve_model_effort,
             commands::ai::save_ai_config,
             commands::ai::load_ai_config,
             commands::ai::save_ai_provider_config,
             commands::ai::load_ai_provider_configs,
+            commands::ai::save_ai_chat_selection,
+            commands::ai::load_ai_chat_selection,
             commands::ai::save_ai_conversation,
             commands::ai::load_ai_conversations,
             commands::ai::delete_ai_conversation,
@@ -1321,6 +1360,8 @@ pub fn run() {
             commands::app_settings::save_desktop_settings,
             commands::app_settings::load_max_agent_turns,
             commands::app_settings::save_max_agent_turns,
+            commands::app_settings::load_max_retries,
+            commands::app_settings::save_max_retries,
             commands::app_settings::set_app_locale,
             commands::app_settings::complete_app_close,
             commands::app_settings::mark_frontend_ready,
@@ -1421,6 +1462,7 @@ pub fn run() {
             commands::schema::list_available_extensions,
             commands::schema_diff::prepare_schema_diff,
             commands::schema_diff::generate_schema_sync_sql,
+            commands::dialect_cmd::list_dialect_data_types,
             commands::schema_cache::save_schema_cache,
             commands::schema_cache::load_schema_cache,
             commands::schema_cache::delete_schema_cache_prefix,
@@ -1438,6 +1480,7 @@ pub fn run() {
             commands::query::execute_batch,
             commands::query::execute_script,
             commands::query::execute_in_transaction,
+            commands::query::execute_script_with_2pc,
             commands::query::begin_manual_transaction,
             commands::query::execute_in_manual_transaction,
             commands::query::commit_manual_transaction,
@@ -1455,7 +1498,7 @@ pub fn run() {
             commands::query::build_search_result_where,
             commands::query::build_rename_object_sql,
             commands::query::build_create_database_sql,
-            #[cfg(feature = "duckdb-bundled")]
+            #[cfg(feature = "duckdb-sidecar")]
             commands::query::build_duckdb_attach_database_sql,
             commands::query::build_sqlite_attach_database_sql,
             commands::query::build_drop_object_sql,
@@ -1481,6 +1524,7 @@ pub fn run() {
             commands::query::build_single_column_alter_sql,
             commands::query::analyze_editable_query_editability,
             commands::query::prepare_data_grid_save,
+            commands::query::extract_data_grid_selection,
             commands::query::build_data_grid_copy_update_statements,
             commands::query::build_data_grid_copy_insert_statement,
             commands::query::build_data_grid_context_filter_condition,
@@ -1498,6 +1542,7 @@ pub fn run() {
             commands::data_compare::build_data_compare_sync_plan,
             commands::sql_file::preview_sql_file,
             commands::sql_file::execute_sql_file,
+            commands::sql_file::execute_sql_files,
             commands::sql_file::cancel_sql_file_execution,
             commands::external_sql::pending_open_sql_files,
             commands::external_sql::read_external_sql_file,
@@ -1516,6 +1561,9 @@ pub fn run() {
             commands::redis_cmd::redis_scan_keys_batch,
             commands::redis_cmd::redis_scan_values,
             commands::redis_cmd::redis_get_value,
+            commands::redis_cmd::redis_get_stream_groups,
+            commands::redis_cmd::redis_get_stream_consumers,
+            commands::redis_cmd::redis_get_stream_pending,
             commands::redis_cmd::redis_set_string,
             commands::redis_cmd::redis_delete_key,
             commands::redis_cmd::redis_hash_set,
@@ -1531,6 +1579,7 @@ pub fn run() {
             commands::redis_cmd::redis_json_set,
             commands::redis_cmd::redis_check_json_module,
             commands::redis_cmd::redis_set_ttl,
+            commands::redis_cmd::redis_set_expire_at,
             commands::redis_cmd::redis_delete_keys,
             commands::redis_cmd::redis_flush_db,
             commands::redis_cmd::redis_execute_command,
@@ -1539,10 +1588,14 @@ pub fn run() {
             commands::redis_pubsub_server::redis_pubsub_server_port,
             commands::redis_cmd::redis_slowlog_get,
             commands::redis_cmd::redis_cluster_master_nodes,
+            commands::etcd_cmd::etcd_supports_ttl,
             commands::etcd_cmd::etcd_list_prefix,
             commands::etcd_cmd::etcd_get,
             commands::etcd_cmd::etcd_put,
             commands::etcd_cmd::etcd_delete,
+            commands::etcd_cmd::etcd_rename,
+            commands::etcd_cmd::etcd_history,
+            commands::etcd_cmd::etcd_status,
             commands::zookeeper_cmd::zookeeper_list_prefix,
             commands::zookeeper_cmd::zookeeper_get,
             commands::zookeeper_cmd::zookeeper_put,
@@ -1563,7 +1616,15 @@ pub fn run() {
             commands::nacos_cmd::nacos_list_services,
             commands::nacos_cmd::nacos_list_instances,
             commands::nacos_cmd::nacos_update_instance,
+            commands::nacos_cmd::nacos_get_dashboard,
             commands::nacos_cmd::nacos_raw_request,
+            commands::nacos_cmd::nacos_search_config_content,
+            commands::nacos_cmd::nacos_cancel_operation,
+            commands::nacos_cmd::nacos_export_configs,
+            commands::nacos_cmd::nacos_preview_config_import,
+            commands::nacos_cmd::nacos_apply_config_import,
+            commands::nacos_cmd::nacos_preview_config_transfer,
+            commands::nacos_cmd::nacos_apply_config_transfer,
             commands::saved_sql::load_saved_sql_library,
             commands::saved_sql::load_saved_sql_file,
             commands::saved_sql::save_saved_sql_folder,
@@ -1612,6 +1673,13 @@ pub fn run() {
             commands::mongo_cmd::mongo_update_document,
             commands::mongo_cmd::mongo_update_documents,
             commands::document_cmd::document_delete_document,
+            commands::hbase_cmd::hbase_get_table_schema,
+            commands::hbase_cmd::hbase_scan_rows,
+            commands::hbase_cmd::hbase_get_row,
+            commands::hbase_cmd::hbase_put_row,
+            commands::hbase_cmd::hbase_delete_row,
+            commands::hbase_cmd::hbase_create_table,
+            commands::hbase_cmd::hbase_delete_table,
             commands::mongo_cmd::mongo_delete_document,
             commands::mongo_cmd::mongo_delete_documents,
             commands::mongo_cmd::mongo_find_one_and_update,
@@ -1811,6 +1879,9 @@ pub fn run() {
             commands::agents::import_agent_jar_cmd,
             commands::system_fonts::list_system_fonts,
             commands::ssh_config::list_ssh_config_hosts,
+            commands::ssh_prompt::ssh_prompt_ready,
+            commands::ssh_prompt::ssh_prompt_not_ready,
+            commands::ssh_prompt::resolve_ssh_prompt,
             commands::tunnel_profiles::load_tunnel_profiles,
             commands::tunnel_profiles::save_tunnel_profiles,
             commands::tunnel_profiles::test_tunnel_profile,
@@ -1829,8 +1900,16 @@ pub fn run() {
                 if should_confirm_app_exit_request(std::env::consts::OS, *code, confirmed_exit) {
                     api.prevent_exit();
                     request_app_close(app_handle, "quit");
-                } else if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
-                    tauri::async_runtime::block_on(state.shutdown_background_tasks(Duration::from_secs(3)));
+                } else {
+                    tauri::async_runtime::block_on(async {
+                        if let Some(server) = app_handle.try_state::<commands::redis_pubsub_server::PubSubServerState>()
+                        {
+                            server.shutdown(Duration::from_secs(1)).await;
+                        }
+                        if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+                            state.shutdown(Duration::from_secs(3)).await;
+                        }
+                    });
                 }
             }
 

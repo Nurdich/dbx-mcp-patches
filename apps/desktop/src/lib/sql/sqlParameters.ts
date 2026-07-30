@@ -16,9 +16,15 @@ export interface SqlParameterDescriptor {
   token: string;
 }
 
+export interface SqlBracedParameter extends SqlParameterDescriptor {
+  start: number;
+  end: number;
+}
+
 interface ParameterOccurrence extends SqlParameterDescriptor {
   start: number;
   end: number;
+  replacement?: "string-fragment";
 }
 
 type ComplexTypeDeclarationKind = "struct" | "variant";
@@ -34,6 +40,19 @@ const PARAMETER_NAME_RE = /^[\p{L}_][\p{L}\p{N}_]*$/u;
 const PARAMETER_NAME_START_RE = /[\p{L}_]/u;
 const PARAMETER_NAME_CHAR_RE = /[\p{L}\p{N}_]/u;
 const SQL_SERVER_TEMP_TABLE_CONTEXT_KEYWORDS = new Set(["table", "from", "join", "into", "update", "truncate"]);
+
+export function readSqlBracedParameterAt(sql: string, start: number, options?: SqlParameterOptions): SqlBracedParameter | null {
+  const open = sql.slice(start, start + 2);
+  const syntax: SqlParameterSyntax | null = open === "${" ? "shell" : open === "#{" ? "mybatis" : null;
+  if (!syntax || (options?.enabledSyntaxes && !options.enabledSyntaxes.includes(syntax))) return null;
+
+  const closeBrace = sql.indexOf("}", start + 2);
+  if (closeBrace === -1) return null;
+  const name = sql.slice(start + 2, closeBrace).trim();
+  if (!PARAMETER_NAME_RE.test(name)) return null;
+
+  return { key: name, name, syntax, token: sql.slice(start, closeBrace + 1), start, end: closeBrace + 1 };
+}
 
 export function extractSqlParameters(sql: string, options?: SqlParameterOptions): string[] {
   return extractSqlParameterDescriptors(sql, options).map((descriptor) => descriptor.key);
@@ -63,7 +82,10 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
   let cursor = 0;
   for (const occurrence of occurrences) {
     result += sql.slice(cursor, occurrence.start);
-    result += sqlParameterLiteral(values[occurrence.key] ?? { kind: "string", value: "" });
+    const input = values[occurrence.key] ?? { kind: "string", value: "" };
+    // Embedded placeholders stay inside the surrounding SQL string, so their value
+    // must be escaped as text instead of being wrapped in a second SQL literal.
+    result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : sqlParameterLiteral(input);
     cursor = occurrence.end;
   }
   result += sql.slice(cursor);
@@ -104,16 +126,21 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
     const next = sql[i + 1];
 
     if (ch === "'" || ch === '"') {
-      // Exact quoted braced placeholders only (`'${name}'` / `"#{name}"`).
-      // Do not scan inside arbitrary quoted text — that path needs dialect-specific
-      // escaping contracts (see PR #3666) and must not change skipQuoted semantics.
+      // Exact quoted placeholders use SQL-literal replacement; embedded placeholders
+      // in ordinary single-quoted values use escaped text replacement below.
       const quoted = tryReadQuotedBracedPlaceholder(sql, i, ch as "'" | '"', isSyntaxEnabled);
       if (quoted) {
         occurrences.push(quoted);
         i = quoted.end;
         continue;
       }
-      i = skipQuoted(sql, i, ch);
+      const quotedEnd = skipQuoted(sql, i, ch);
+      // Double quotes can delimit identifiers, so only ordinary single-quoted
+      // values opt into embedded interpolation.
+      if (ch === "'" && !hasSqlStringLiteralPrefix(sql, i)) {
+        occurrences.push(...collectEmbeddedQuotedBracedPlaceholders(sql, i + 1, quotedEnd, isSyntaxEnabled));
+      }
+      i = quotedEnd;
       continue;
     }
     if (ch === "`") {
@@ -154,26 +181,12 @@ function findSqlParameterOccurrences(sql: string, options?: SqlParameterOptions)
         continue;
       }
     }
-    if (ch === "$" && next === "{" && isSyntaxEnabled("shell")) {
-      const end = sql.indexOf("}", i + 2);
-      if (end !== -1) {
-        const name = sql.slice(i + 2, end).trim();
-        if (PARAMETER_NAME_RE.test(name)) {
-          occurrences.push({ key: name, name, syntax: "shell", token: sql.slice(i, end + 1), start: i, end: end + 1 });
-          i = end + 1;
-          continue;
-        }
-      }
-    }
-    if (ch === "#" && next === "{" && isSyntaxEnabled("mybatis")) {
-      const end = sql.indexOf("}", i + 2);
-      if (end !== -1) {
-        const name = sql.slice(i + 2, end).trim();
-        if (PARAMETER_NAME_RE.test(name)) {
-          occurrences.push({ key: name, name, syntax: "mybatis", token: sql.slice(i, end + 1), start: i, end: end + 1 });
-          i = end + 1;
-          continue;
-        }
+    if ((ch === "$" || ch === "#") && next === "{") {
+      const parameter = readSqlBracedParameterAt(sql, i, options);
+      if (parameter) {
+        occurrences.push(parameter);
+        i = parameter.end;
+        continue;
       }
     }
     if (isHashLineComment(sql, i)) {
@@ -932,6 +945,48 @@ function tryReadQuotedBracedPlaceholder(sql: string, start: number, quote: "'" |
   };
 }
 
+function collectEmbeddedQuotedBracedPlaceholders(sql: string, contentStart: number, quotedEnd: number, isSyntaxEnabled: (syntax: SqlParameterSyntax) => boolean): ParameterOccurrence[] {
+  const occurrences: ParameterOccurrence[] = [];
+  const contentEnd = sql[quotedEnd - 1] === "'" ? quotedEnd - 1 : quotedEnd;
+  let i = contentStart;
+
+  while (i < contentEnd) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+    let syntax: SqlParameterSyntax | null = null;
+    if (ch === "$" && next === "{") syntax = "shell";
+    else if (ch === "#" && next === "{") syntax = "mybatis";
+    if (!syntax || !isSyntaxEnabled(syntax)) {
+      i += 1;
+      continue;
+    }
+
+    const closeBrace = sql.indexOf("}", i + 2);
+    if (closeBrace === -1 || closeBrace >= contentEnd) {
+      i += 1;
+      continue;
+    }
+    const name = sql.slice(i + 2, closeBrace).trim();
+    if (!PARAMETER_NAME_RE.test(name)) {
+      i += 1;
+      continue;
+    }
+
+    occurrences.push({
+      key: name,
+      name,
+      syntax,
+      token: sql.slice(i, closeBrace + 1),
+      start: i,
+      end: closeBrace + 1,
+      replacement: "string-fragment",
+    });
+    i = closeBrace + 1;
+  }
+
+  return occurrences;
+}
+
 /** True when `quoteStart` opens a prefixed literal such as E'...', U&'...', or MySQL _charset'...'. */
 function hasSqlStringLiteralPrefix(sql: string, quoteStart: number): boolean {
   if (quoteStart <= 0) return false;
@@ -1022,6 +1077,10 @@ function readDollarQuoteMarker(sql: string, start: number): string {
 
 function quoteSqlString(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function sqlParameterStringFragment(input: SqlParameterInput): string {
+  return input.value.replace(/'/g, "''");
 }
 
 function normalizeBooleanLiteral(value: string): string {

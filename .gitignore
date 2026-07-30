@@ -2,6 +2,7 @@
 node_modules/
 .claude/
 .codex/
+.workbuddy/
 .superpowers/
 .trellis/
 .worktrees/
@@ -49,10 +50,15 @@ Thumbs.db
 # Temp
 tmp/
 
+# Code review tool artifacts
+review_diff.json
+review_classified.json
+
 # Logs
 *.log
-
-
+*.json*
+*.exe 
+/ai-config
 # Generated changelog data
 releases-*.json
 latest-en.json
@@ -63,4 +69,21 @@ DBX_*_x64-portable.zip
 .agents/skills
 .pnpm-store/*
 .dbx-web
+# Local devtest connections (contains credentials; do not commit)
+dbx-devtest-connections.json
 .npmrc
+.omc/sessions/a47a9889-bb54-4e0c-92ec-86e0d47e44d0.json
+
+# scratch / tooling (not part of the repo)
+AI-MEMORY.md
+README-AI.md
+a.md
+a.sql
+Untitled
+wslc-build.log.err
+update_log.md.main-wip
+.zcode/
+.kilo/
+.omc/
+# build outputs (not part of the repo)
+release/

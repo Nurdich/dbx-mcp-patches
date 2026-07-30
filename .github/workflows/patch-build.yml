@@ -1,0 +1,211 @@
+# Auto-sync upstream + build the patched Windows desktop client and the patched
+# dbx-web Docker image. Lives on the `local-patches` branch of the patches repo.
+#
+# What it does, end to end:
+#   1. sync:     merge upstream t8y2/dbx:main into local-patches and push  (auto-patch)
+#   2. desktop:  pnpm tauri build on windows-2022 -> NSIS installer + portable exe
+#   3. image:    docker build deploy/Dockerfile (multi-arch) -> push to GHCR
+#
+# Outputs:
+#   - Rolling GitHub Release tag `patch-latest` with the Windows installer + portable exe.
+#   - ghcr.io/<owner>/dbx:{latest,patch,sha-<short>} multi-arch image.
+#
+# IMPORTANT: GitHub only fires `schedule` on the repo's DEFAULT branch. Set the
+# patches repo's default branch to `local-patches`, or the daily cron will not run.
+# Manual (workflow_dispatch) and push triggers work regardless of the default branch.
+
+name: Patch Build
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # daily 08:00 UTC (~16:00 Beijing)
+  workflow_dispatch:
+    inputs:
+      skip_sync:
+        description: 'Skip upstream sync and just build the current local-patches tip'
+        type: boolean
+        default: false
+  push:
+    branches: [local-patches]
+
+permissions:
+  contents: write   # sync push + rolling release
+  packages: write   # GHCR push
+
+concurrency:
+  group: patch-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    if: github.event_name != 'push' && inputs.skip_sync != true
+    runs-on: ubuntu-latest
+    outputs:
+      synced: ${{ steps.merge.outputs.synced }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: local-patches
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.email "dbx-patch-ci@users.noreply.github.com"
+          git config user.name "dbx-patch-ci"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/t8y2/dbx.git
+          git fetch upstream main --depth=1
+
+      - id: merge
+        name: Merge upstream main
+        run: |
+          BEFORE=$(git rev-parse origin/local-patches)
+          if git merge upstream/main --no-ff -m "merge(upstream): sync origin/main into local-patches [skip ci]"; then
+            AFTER=$(git rev-parse HEAD)
+            if [ "$BEFORE" != "$AFTER" ]; then
+              git push origin local-patches
+              echo "synced=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Already up to date; nothing to sync." 
+              echo "synced=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::error::Upstream merge has conflicts. Resolve manually on local-patches, then re-run."
+            git merge --abort || true
+            exit 1
+          fi
+
+  build-desktop:
+    needs: sync
+    # Run when sync was skipped (push / manual skip_sync), or sync actually merged something,
+    # or it's a manual dispatch (force build even if upstream had nothing new).
+    if: always() && (needs.sync.result == 'skipped' || needs.sync.outputs.synced == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: local-patches
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: patch-windows-x64-msvc
+          cache-on-failure: true
+
+      # Optional Tauri updater signing (only if the secret is configured). Without it the
+      # NSIS installer still builds; only the auto-update signature is omitted.
+      - name: Setup Tauri signing key (optional)
+        shell: bash
+        env:
+          KEY_B64: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_BASE64 }}
+          KEY_PW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEY_B64" ]; then
+            printf '%s' "$KEY_B64" | base64 --decode > "$RUNNER_TEMP/updater.key"
+            KEY_B64=$(base64 < "$RUNNER_TEMP/updater.key" | tr -d '\r\n')
+            echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
+            [ -n "$KEY_PW" ] && echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PW" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Tauri app
+        shell: bash
+        run: pnpm tauri build --target x86_64-pc-windows-msvc
+
+      - name: Upload NSIS installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbx-windows-x64-installer
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+      - name: Upload portable exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbx-windows-x64-portable
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/dbx.exe
+          if-no-files-found: error
+
+      - name: Publish rolling release (patch-latest)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="patch-latest"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          NOTES="Auto-synced patch build from upstream on $(date -u +%Y-%m-%dT%H:%M UTC). Branch local-patches @ ${SHORT_SHA}."
+          INSTALLER=$(ls src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe 2>/dev/null | head -1)
+          PORTABLE="src-tauri/target/x86_64-pc-windows-msvc/release/dbx.exe"
+          if [ -z "$INSTALLER" ] || [ ! -f "$PORTABLE" ]; then
+            echo "::error::Expected installer/portable not found." 
+            exit 1
+          fi
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Patch build (auto-synced)" --notes "$NOTES" --target local-patches
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes "$NOTES" --target local-patches || true
+          fi
+          gh release upload "$TAG" "$INSTALLER" "$PORTABLE" --repo "$GITHUB_REPOSITORY" --clobber
+
+  build-image:
+    needs: sync
+    if: always() && (needs.sync.result == 'skipped' || needs.sync.outputs.synced == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: local-patches
+          fetch-depth: 1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/dbx
+          tags: |
+            type=raw,value=latest
+            type=raw,value=patch
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push patched dbx-web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}

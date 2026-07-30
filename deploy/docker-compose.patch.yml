@@ -1,0 +1,28 @@
+# Fast patch image: locally-patched dbx-web + frontend overlaid on the official t8y2/dbx image.
+#
+# One-time cached builder required first:
+#   wslc build -f deploy/Dockerfile.builder -t dbx-web-builder:base .
+# Then:
+#   wslc-compose -f deploy/docker-compose.patch.yml build
+#   wslc-compose -f deploy/docker-compose.patch.yml up -d
+# Or build directly:
+#   wslc build -f deploy/Dockerfile.patch -t dbx-self:latest .
+
+services:
+  dbx:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.patch
+    image: dbx-self:latest
+    container_name: dbx-self
+    ports:
+      - "4224:4224"
+    environment:
+      - DBX_PASSWORD=changeme
+      # Uncomment for reverse-proxy subpath:
+      # - DBX_PUBLIC_BASE_PATH=/dbx
+    volumes:
+      - dbx-self-data:/app/data
+
+volumes:
+  dbx-self-data:

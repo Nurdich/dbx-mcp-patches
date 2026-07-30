@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1
+#
+# Fast patch build: overlay the locally-patched dbx-web binary + frontend onto the
+# official t8y2/dbx image. Only application code is recompiled; dependencies come from
+# the cached builder image, so a patch build is minutes instead of hours.
+#
+# Requires the cached builder (build it once first):
+#   wslc build -f deploy/Dockerfile.builder -t dbx-web-builder:base .
+#
+# Then, after each local patch change:
+#   wslc build -f deploy/Dockerfile.patch -t dbx-self:latest .
+# Or via compose:
+#   wslc-compose -f deploy/docker-compose.patch.yml build && wslc-compose -f deploy/docker-compose.patch.yml up -d
+
+########################################
+# Stage 1: backend — recompile only changed Rust crates against cached deps
+########################################
+FROM dbx-web-builder:base AS backend
+WORKDIR /app
+
+# Real local-patched sources (overwrites the dummy sources baked into the builder).
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY plugins/dialects/ plugins/dialects/
+
+# Docker COPY preserves original timestamps that may be older than the dummy-source
+# binaries compiled in the builder. Touch all .rs under crates/ so cargo detects the
+# source change and recompiles the app instead of reusing the dummy binary.
+RUN find crates/ -name '*.rs' -exec touch {} +
+
+RUN cargo build --release -p dbx-web \
+    && mkdir -p /out \
+    && cp /app/target/release/dbx-web /out/dbx-web
+
+########################################
+# Stage 2: frontend — rebuild the static bundle
+########################################
+FROM node:22-slim AS frontend
+WORKDIR /app
+RUN npm i -g pnpm
+# Keep the workspace package available because Vite resolves it directly from source.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/mongo-shell/ packages/mongo-shell/
+RUN pnpm install --frozen-lockfile
+COPY apps/desktop/ apps/desktop/
+COPY crates/dbx-core/assets/database-drivers.manifest.json crates/dbx-core/assets/database-drivers.manifest.json
+RUN pnpm build
+
+########################################
+# Stage 3: runtime — official image + patched binary + patched static
+########################################
+FROM t8y2/dbx:latest AS runtime
+# Overwrite the official binary and frontend static with the locally-patched builds.
+# DBX_STATIC_DIR=/app/static and DBX_DATA_DIR=/app/data are already set on the base image.
+COPY --from=backend /out/dbx-web /usr/local/bin/dbx-web
+COPY --from=frontend /app/dist /app/static
+EXPOSE 4224
+CMD ["dbx-web"]

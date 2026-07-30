@@ -41,8 +41,8 @@ impl std::fmt::Display for SqlRisk {
 /// Mirrors the logic in `sql_analysis::normalize_dialect`.
 fn normalize_dialect(dialect: &str) -> &'static str {
     match dialect.to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "kingbase" | "highgo" | "vastbase"
-        | "kwdb" => "postgres",
+        "postgres" | "postgresql" | "redshift" | "opengauss" | "gaussdb" | "kingbase" | "highgo" | "uxdb"
+        | "vastbase" | "kwdb" => "postgres",
         "mysql" | "mariadb" | "doris" | "starrocks" | "manticoresearch" | "oceanbase" => "mysql",
         "sqlite" => "sqlite",
         "sqlserver" | "mssql" => "sqlserver",
@@ -136,6 +136,9 @@ fn classify_statement(stmt: &Statement, detect_select_into: bool) -> SqlRisk {
 
 fn statement_is_dangerous(stmt: &Statement, detect_select_into: bool) -> bool {
     match stmt {
+        // `USE` only changes connection-local state. MCP separately requires
+        // a pinned session for it, so it does not need dangerous-SQL approval.
+        Statement::Use(_) => false,
         Statement::Query(query) => query_is_dangerous(query, detect_select_into),
         Statement::Insert(insert) => {
             insert.replace_into
@@ -766,6 +769,7 @@ fn supports_select_into_table_creation(database_type: DatabaseType) -> bool {
             | DatabaseType::OpenGauss
             | DatabaseType::Kingbase
             | DatabaseType::Highgo
+            | DatabaseType::Uxdb
             | DatabaseType::Vastbase
             | DatabaseType::Kwdb
             | DatabaseType::SqlServer

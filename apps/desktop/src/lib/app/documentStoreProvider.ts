@@ -44,7 +44,7 @@ export type DocumentStoreProvider = {
   kind: DocumentStoreKind;
   filterInputLabel: string;
   sortInputLabel: string;
-  documentsLabel(options: { total: number; t: ComposerTranslation }): string;
+  documentsLabel(options: { total: number; totalIsExact: boolean; t: ComposerTranslation }): string;
   queryPreview(options: DocumentStoreQueryPreviewOptions): string;
   sortInputForColumn(column: string, direction: "asc" | "desc" | null): string;
 };
@@ -80,7 +80,7 @@ const mongoDocumentProvider: DocumentStoreProvider = {
   kind: "mongodb",
   filterInputLabel: "find",
   sortInputLabel: "sort",
-  documentsLabel: ({ total, t }) => t("mongo.documents", { count: total }),
+  documentsLabel: ({ total, totalIsExact, t }) => `${totalIsExact ? "" : "≈"}${t("mongo.documents", { count: total })}`,
   queryPreview: ({ collection, filterJson, sortJson, skip, limit }) => {
     const collectionRef = `db.getCollection(${JSON.stringify(collection)})`;
     const parts = [`${collectionRef}.find(${mongoShellPreviewLiteral(filterJson || "{}")})`];
@@ -142,8 +142,77 @@ type DocumentFieldPathAccumulatorNode = {
   childByKey: Map<string, DocumentFieldPathAccumulatorNode>;
 };
 
+type ElasticsearchFieldPathAccumulatorNode = {
+  key: string;
+  path: string;
+  selectable: boolean;
+  children: ElasticsearchFieldPathAccumulatorNode[];
+  childByKey: Map<string, ElasticsearchFieldPathAccumulatorNode>;
+};
+
 export function documentFieldPathOptionsFromDocuments(documents: readonly Record<string, unknown>[]): string[] {
   return flattenDocumentFieldPathTree(documentFieldPathTreeFromDocuments(documents)).map((node) => node.path);
+}
+
+export function elasticsearchFieldPathTreeFromFieldNames(fieldNames: readonly string[], fieldTypes: ReadonlyMap<string, string> = new Map()): DocumentFieldPathNode[] {
+  const rootNodes: ElasticsearchFieldPathAccumulatorNode[] = [];
+  const rootByKey = new Map<string, ElasticsearchFieldPathAccumulatorNode>();
+
+  for (const fieldName of fieldNames) {
+    appendElasticsearchFieldPath(rootNodes, rootByKey, fieldName, fieldTypes.get(fieldName));
+  }
+  return finalizeElasticsearchFieldPathNodes(rootNodes);
+}
+
+function appendElasticsearchFieldPath(nodes: ElasticsearchFieldPathAccumulatorNode[], byKey: Map<string, ElasticsearchFieldPathAccumulatorNode>, fieldName: string, fieldType?: string): void {
+  const segments = fieldName.split(".");
+  if (segments.some((segment) => !segment)) return;
+  let siblingNodes = nodes;
+  let siblingByKey = byKey;
+  let currentPath = "";
+
+  segments.forEach((segment, segmentIndex) => {
+    currentPath = currentPath ? `${currentPath}.${segment}` : segment;
+    const node = ensureElasticsearchFieldPathNode(siblingNodes, siblingByKey, segment, currentPath);
+    if (segmentIndex === segments.length - 1) node.selectable = !isElasticsearchContainerFieldType(fieldType);
+    siblingNodes = node.children;
+    siblingByKey = node.childByKey;
+  });
+}
+
+function isElasticsearchContainerFieldType(fieldType?: string): boolean {
+  const normalizedType = fieldType?.trim().toLowerCase();
+  return normalizedType === "object" || normalizedType === "nested";
+}
+
+function ensureElasticsearchFieldPathNode(nodes: ElasticsearchFieldPathAccumulatorNode[], byKey: Map<string, ElasticsearchFieldPathAccumulatorNode>, key: string, path: string): ElasticsearchFieldPathAccumulatorNode {
+  const existing = byKey.get(key);
+  if (existing) return existing;
+  const node: ElasticsearchFieldPathAccumulatorNode = {
+    key,
+    path,
+    selectable: false,
+    children: [],
+    childByKey: new Map(),
+  };
+  byKey.set(key, node);
+  nodes.push(node);
+  return node;
+}
+
+function finalizeElasticsearchFieldPathNodes(nodes: readonly ElasticsearchFieldPathAccumulatorNode[], parentDisplaySegments: readonly string[] = []): DocumentFieldPathNode[] {
+  return nodes.map((node) => {
+    const displaySegments = [...parentDisplaySegments, node.key];
+    return {
+      key: node.key,
+      path: node.path,
+      label: node.key,
+      displayPath: displaySegments.join(" > "),
+      kind: "scalar",
+      selectable: node.selectable,
+      children: finalizeElasticsearchFieldPathNodes(node.children, displaySegments),
+    };
+  });
 }
 
 export function documentFieldPathTreeFromDocuments(documents: readonly Record<string, unknown>[]): DocumentFieldPathNode[] {
@@ -176,6 +245,10 @@ export function searchDocumentFieldPathTree(nodes: readonly DocumentFieldPathNod
   return flattenDocumentFieldPathTree(nodes).filter((node) => {
     return node.path.toLowerCase().includes(normalizedQuery) || node.displayPath.toLowerCase().includes(normalizedQuery) || node.label.toLowerCase().includes(normalizedQuery);
   });
+}
+
+export function searchElasticsearchFieldPathTree(nodes: readonly DocumentFieldPathNode[], query: string): DocumentFieldPathNode[] {
+  return searchDocumentFieldPathTree(nodes, query).filter((node) => node.selectable);
 }
 
 export function arrayObjectAncestorPathForDocumentField(nodes: readonly DocumentFieldPathNode[], path: string): string | null {

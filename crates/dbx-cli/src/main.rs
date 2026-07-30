@@ -34,6 +34,7 @@ const BRIDGE_REQUIRED_TYPES: &[&str] = &[
     "dameng",
     "kingbase",
     "highgo",
+    "uxdb",
     "vastbase",
     "goldendb",
     "databend",
@@ -2985,6 +2986,7 @@ mod tests {
                 truncated: false,
                 session_id: None,
                 has_more: false,
+                elasticsearch_raw_body: None,
             })
         }
 

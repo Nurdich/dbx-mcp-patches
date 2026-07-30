@@ -4,8 +4,9 @@ use dbx_core::agent_manager::{
 };
 use dbx_core::agent_service::{
     build_agent_list, clear_agent_download_cache, github_url_to_r2_path, import_agent_driver, import_agent_jar,
-    import_agents_from_zip, inspect_offline_zip, is_app_version_compatible, jre_needs_install,
-    local_agent_jar_candidates, replace_download, uninstall_agent_driver, AgentProgressEvent,
+    import_agents_from_package, import_agents_from_zip, inspect_offline_package, inspect_offline_zip,
+    is_app_version_compatible, jre_needs_install, local_agent_jar_candidates, replace_download, uninstall_agent_driver,
+    AgentProgressEvent,
 };
 
 fn test_manager(name: &str) -> AgentManager {
@@ -22,7 +23,11 @@ fn registry_with_driver(db_type: &str, version: &str, jre: &str) -> AgentRegistr
             label: db_type.to_string(),
             min_app_version: "0.1.0".to_string(),
             jre: jre.to_string(),
-            jar: Some(ArtifactInfo { url: format!("https://example.com/dbx-agent-{db_type}.jar"), size: 42 }),
+            jar: Some(ArtifactInfo {
+                url: format!("https://example.com/dbx-agent-{db_type}.jar"),
+                size: 42,
+                format: None,
+            }),
             native: std::collections::HashMap::new(),
         },
     );
@@ -50,10 +55,11 @@ fn registry_with_native_driver(db_type: &str, version: &str, jre: &str) -> Agent
             jar: Some(ArtifactInfo {
                 url: format!("https://example.com/dbx-agent-{db_type}-legacy-placeholder.jar"),
                 size: 0,
+                format: None,
             }),
             native: [(
                 AgentManager::current_platform().to_string(),
-                ArtifactInfo { url: format!("https://example.com/dbx-agent-{db_type}"), size: 42 },
+                ArtifactInfo { url: format!("https://example.com/dbx-agent-{db_type}"), size: 42, format: None },
             )]
             .into_iter()
             .collect(),
@@ -364,7 +370,9 @@ fn atomic_replace_moves_download_into_place() {
 
 #[test]
 fn agent_progress_event_serializes_backward_compatible_fields() {
-    let event = AgentProgressEvent::transfer("driver", 512, 1024).with_batch(Some("h2"), Some(1), Some(2));
+    let event = AgentProgressEvent::transfer("driver", 512, 1024)
+        .with_batch(Some("h2"), Some(1), Some(2))
+        .with_operation_id("upgrade-123");
 
     let value = serde_json::to_value(event).unwrap();
 
@@ -374,16 +382,17 @@ fn agent_progress_event_serializes_backward_compatible_fields() {
     assert_eq!(value["db_type"], "h2");
     assert_eq!(value["current"], 1);
     assert_eq!(value["total_drivers"], 2);
+    assert_eq!(value["operation_id"], "upgrade-123");
 }
 
-#[test]
-fn local_jar_import_updates_driver_state() {
+#[tokio::test]
+async fn local_jar_import_updates_driver_state() {
     let manager = test_manager("local-import");
     let source = test_path("local-import-source").join("dbx-agent-h2.jar");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     write_test_agent_jar(&source);
 
-    import_agent_jar(&manager, "h2", &source).unwrap();
+    import_agent_jar(&manager, "h2", &source).await.unwrap();
 
     assert_eq!(std::fs::read(manager.driver_jar_path("h2")).unwrap(), std::fs::read(&source).unwrap());
     let state = manager.load_state();
@@ -392,22 +401,22 @@ fn local_jar_import_updates_driver_state() {
     assert_eq!(installed.jre, DEFAULT_JRE_KEY);
 }
 
-#[test]
-fn local_jar_import_rejects_corrupt_jar() {
+#[tokio::test]
+async fn local_jar_import_rejects_corrupt_jar() {
     let manager = test_manager("local-import-corrupt");
     let source = test_path("local-import-corrupt-source").join("dbx-agent-h2.jar");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, b"jar").unwrap();
 
-    let err = import_agent_jar(&manager, "h2", &source).unwrap_err();
+    let err = import_agent_jar(&manager, "h2", &source).await.unwrap_err();
 
     assert!(err.contains("invalid or corrupt"));
     assert!(!manager.driver_jar_path("h2").exists());
     assert!(!manager.load_state().installed_drivers.contains_key("h2"));
 }
 
-#[test]
-fn local_native_import_installs_current_platform_executable() {
+#[tokio::test]
+async fn local_native_import_installs_current_platform_executable() {
     let manager = test_manager("local-native-import");
     let source = test_path("local-native-import-source").join(if cfg!(windows) {
         "dbx-agent-kingbase-windows.exe"
@@ -417,35 +426,35 @@ fn local_native_import_installs_current_platform_executable() {
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, current_platform_native_binary()).unwrap();
 
-    import_agent_driver(&manager, "kingbase", &source).unwrap();
+    import_agent_driver(&manager, "kingbase", &source).await.unwrap();
 
     assert_eq!(std::fs::read(manager.driver_native_path("kingbase")).unwrap(), std::fs::read(&source).unwrap());
     assert!(!manager.driver_jar_path("kingbase").exists());
     assert_eq!(manager.load_state().installed_drivers["kingbase"].version, "0.1.0-local");
 }
 
-#[test]
-fn local_native_import_rejects_wrong_platform_binary() {
+#[tokio::test]
+async fn local_native_import_rejects_wrong_platform_binary() {
     let manager = test_manager("local-native-import-invalid");
     let source = test_path("local-native-import-invalid-source").join("dbx-agent-kingbase");
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, b"not-an-executable").unwrap();
 
-    let err = import_agent_driver(&manager, "kingbase", &source).unwrap_err();
+    let err = import_agent_driver(&manager, "kingbase", &source).await.unwrap_err();
 
     assert!(err.contains(AgentManager::current_platform()));
     assert!(!manager.driver_native_path("kingbase").exists());
     assert!(!manager.load_state().installed_drivers.contains_key("kingbase"));
 }
 
-#[test]
-fn local_native_import_rejects_wrong_arch_binary() {
+#[tokio::test]
+async fn local_native_import_rejects_wrong_arch_binary() {
     let manager = test_manager("local-native-wrong-arch");
     let native_path = test_path("local-native-wrong-arch-file").join("agent");
     std::fs::create_dir_all(native_path.parent().unwrap()).unwrap();
     std::fs::write(&native_path, native_binary_for_arch(!cfg!(target_arch = "aarch64"))).unwrap();
 
-    let err = import_agent_driver(&manager, "kingbase", &native_path).unwrap_err();
+    let err = import_agent_driver(&manager, "kingbase", &native_path).await.unwrap_err();
 
     assert!(err.contains("not a"));
     assert!(!manager.driver_native_path("kingbase").exists());
@@ -515,8 +524,8 @@ fn clear_download_cache_removes_only_cache_entries() {
     assert!(installed_driver.exists());
 }
 
-#[test]
-fn offline_zip_import_emits_progress_and_updates_state() {
+#[tokio::test]
+async fn offline_zip_import_emits_progress_and_updates_state() {
     let manager = test_manager("offline-progress");
     let zip_path = test_path("offline-progress-zip").join("agents.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
@@ -526,6 +535,7 @@ fn offline_zip_import_emits_progress_and_updates_state() {
     let result = import_agents_from_zip(&manager, &zip_path, |event| {
         events.lock().unwrap().push(event);
     })
+    .await
     .unwrap();
 
     assert_eq!(result.drivers_installed, vec!["h2"]);
@@ -533,11 +543,12 @@ fn offline_zip_import_emits_progress_and_updates_state() {
     assert!(installed_jar.windows(b"Main-Class:".len()).any(|window| window == b"Main-Class:"));
     assert_eq!(manager.load_state().installed_drivers.get("h2").unwrap().version, "0.2.0");
     let events = events.lock().unwrap();
-    assert!(events.iter().any(|event| event.step == "driver" && event.db_type.as_deref() == Some("H2")));
+    // db_type carries the real database key, not the display label.
+    assert!(events.iter().any(|event| event.step == "driver" && event.db_type.as_deref() == Some("h2")));
 }
 
-#[test]
-fn offline_zip_import_installs_release_named_jre() {
+#[tokio::test]
+async fn offline_zip_import_installs_release_named_jre() {
     let manager = test_manager("offline-release-jre");
     let zip_path = test_path("offline-release-jre-zip").join("agents.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
@@ -547,6 +558,7 @@ fn offline_zip_import_installs_release_named_jre() {
     let result = import_agents_from_zip(&manager, &zip_path, |event| {
         events.lock().unwrap().push(event);
     })
+    .await
     .unwrap();
 
     assert_eq!(result.jre_installed, vec![DEFAULT_JRE_KEY]);
@@ -556,35 +568,50 @@ fn offline_zip_import_installs_release_named_jre() {
     assert!(events.lock().unwrap().iter().any(|event| event.step == "jre-extract"));
 }
 
-#[test]
-fn offline_zip_import_preserves_existing_jre_when_archive_is_corrupt() {
+#[tokio::test]
+async fn offline_zip_import_installs_tar_zstd_jre() {
+    let manager = test_manager("offline-zstd-jre");
+    let zip_path = test_path("offline-zstd-jre-zip").join("agents.zip");
+    std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
+    write_offline_driver_zip_with_zstd_jre(&zip_path, "h2", "0.2.0", "21.0.12");
+
+    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap();
+
+    assert_eq!(result.jre_installed, vec![DEFAULT_JRE_KEY]);
+    assert_eq!(result.drivers_installed, vec!["h2"]);
+    assert!(manager.is_jre_installed(DEFAULT_JRE_KEY));
+    assert_eq!(manager.load_state().jre_versions.get(DEFAULT_JRE_KEY).map(String::as_str), Some("21.0.12"));
+}
+
+#[tokio::test]
+async fn offline_zip_import_preserves_existing_jre_when_archive_is_corrupt() {
     let manager = test_manager("offline-corrupt-jre-preserves-existing");
     let root = test_path("offline-corrupt-jre-preserves-existing-zip");
     let valid_zip = root.join("valid.zip");
     let corrupt_zip = root.join("corrupt.zip");
     std::fs::create_dir_all(&root).unwrap();
     write_offline_driver_zip_with_jre(&valid_zip, "h2", "0.2.0", "21.0.12");
-    import_agents_from_zip(&manager, &valid_zip, |_| {}).unwrap();
+    import_agents_from_zip(&manager, &valid_zip, |_| {}).await.unwrap();
     let java_path = manager.jre_java_path(DEFAULT_JRE_KEY);
     let original_java = std::fs::read(&java_path).unwrap();
 
     write_offline_driver_zip_with_jre_bytes(&corrupt_zip, "h2", "0.3.0", "21.0.13", b"not-a-tar-gz".to_vec());
-    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).unwrap_err();
+    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap_err();
 
     assert!(err.contains("Failed to extract JRE archive"));
     assert_eq!(std::fs::read(java_path).unwrap(), original_java);
     assert_eq!(manager.load_state().jre_versions.get(DEFAULT_JRE_KEY).map(String::as_str), Some("21.0.12"));
 }
 
-#[test]
-fn offline_zip_import_preserves_existing_jre_when_driver_is_corrupt() {
+#[tokio::test]
+async fn offline_zip_import_preserves_existing_jre_when_driver_is_corrupt() {
     let manager = test_manager("offline-corrupt-driver-preserves-jre");
     let root = test_path("offline-corrupt-driver-preserves-jre-zip");
     let valid_zip = root.join("valid.zip");
     let corrupt_zip = root.join("corrupt.zip");
     std::fs::create_dir_all(&root).unwrap();
     write_offline_driver_zip_with_jre(&valid_zip, "h2", "0.2.0", "21.0.12");
-    import_agents_from_zip(&manager, &valid_zip, |_| {}).unwrap();
+    import_agents_from_zip(&manager, &valid_zip, |_| {}).await.unwrap();
     let java_path = manager.jre_java_path(DEFAULT_JRE_KEY);
     let original_java = std::fs::read(&java_path).unwrap();
 
@@ -596,48 +623,48 @@ fn offline_zip_import_preserves_existing_jre_when_driver_is_corrupt() {
         test_jre_archive_bytes(),
         b"jar".to_vec(),
     );
-    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).unwrap_err();
+    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap_err();
 
     assert!(err.contains("invalid or corrupt"));
     assert_eq!(std::fs::read(java_path).unwrap(), original_java);
     assert_eq!(manager.load_state().jre_versions.get(DEFAULT_JRE_KEY).map(String::as_str), Some("21.0.12"));
 }
 
-#[test]
-fn offline_zip_import_rejects_corrupt_jar() {
+#[tokio::test]
+async fn offline_zip_import_rejects_corrupt_jar() {
     let manager = test_manager("offline-corrupt-driver");
     let zip_path = test_path("offline-corrupt-driver-zip").join("agents.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
     write_offline_driver_zip_with_jar(&zip_path, "h2", "0.2.0", b"jar".to_vec());
 
-    let err = import_agents_from_zip(&manager, &zip_path, |_| {}).unwrap_err();
+    let err = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap_err();
 
     assert!(err.contains("invalid or corrupt"));
     assert!(!manager.driver_jar_path("h2").exists());
     assert!(!manager.load_state().installed_drivers.contains_key("h2"));
 }
 
-#[test]
-fn offline_zip_import_preserves_existing_driver_when_jar_is_corrupt() {
+#[tokio::test]
+async fn offline_zip_import_preserves_existing_driver_when_jar_is_corrupt() {
     let manager = test_manager("offline-corrupt-driver-preserves-existing");
     let root = test_path("offline-corrupt-driver-preserves-existing-zip");
     let valid_zip = root.join("valid.zip");
     let corrupt_zip = root.join("corrupt.zip");
     std::fs::create_dir_all(&root).unwrap();
     write_offline_driver_zip(&valid_zip, "h2", "0.2.0");
-    import_agents_from_zip(&manager, &valid_zip, |_| {}).unwrap();
+    import_agents_from_zip(&manager, &valid_zip, |_| {}).await.unwrap();
     let original = std::fs::read(manager.driver_jar_path("h2")).unwrap();
 
     write_offline_driver_zip_with_jar(&corrupt_zip, "h2", "0.3.0", b"jar".to_vec());
-    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).unwrap_err();
+    let err = import_agents_from_zip(&manager, &corrupt_zip, |_| {}).await.unwrap_err();
 
     assert!(err.contains("invalid or corrupt"));
     assert_eq!(std::fs::read(manager.driver_jar_path("h2")).unwrap(), original);
     assert_eq!(manager.load_state().installed_drivers["h2"].version, "0.2.0");
 }
 
-#[test]
-fn offline_zip_import_keeps_legacy_unversioned_jar_compatibility() {
+#[tokio::test]
+async fn offline_zip_import_keeps_legacy_unversioned_jar_compatibility() {
     let manager = test_manager("offline-legacy-jar-zip");
     let zip_path = test_path("offline-legacy-jar-zip").join("h2.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
@@ -662,19 +689,19 @@ fn offline_zip_import_keeps_legacy_unversioned_jar_compatibility() {
     std::io::Write::write_all(&mut zip, &jar).unwrap();
     zip.finish().unwrap();
 
-    import_agents_from_zip(&manager, &zip_path, |_| {}).unwrap();
+    import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap();
 
     assert_eq!(manager.load_state().installed_drivers["h2"].version, "0.1.9");
 }
 
-#[test]
-fn offline_zip_import_installs_versioned_native_driver_package() {
+#[tokio::test]
+async fn offline_zip_import_installs_versioned_native_driver_package() {
     let manager = test_manager("offline-native-driver-zip");
     let zip_path = test_path("offline-native-driver-zip").join("kingbase.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
     write_offline_native_driver_zip(&zip_path, "kingbase", "0.1.34");
 
-    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).unwrap();
+    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap();
 
     assert_eq!(result.drivers_installed, vec!["kingbase"]);
     assert_eq!(manager.load_state().installed_drivers["kingbase"].version, "0.1.34");
@@ -682,30 +709,65 @@ fn offline_zip_import_installs_versioned_native_driver_package() {
     assert!(!manager.driver_jar_path("kingbase").exists());
 }
 
-#[test]
-fn offline_zip_import_rejects_native_driver_for_another_platform() {
+#[tokio::test]
+async fn offline_tar_zstd_import_installs_versioned_native_driver_package() {
+    let manager = test_manager("offline-tar-zstd-driver-package");
+    let package_path = test_path("offline-tar-zstd-driver-package").join("duckdb.tar.zst");
+    std::fs::create_dir_all(package_path.parent().unwrap()).unwrap();
+    write_offline_tar_zstd_driver_package(&package_path, "duckdb", "0.1.0");
+
+    let plan = inspect_offline_package(&package_path).unwrap();
+    let result = import_agents_from_package(&manager, &package_path, |_| {}).await.unwrap();
+
+    assert_eq!(plan.driver_keys, vec!["duckdb"]);
+    assert!(!plan.includes_jre);
+    assert_eq!(result.drivers_installed, vec!["duckdb"]);
+    assert_eq!(manager.load_state().installed_drivers["duckdb"].version, "0.1.0");
+    assert_eq!(std::fs::read(manager.driver_native_path("duckdb")).unwrap(), current_platform_native_binary());
+}
+
+#[tokio::test]
+async fn offline_tar_zstd_import_installs_versioned_java_driver_package() {
+    let manager = test_manager("offline-tar-zstd-java-package");
+    let package_path = test_path("offline-tar-zstd-java-package").join("dameng.tar.zst");
+    std::fs::create_dir_all(package_path.parent().unwrap()).unwrap();
+    write_offline_tar_zstd_java_driver_package(&package_path, "dameng", "0.2.0");
+
+    let plan = inspect_offline_package(&package_path).unwrap();
+    let result = import_agents_from_package(&manager, &package_path, |_| {}).await.unwrap();
+
+    assert_eq!(plan.driver_keys, vec!["dameng"]);
+    assert!(!plan.includes_jre);
+    assert_eq!(result.drivers_installed, vec!["dameng"]);
+    assert_eq!(manager.load_state().installed_drivers["dameng"].version, "0.2.0");
+    assert_eq!(std::fs::read(manager.driver_jar_path("dameng")).unwrap(), test_agent_jar_bytes());
+    assert!(!manager.driver_native_path("dameng").exists());
+}
+
+#[tokio::test]
+async fn offline_zip_import_rejects_native_driver_for_another_platform() {
     let manager = test_manager("offline-wrong-platform-native-driver-zip");
     let zip_path = test_path("offline-wrong-platform-native-driver-zip").join("kingbase.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
     let other_platform = if AgentManager::current_platform() == "windows-x64" { "linux-x64" } else { "windows-x64" };
     write_offline_native_driver_zip_for_platform(&zip_path, "kingbase", "0.1.34", other_platform);
 
-    let err = import_agents_from_zip(&manager, &zip_path, |_| {}).unwrap_err();
+    let err = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap_err();
 
     assert!(err.contains("no drivers compatible"));
     assert!(err.contains(AgentManager::current_platform()));
     assert!(!manager.is_driver_installed("kingbase"));
 }
 
-#[test]
-fn offline_zip_import_preserves_existing_native_driver_when_binary_is_invalid() {
+#[tokio::test]
+async fn offline_zip_import_preserves_existing_native_driver_when_binary_is_invalid() {
     let manager = test_manager("offline-invalid-native-preserves-existing");
     let root = test_path("offline-invalid-native-preserves-existing-zip");
     let valid_zip = root.join("valid.zip");
     let invalid_zip = root.join("invalid.zip");
     std::fs::create_dir_all(&root).unwrap();
     write_offline_native_driver_zip(&valid_zip, "kingbase", "0.1.34");
-    import_agents_from_zip(&manager, &valid_zip, |_| {}).unwrap();
+    import_agents_from_zip(&manager, &valid_zip, |_| {}).await.unwrap();
     let original = std::fs::read(manager.driver_native_path("kingbase")).unwrap();
 
     write_offline_native_driver_zip_with_bytes(
@@ -715,7 +777,7 @@ fn offline_zip_import_preserves_existing_native_driver_when_binary_is_invalid() 
         AgentManager::current_platform(),
         b"not-a-native-agent".to_vec(),
     );
-    let err = import_agents_from_zip(&manager, &invalid_zip, |_| {}).unwrap_err();
+    let err = import_agents_from_zip(&manager, &invalid_zip, |_| {}).await.unwrap_err();
 
     assert!(err.contains("not a"));
     assert_eq!(std::fs::read(manager.driver_native_path("kingbase")).unwrap(), original);
@@ -763,20 +825,50 @@ fn offline_zip_import_rejects_unsafe_entry_path() {
     assert!(err.contains("unsafe path"));
 }
 
-#[test]
-fn offline_zip_import_prefers_native_artifact_over_java_fallback() {
+#[tokio::test]
+async fn offline_zip_import_prefers_native_artifact_over_java_fallback() {
     let manager = test_manager("offline-native-preferred");
     let zip_path = test_path("offline-native-preferred-zip").join("kingbase.zip");
     std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
     write_offline_hybrid_driver_zip(&zip_path, "kingbase", "0.1.34");
 
     let plan = inspect_offline_zip(&zip_path).unwrap();
-    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).unwrap();
+    let result = import_agents_from_zip(&manager, &zip_path, |_| {}).await.unwrap();
 
     assert_eq!(plan.driver_keys, vec!["kingbase"]);
     assert_eq!(result.drivers_installed, vec!["kingbase"]);
     assert!(manager.driver_native_path("kingbase").exists());
     assert!(!manager.driver_jar_path("kingbase").exists());
+}
+
+#[tokio::test]
+async fn offline_zip_import_progress_carries_real_db_type_not_label() {
+    // Verify that the AgentProgressEvent.db_type field carries the real
+    // database key (e.g. "kingbase") rather than the display label
+    // (e.g. "KingbaseES"), so the frontend per-driver progress routing
+    // matches.
+    let manager = test_manager("offline-progress-db-type");
+    let zip_path = test_path("offline-progress-db-type-zip").join("kingbase.zip");
+    std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
+    write_offline_native_driver_zip(&zip_path, "kingbase", "0.1.34");
+    let events = std::sync::Mutex::new(Vec::new());
+
+    import_agents_from_zip(&manager, &zip_path, |event| {
+        events.lock().unwrap().push(event);
+    })
+    .await
+    .unwrap();
+
+    let events = events.lock().unwrap();
+    let driver_events: Vec<_> = events.iter().filter(|e| e.step == "driver").collect();
+    assert!(!driver_events.is_empty(), "expected at least one driver progress event");
+    for event in &driver_events {
+        assert_eq!(
+            event.db_type.as_deref(),
+            Some("kingbase"),
+            "db_type must be the real key 'kingbase', not the display label"
+        );
+    }
 }
 
 fn write_offline_driver_zip(path: &std::path::Path, db_type: &str, version: &str) {
@@ -785,6 +877,86 @@ fn write_offline_driver_zip(path: &std::path::Path, db_type: &str, version: &str
 
 fn write_offline_native_driver_zip(path: &std::path::Path, db_type: &str, version: &str) {
     write_offline_native_driver_zip_for_platform(path, db_type, version, AgentManager::current_platform());
+}
+
+fn write_offline_tar_zstd_driver_package(path: &std::path::Path, db_type: &str, version: &str) {
+    let native = current_platform_native_binary();
+    let platform = AgentManager::current_platform();
+    let extension = if platform.starts_with("windows-") { ".exe" } else { "" };
+    let filename = format!("dbx-agent-{db_type}-{version}-{platform}{extension}");
+    let registry = serde_json::json!({
+        "jres": {},
+        "drivers": {
+            db_type: {
+                "version": version,
+                "label": db_type,
+                "min_app_version": "0.6.0",
+                "jre": DEFAULT_JRE_KEY,
+                "native": {
+                    platform: {
+                        "url": filename,
+                        "size": native.len()
+                    }
+                }
+            }
+        }
+    });
+    let registry_bytes = registry.to_string().into_bytes();
+    let file = std::fs::File::create(path).unwrap();
+    let encoder = zstd::stream::write::Encoder::new(file, 3).unwrap();
+    let mut archive = tar::Builder::new(encoder);
+
+    let mut registry_header = tar::Header::new_gnu();
+    registry_header.set_size(registry_bytes.len() as u64);
+    registry_header.set_mode(0o644);
+    registry_header.set_cksum();
+    archive.append_data(&mut registry_header, "agent-registry.json", registry_bytes.as_slice()).unwrap();
+
+    let mut driver_header = tar::Header::new_gnu();
+    driver_header.set_size(native.len() as u64);
+    driver_header.set_mode(0o755);
+    driver_header.set_cksum();
+    archive.append_data(&mut driver_header, format!("drivers/{filename}"), native.as_slice()).unwrap();
+
+    archive.into_inner().unwrap().finish().unwrap();
+}
+
+fn write_offline_tar_zstd_java_driver_package(path: &std::path::Path, db_type: &str, version: &str) {
+    let jar = test_agent_jar_bytes();
+    let filename = format!("dbx-agent-{db_type}-{version}.jar");
+    let registry = serde_json::json!({
+        "jres": {},
+        "drivers": {
+            db_type: {
+                "version": version,
+                "label": db_type,
+                "min_app_version": "0.6.0",
+                "jre": DEFAULT_JRE_KEY,
+                "jar": {
+                    "url": filename,
+                    "size": jar.len()
+                }
+            }
+        }
+    });
+    let registry_bytes = registry.to_string().into_bytes();
+    let file = std::fs::File::create(path).unwrap();
+    let encoder = zstd::stream::write::Encoder::new(file, 3).unwrap();
+    let mut archive = tar::Builder::new(encoder);
+
+    let mut registry_header = tar::Header::new_gnu();
+    registry_header.set_size(registry_bytes.len() as u64);
+    registry_header.set_mode(0o644);
+    registry_header.set_cksum();
+    archive.append_data(&mut registry_header, "agent-registry.json", registry_bytes.as_slice()).unwrap();
+
+    let mut driver_header = tar::Header::new_gnu();
+    driver_header.set_size(jar.len() as u64);
+    driver_header.set_mode(0o644);
+    driver_header.set_cksum();
+    archive.append_data(&mut driver_header, format!("drivers/{filename}"), jar.as_slice()).unwrap();
+
+    archive.into_inner().unwrap().finish().unwrap();
 }
 
 fn write_offline_native_driver_zip_for_platform(path: &std::path::Path, db_type: &str, version: &str, platform: &str) {
@@ -867,6 +1039,46 @@ fn write_offline_driver_zip_with_jre(path: &std::path::Path, db_type: &str, vers
     write_offline_driver_zip_with_jre_bytes(path, db_type, version, jre_version, test_jre_archive_bytes());
 }
 
+fn write_offline_driver_zip_with_zstd_jre(path: &std::path::Path, db_type: &str, version: &str, jre_version: &str) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let jar = test_agent_jar_bytes();
+    let jre_archive = test_jre_archive_zstd_bytes();
+    let platform = AgentManager::current_platform();
+    let registry = serde_json::json!({
+        "jres": {
+            DEFAULT_JRE_KEY: {
+                "version": jre_version,
+                "platforms": {
+                    platform: {
+                        "url": format!("https://example.com/dbx-jre-{DEFAULT_JRE_KEY}-{platform}.tar.zst"),
+                        "size": jre_archive.len(),
+                        "format": "tar_zstd"
+                    }
+                }
+            }
+        },
+        "drivers": {
+            db_type: {
+                "version": version,
+                "label": db_type,
+                "min_app_version": "0.1.0",
+                "jre": DEFAULT_JRE_KEY,
+                "jar": { "url": format!("https://example.com/dbx-agent-{db_type}-{version}.jar"), "size": jar.len() }
+            }
+        }
+    });
+
+    zip.start_file("agent-registry.json", options).unwrap();
+    std::io::Write::write_all(&mut zip, registry.to_string().as_bytes()).unwrap();
+    zip.start_file(format!("jre/dbx-jre-{DEFAULT_JRE_KEY}-{platform}.tar.zst"), options).unwrap();
+    std::io::Write::write_all(&mut zip, &jre_archive).unwrap();
+    zip.start_file(format!("drivers/dbx-agent-{db_type}-{version}.jar"), options).unwrap();
+    std::io::Write::write_all(&mut zip, &jar).unwrap();
+    zip.finish().unwrap();
+}
+
 fn write_offline_driver_zip_with_jre_bytes(
     path: &std::path::Path,
     db_type: &str,
@@ -927,22 +1139,30 @@ fn test_jre_archive_bytes() -> Vec<u8> {
     let root = test_path("jre-archive");
     let runtime_root = root.join("dbx-jre");
     let bin_dir = runtime_root.join("bin");
-    let archive = root.join("jre.tar.gz");
     std::fs::create_dir_all(&bin_dir).unwrap();
     std::fs::write(bin_dir.join("java"), b"java").unwrap();
     std::fs::write(bin_dir.join("java.exe"), b"java").unwrap();
 
-    let status = std::process::Command::new("tar")
-        .arg("czf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&root)
-        .arg("dbx-jre")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder.append_dir_all("dbx-jre", &runtime_root).unwrap();
+    let bytes = builder.into_inner().unwrap().finish().unwrap();
+    std::fs::remove_dir_all(root).ok();
+    bytes
+}
 
-    let bytes = std::fs::read(&archive).unwrap();
+fn test_jre_archive_zstd_bytes() -> Vec<u8> {
+    let root = test_path("jre-zstd-archive");
+    let runtime_root = root.join("dbx-jre");
+    let bin_dir = runtime_root.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    std::fs::write(bin_dir.join("java"), b"java").unwrap();
+    std::fs::write(bin_dir.join("java.exe"), b"java").unwrap();
+
+    let encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    let mut builder = tar::Builder::new(encoder);
+    builder.append_dir_all("dbx-jre", &runtime_root).unwrap();
+    let bytes = builder.into_inner().unwrap().finish().unwrap();
     std::fs::remove_dir_all(root).ok();
     bytes
 }

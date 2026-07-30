@@ -8,13 +8,13 @@ use dbx_core::agent_manager::{
 };
 use dbx_core::agent_service::{
     build_agent_list, clear_agent_download_cache, fetch_registry, import_agent_driver,
-    import_agents_from_zip as import_agents_from_zip_core, inspect_offline_zip, install_agent_driver,
+    import_agents_from_package as import_agents_from_package_core, inspect_offline_package, install_agent_driver,
     invalidate_registry_cache, reinstall_agent_jre, uninstall_agent_driver, uninstall_agent_jre,
     upgrade_all_agent_drivers, AgentProgressEvent, OfflineImportPlan,
 };
 use dbx_core::driver_runtime::DriverRuntimeSummary;
 use futures::Stream;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
 
@@ -25,12 +25,32 @@ use crate::state::WebState;
 #[serde(rename_all = "camelCase")]
 pub struct AgentTypeRequest {
     pub db_type: String,
+    pub operation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JreRequest {
     pub jre_key: Option<String>,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOperationRequest {
+    pub operation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUpdateBlockersRequest {
+    pub db_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentUpdateBlocker {
+    pub db_type: String,
+    pub label: String,
 }
 
 #[derive(Deserialize)]
@@ -101,30 +121,47 @@ pub async fn install_agent(
     Json(req): Json<AgentTypeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&req.db_type)).await.map_err(AppError::from)?;
+    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let tx = progress_sender(&state, "global").await;
-    install_agent_driver(&state.app.agent_manager, &req.db_type, |event| send_progress_event(&tx, event))
-        .await
-        .map_err(AppError::from)?;
+    install_agent_driver(&state.app.agent_manager, &req.db_type, |event| {
+        send_progress_event(&tx, event.with_operation_id(&operation_id))
+    })
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-pub async fn upgrade_all_agents(State(state): State<Arc<WebState>>) -> Result<Json<serde_json::Value>, AppError> {
+pub async fn upgrade_all_agents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AgentOperationRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
     let registry = fetch_registry().await.map_err(AppError::from)?;
     let agents = build_agent_list(&state.app.agent_manager, Some(&registry));
     let updatable: Vec<String> =
         agents.iter().filter(|agent| agent.update_available).map(|agent| agent.db_type.clone()).collect();
     ensure_no_agent_update_blockers(&state.app, &updatable).await.map_err(AppError::from)?;
+    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let tx = progress_sender(&state, "global").await;
-    let result = upgrade_all_agent_drivers(&state.app.agent_manager, |event| send_progress_event(&tx, event))
-        .await
-        .map_err(AppError::from)?;
+    let result = upgrade_all_agent_drivers(&state.app.agent_manager, |event| {
+        send_progress_event(&tx, event.with_operation_id(&operation_id))
+    })
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|err| AppError::from(err.to_string()))?))
+}
+
+pub async fn check_agent_update_blockers(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<AgentUpdateBlockersRequest>,
+) -> Result<Json<Vec<AgentUpdateBlocker>>, AppError> {
+    Ok(Json(agent_update_blockers(&state.app, &req.db_types).await))
 }
 
 pub async fn uninstall_agent(
     State(state): State<Arc<WebState>>,
     Json(req): Json<AgentTypeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&req.db_type)).await.map_err(AppError::from)?;
     uninstall_agent_driver(&state.app.agent_manager, &req.db_type).await.map_err(AppError::from)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -152,9 +189,7 @@ pub async fn set_agent_java_runtime_config(
         config.custom_java_path = None;
     }
 
-    let mut local_state = am.load_state();
-    local_state.java_runtime = config.clone();
-    am.save_state(&local_state).map_err(AppError::from)?;
+    am.mutate_state(|local_state| local_state.java_runtime = config.clone()).map_err(AppError::from)?;
     am.stop_daemons().await;
     Ok(Json(config))
 }
@@ -171,16 +206,27 @@ pub async fn import_agents_from_zip(
     let tmp_dir = state.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_dir).map_err(|err| AppError::from(err.to_string()))?;
 
-    if let Some(field) = multipart.next_field().await.map_err(|err| AppError::from(err.to_string()))? {
-        let file_name = field.file_name().unwrap_or("offline-drivers.zip").to_string();
-        if !file_name.to_ascii_lowercase().ends_with(".zip") {
-            return Err(AppError::from("Offline driver package must be a .zip file".to_string()));
+    let mut operation_id = uuid::Uuid::new_v4().to_string();
+    while let Some(field) = multipart.next_field().await.map_err(|err| AppError::from(err.to_string()))? {
+        if field.name() == Some("operationId") {
+            let candidate = field.text().await.map_err(|err| AppError::from(err.to_string()))?;
+            if !candidate.is_empty() {
+                operation_id = candidate;
+            }
+            continue;
+        }
+        if field.name() != Some("file") {
+            continue;
         }
 
-        let zip_path = tmp_dir.join(format!("agent-offline-{}.zip", uuid::Uuid::new_v4()));
+        let file_name = field.file_name().unwrap_or("offline-drivers.zip").to_string();
+        let extension = offline_package_extension(&file_name)
+            .ok_or_else(|| AppError::from("Offline driver package must be a .zip or .tar.zst file".to_string()))?;
+        let package_path = tmp_dir.join(format!("agent-offline-{}.{}", uuid::Uuid::new_v4(), extension));
         let tx = progress_sender(&state, "global").await;
         let result = async {
-            let mut upload = tokio::fs::File::create(&zip_path).await.map_err(|err| AppError::from(err.to_string()))?;
+            let mut upload =
+                tokio::fs::File::create(&package_path).await.map_err(|err| AppError::from(err.to_string()))?;
             let mut field = field;
             while let Some(chunk) = field.chunk().await.map_err(|err| AppError::from(err.to_string()))? {
                 upload.write_all(&chunk).await.map_err(|err| AppError::from(err.to_string()))?;
@@ -188,16 +234,19 @@ pub async fn import_agents_from_zip(
             upload.flush().await.map_err(|err| AppError::from(err.to_string()))?;
             drop(upload);
 
-            let plan = inspect_offline_zip(&zip_path).map_err(AppError::from)?;
+            let plan = inspect_offline_package(&package_path).map_err(AppError::from)?;
             ensure_no_offline_import_blockers(&state.app, &plan).await.map_err(AppError::from)?;
-            import_agents_from_zip_core(&state.app.agent_manager, &zip_path, |event| send_progress_event(&tx, event))
-                .map_err(AppError::from)
+            import_agents_from_package_core(&state.app.agent_manager, &package_path, |event| {
+                send_progress_event(&tx, event.with_operation_id(&operation_id))
+            })
+            .await
+            .map_err(AppError::from)
         }
         .await;
-        let _ = std::fs::remove_file(&zip_path);
+        let _ = std::fs::remove_file(&package_path);
 
         let result = result?;
-        send_progress_event(&tx, AgentProgressEvent::step("done"));
+        send_progress_event(&tx, AgentProgressEvent::step("done").with_operation_id(&operation_id));
         return Ok(Json(serde_json::json!({ "count": result.drivers_installed.len() as u32 })));
     }
 
@@ -237,7 +286,7 @@ pub async fn import_agent_driver_file(
 
     let result = async {
         ensure_no_agent_update_blockers(&state.app, std::slice::from_ref(&db_type)).await.map_err(AppError::from)?;
-        import_agent_driver(&state.app.agent_manager, &db_type, &tmp_path).map_err(AppError::from)
+        import_agent_driver(&state.app.agent_manager, &db_type, &tmp_path).await.map_err(AppError::from)
     }
     .await;
     let _ = std::fs::remove_file(&tmp_path);
@@ -249,9 +298,10 @@ pub async fn reinstall_jre(
     State(state): State<Arc<WebState>>,
     Json(req): Json<JreRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let operation_id = req.operation_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let tx = progress_sender(&state, "global").await;
     reinstall_agent_jre(&state.app.agent_manager, req.jre_key.as_deref().unwrap_or(DEFAULT_JRE_KEY), |event| {
-        send_progress_event(&tx, event);
+        send_progress_event(&tx, event.with_operation_id(&operation_id));
     })
     .await
     .map_err(AppError::from)?;
@@ -296,22 +346,46 @@ async fn ensure_no_agent_update_blockers(
     state: &dbx_core::connection::AppState,
     db_types: &[String],
 ) -> Result<(), String> {
-    let candidate_keys: std::collections::HashSet<&str> = db_types.iter().map(String::as_str).collect();
-    if candidate_keys.is_empty() {
+    let blockers = update_blockers_from_keys(state.prepare_agent_driver_updates(db_types).await, db_types);
+    if blockers.is_empty() {
         return Ok(());
     }
-    let mut blockers = state
-        .prepare_agent_driver_updates(db_types)
-        .await
+    let labels = blockers.into_iter().map(|blocker| blocker.label).collect::<Vec<_>>().join(", ");
+    Err(format!("Close these database connections before updating drivers: {labels}"))
+}
+
+async fn agent_update_blockers(state: &dbx_core::connection::AppState, db_types: &[String]) -> Vec<AgentUpdateBlocker> {
+    update_blockers_from_keys(state.active_agent_connection_driver_keys().await, db_types)
+}
+
+fn update_blockers_from_keys(
+    active_keys: std::collections::HashSet<String>,
+    db_types: &[String],
+) -> Vec<AgentUpdateBlocker> {
+    let candidate_keys: std::collections::HashSet<&str> = db_types.iter().map(String::as_str).collect();
+    if candidate_keys.is_empty() {
+        return Vec::new();
+    }
+    let mut blockers = active_keys
         .into_iter()
         .filter(|key| candidate_keys.contains(key.as_str()))
-        .map(|key| dbx_core::agent_catalog::label_for_key(&key).unwrap_or(&key).to_string())
+        .map(|db_type| AgentUpdateBlocker {
+            label: dbx_core::agent_catalog::label_for_key(&db_type).unwrap_or(&db_type).to_string(),
+            db_type,
+        })
         .collect::<Vec<_>>();
-    blockers.sort();
-    if blockers.is_empty() {
-        Ok(())
+    blockers.sort_by(|left, right| left.label.cmp(&right.label));
+    blockers
+}
+
+fn offline_package_extension(file_name: &str) -> Option<&'static str> {
+    let lower_name = file_name.to_ascii_lowercase();
+    if lower_name.ends_with(".tar.zst") {
+        Some("tar.zst")
+    } else if lower_name.ends_with(".zip") {
+        Some("zip")
     } else {
-        Err(format!("请先关闭以下数据库连接后再更新驱动: {}", blockers.join(", ")))
+        None
     }
 }
 
@@ -329,4 +403,26 @@ async fn ensure_no_offline_import_blockers(
         driver_keys.dedup();
     }
     ensure_no_agent_update_blockers(state, &driver_keys).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_blockers_include_active_duckdb_connections() {
+        let active_keys = ["duckdb".to_string(), "oracle".to_string()].into_iter().collect();
+        let blockers = update_blockers_from_keys(active_keys, &["duckdb".to_string()]);
+
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].db_type, "duckdb");
+        assert_eq!(blockers[0].label, "DuckDB");
+    }
+
+    #[test]
+    fn offline_package_extension_accepts_zip_and_tar_zstd() {
+        assert_eq!(offline_package_extension("dbx-agents.zip"), Some("zip"));
+        assert_eq!(offline_package_extension("dbx-agent-duckdb.TAR.ZST"), Some("tar.zst"));
+        assert_eq!(offline_package_extension("dbx-agent-duckdb.zst"), None);
+    }
 }
