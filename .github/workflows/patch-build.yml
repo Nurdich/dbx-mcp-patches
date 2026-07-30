@@ -112,6 +112,18 @@ jobs:
           shared-key: patch-windows-x64-msvc
           cache-on-failure: true
 
+      # openssl-sys (pulled by sqlite-sqlcipher) builds OpenSSL from source, which needs a
+      # NATIVE Windows perl. The runner's PATH has Git for Windows' MSYS perl first, and that
+      # one fails `perl Configure VC-WIN64A` with exit code 2. Install Strawberry Perl + NASM
+      # and prepend Strawberry so openssl-sys uses it. (Upstream avoids this via a warm
+      # rust-cache that already has openssl-sys compiled; a cold cache must build it once.)
+      - name: Install OpenSSL build tools (Strawberry Perl + NASM)
+        shell: bash
+        run: |
+          choco install strawberryperl nasm -y --no-progress
+          echo "C:\Strawberry\perl\bin" >> "$GITHUB_PATH"
+          echo "C:\Program Files\NASM" >> "$GITHUB_PATH"
+
       # Optional Tauri updater signing (only if the secret is configured). Without it the
       # NSIS installer still builds; only the auto-update signature is omitted.
       - name: Setup Tauri signing key (optional)
