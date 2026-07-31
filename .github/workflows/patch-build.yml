@@ -112,17 +112,24 @@ jobs:
           shared-key: patch-windows-x64-msvc
           cache-on-failure: true
 
-      # openssl-sys (pulled by sqlite-sqlcipher) builds OpenSSL from source, which needs a
-      # NATIVE Windows perl. The runner's PATH has Git for Windows' MSYS perl first, and that
-      # one fails `perl Configure VC-WIN64A` with exit code 2. Install Strawberry Perl + NASM
-      # and prepend Strawberry so openssl-sys uses it. (Upstream avoids this via a warm
-      # rust-cache that already has openssl-sys compiled; a cold cache must build it once.)
+      # openssl-sys (pulled by sqlite-sqlcipher) builds OpenSSL from source. The runner's
+      # default `perl` is Git for Windows' MSYS perl, which is missing core modules
+      # (Locale::Maketext::Simple) and fails `perl Configure VC-WIN64A`. Install Strawberry
+      # Perl + NASM, then LOCATE the actual perl.exe (choco's install path varies) and both
+      # set PERL=... (openssl-src honors it) and prepend its bin to PATH for the build step.
       - name: Install OpenSSL build tools (Strawberry Perl + NASM)
-        shell: bash
+        shell: pwsh
         run: |
           choco install strawberryperl nasm -y --no-progress
-          echo "C:\Strawberry\perl\bin" >> "$GITHUB_PATH"
-          echo "C:\Program Files\NASM" >> "$GITHUB_PATH"
+          $perl = Get-ChildItem -Path "C:\Strawberry","C:\Program Files\Strawberry","C:\Strawberryperl" -Filter perl.exe -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $perl) { Write-Error "Strawberry perl.exe not found after choco install"; exit 1 }
+          Write-Host "Strawberry perl: $($perl.FullName)"
+          & $perl.FullName -e "print qq(ok\n)" | Out-Null
+          if ($LASTEXITCODE -ne 0) { Write-Error "Strawberry perl failed to execute"; exit 1 }
+          Add-Content -Path $env:GITHUB_ENV -Value "PERL=$($perl.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $perl.FullName)
+          $nasm = Get-ChildItem -Path "C:\Program Files\NASM","C:\NASM" -Filter nasm.exe -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($nasm) { Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $nasm.FullName) }
 
       # Optional Tauri updater signing (only if the secret is configured). Without it the
       # NSIS installer still builds; only the auto-update signature is omitted.
