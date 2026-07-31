@@ -144,6 +144,8 @@ jobs:
             KEY_B64=$(base64 < "$RUNNER_TEMP/updater.key" | tr -d '\r\n')
             echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
             [ -n "$KEY_PW" ] && echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PW" >> "$GITHUB_ENV"
+          else
+            echo "No signing secret configured - skipping updater signing."
           fi
 
       - name: Build Tauri app
