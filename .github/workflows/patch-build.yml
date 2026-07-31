@@ -144,6 +144,24 @@ jobs:
             KEY_B64=$(base64 < "$RUNNER_TEMP/updater.key" | tr -d '\r\n')
             echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
             [ -n "$KEY_PW" ] && echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD=$KEY_PW" >> "$GITHUB_ENV"
+          else
+            # No signing secret configured. Tauri v2 errors if a pubkey is set in
+            # tauri.conf.json but no private key is available. Strip the updater pubkey
+            # and disable createUpdaterArtifacts so the NSIS installer still builds
+            # without requiring signing.
+            python3 - <<'PY'
+import json
+p = 'src-tauri/tauri.conf.json'
+with open(p) as f:
+    c = json.load(f)
+if 'plugins' in c and 'updater' in c['plugins']:
+    c['plugins']['updater'].pop('pubkey', None)
+if 'bundle' in c:
+    c['bundle']['createUpdaterArtifacts'] = False
+with open(p, 'w') as f:
+    json.dump(c, f, indent=2)
+print('No signing secret found - stripped updater pubkey and disabled createUpdaterArtifacts')
+PY
           fi
 
       - name: Build Tauri app
