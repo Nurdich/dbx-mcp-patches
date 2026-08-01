@@ -92,6 +92,13 @@ jobs:
     # or it's a manual dispatch (force build even if upstream had nothing new).
     if: always() && (needs.sync.result == 'skipped' || needs.sync.outputs.synced == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: windows-2022
+    env:
+      # sccache caches compiled outputs by content hash, so daily runs after an upstream
+      # sync recompile only the changed crates instead of the whole workspace (~5-10 min,
+      # not 30). Mirrors upstream release.yml. rust-cache target/ is disabled below to
+      # avoid restoring a stale target/ that forces a full rebuild every time.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -114,12 +121,18 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./ -> target"
           shared-key: patch-windows-x64-msvc
           cache-on-failure: true
+          # sccache handles compiled-output caching; don't restore a stale target/ that
+          # would force a full rebuild every run.
+          cache-targets: false
 
       # openssl-sys (pulled by sqlite-sqlcipher) builds OpenSSL from source. The runner's
       # default `perl` is Git for Windows' MSYS perl, which is missing core modules
