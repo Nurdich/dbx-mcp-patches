@@ -182,7 +182,7 @@ jobs:
         run: |
           TAG="patch-latest"
           SHORT_SHA="${GITHUB_SHA::7}"
-          NOTES="Auto-synced patch build from upstream on $(date -u +%Y-%m-%dT%H:%M UTC). Branch local-patches @ ${SHORT_SHA}."
+          NOTES="Auto-synced patch build from upstream on $(date -u +"%Y-%m-%dT%H:%M UTC"). Branch local-patches @ ${SHORT_SHA}."
           INSTALLER=$(ls target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe 2>/dev/null | head -1)
           PORTABLE="target/x86_64-pc-windows-msvc/release/dbx.exe"
           if [ -z "$INSTALLER" ] || [ ! -f "$PORTABLE" ]; then
