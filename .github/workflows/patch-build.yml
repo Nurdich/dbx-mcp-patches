@@ -2,7 +2,7 @@
 # dbx-web Docker image. Lives on the `local-patches` branch of the patches repo.
 #
 # What it does, end to end:
-#   1. sync:     merge upstream t8y2/dbx:main into local-patches and push  (auto-patch)
+#   1. sync:     merge origin/main into local-patches and push  (auto-patch)
 #   2. desktop:  pnpm tauri build on windows-2022 -> NSIS installer + portable exe
 #   3. image:    docker build deploy/Dockerfile (multi-arch) -> push to GHCR
 #
@@ -53,16 +53,15 @@ jobs:
           git config user.email "dbx-patch-ci@users.noreply.github.com"
           git config user.name "dbx-patch-ci"
 
-      - name: Fetch upstream
+      - name: Fetch origin main
         run: |
-          git remote add upstream https://github.com/t8y2/dbx.git
-          git fetch upstream main --depth=1
+          git fetch origin main
 
       - id: merge
-        name: Merge upstream main
+        name: Merge origin main
         run: |
           BEFORE=$(git rev-parse origin/local-patches)
-          if git merge upstream/main --no-ff -m "merge(upstream): sync origin/main into local-patches [skip ci]"; then
+          if git merge origin/main --no-ff -m "merge(upstream): sync origin/main into local-patches [skip ci]"; then
             AFTER=$(git rev-parse HEAD)
             if [ "$BEFORE" != "$AFTER" ]; then
               git push origin local-patches
@@ -72,8 +71,18 @@ jobs:
               echo "synced=false" >> "$GITHUB_OUTPUT"
             fi
           else
-            echo "::error::Upstream merge has conflicts. Resolve manually on local-patches, then re-run."
-            git merge --abort || true
+            if git diff --name-only --diff-filter=U | grep -qx 'docs/data/contributors.json'; then
+              git checkout --theirs docs/data/contributors.json
+              git add docs/data/contributors.json
+              git commit --no-edit
+              git push origin local-patches
+              echo "synced=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Upstream merge failed. Resolve manually on local-patches, then re-run."
+            if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+              git merge --abort
+            fi
             exit 1
           fi
 
