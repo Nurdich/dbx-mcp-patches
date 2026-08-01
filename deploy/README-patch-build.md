@@ -67,9 +67,9 @@ wslc-compose -f deploy/docker-compose.patch.yml up -d
 `.github/workflows/patch-build.yml` automates the whole cycle in CI (lives on the
 `local-patches` branch of the patches repo):
 
-1. **sync** — merges upstream `t8y2/dbx:main` into `local-patches` and pushes (the
-   "auto-patch"). On merge conflicts it fails fast for manual resolution — CI does not
-   guess.
+1. **sync** — merges this repo's `main` branch into `local-patches` and pushes (the
+   "auto-patch"). It auto-resolves the generated `docs/data/contributors.json` snapshot
+   from `main`, but otherwise fails fast for manual resolution — CI does not guess.
 2. **build-desktop** — `pnpm tauri build` on `windows-2022` → NSIS installer + portable exe,
    published to the rolling GitHub Release `patch-latest` (and workflow artifacts).
 3. **build-image** — `docker build deploy/Dockerfile` (multi-arch, gha-cached) → pushes
