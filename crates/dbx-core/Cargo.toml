@@ -75,6 +75,7 @@ zstd = "0.13"
 sysinfo = { version = "0.32", features = ["system"] }
 serde_yaml = "0.9"
 minijinja = "2"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
 arc-swap = "1"
 insta = { version = "1", features = ["json", "glob"] }
 tempfile = "3"

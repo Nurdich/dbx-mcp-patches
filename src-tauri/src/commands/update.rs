@@ -5,7 +5,9 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use super::update_portable;
 pub use dbx_core::update::UpdateInfo;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -20,6 +22,8 @@ const GITHUB_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/t8y2/dbx/releas
 const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "update-download-progress";
 const DOWNLOAD_CANCELED_ERROR: &str = "Download canceled by user.";
 const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_PORTABLE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_PORTABLE_SIGNATURE_BYTES: usize = 64 * 1024;
 const IS_WINDOWS_7_TARGET: bool = cfg!(target_vendor = "win7");
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +47,13 @@ enum PendingUpdate {
 
 enum ReadyUpdate {
     Installer { update: Box<Update>, bytes: Vec<u8> },
+    Portable { archive: Vec<u8>, version: Version },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PortableAssetCandidate {
+    archive_url: String,
+    signature_url: String,
 }
 
 #[derive(Debug)]
@@ -201,6 +212,30 @@ impl UpdateDownloadSource {
         }
     }
 
+    fn portable_asset_candidates(
+        &self,
+        latest_version: &str,
+        arch: &str,
+    ) -> Result<Vec<PortableAssetCandidate>, String> {
+        let normalized_version = latest_version.trim().trim_start_matches('v');
+        let filename = update_portable::portable_asset_name(normalized_version, arch)?;
+        let tag = tag_version(normalized_version);
+        let archive_urls = match self {
+            Self::Official => vec![
+                format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"),
+                format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"),
+            ],
+            Self::Cnb => vec![
+                format!("{CNB_RELEASE_DOWNLOAD_PREFIX}{tag}/{filename}"),
+                format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}{filename}"),
+            ],
+        };
+        Ok(archive_urls
+            .into_iter()
+            .map(|archive_url| PortableAssetCandidate { signature_url: format!("{archive_url}.sig"), archive_url })
+            .collect())
+    }
+
     fn installer_asset_candidates(&self, download_url: &str, latest_version: Option<&str>) -> Vec<String> {
         let filename = download_url.rsplit('/').next().filter(|name| !name.is_empty()).unwrap_or("");
 
@@ -301,13 +336,27 @@ pub async fn download_update(
     source: UpdateDownloadSource,
     latest_version: Option<String>,
 ) -> Result<(), String> {
+    let portable_mode = crate::data_dir::is_portable_mode();
     if requires_manual_update(IS_WINDOWS_7_TARGET) {
         return Err("Windows 7 builds must be updated with the dedicated Windows 7 offline installer.".to_string());
     }
+    let portable_version = if portable_mode {
+        let requested_version =
+            latest_version.as_deref().ok_or_else(|| "Latest version is required for portable updates.".to_string())?;
+        Some(update_portable::validate_requested_portable_version(requested_version, env!("CARGO_PKG_VERSION"))?)
+    } else {
+        None
+    };
     let cancellation = state.begin_download()?;
-    let result = download_update_inner(&app, &source, latest_version.as_deref(), &cancellation)
-        .await
-        .map(|(update, bytes)| ReadyUpdate::Installer { update: Box::new(update), bytes });
+    let result = if let Some(version) = portable_version {
+        download_portable_update_inner(&app, &source, &version, &cancellation)
+            .await
+            .map(|archive| ReadyUpdate::Portable { archive, version })
+    } else {
+        download_update_inner(&app, &source, latest_version.as_deref(), &cancellation)
+            .await
+            .map(|(update, bytes)| ReadyUpdate::Installer { update: Box::new(update), bytes })
+    };
     match result {
         Ok(update) => state.finish_download(&cancellation, update),
         Err(error) => {
@@ -415,6 +464,73 @@ async fn download_update_inner(
     }
 
     Err(format!("Failed to download update after trying all available mirrors. {}", failures.join("; ")))
+}
+
+async fn download_portable_update_inner(
+    app: &AppHandle,
+    source: &UpdateDownloadSource,
+    latest_version: &Version,
+    cancellation: &Arc<DownloadCancellation>,
+) -> Result<Vec<u8>, String> {
+    let latest_version_text = latest_version.to_string();
+    let candidates = source.portable_asset_candidates(&latest_version_text, std::env::consts::ARCH)?;
+    let client = portable_update_http_client()?;
+    let mut failures = Vec::new();
+
+    for candidate in candidates {
+        if cancellation.is_canceled() {
+            return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+        }
+        println!("[DBX updater] downloading portable update from {}", candidate.archive_url);
+        let result = async {
+            let signature = download_bounded_bytes(
+                &client,
+                &candidate.signature_url,
+                MAX_PORTABLE_SIGNATURE_BYTES,
+                None,
+                cancellation,
+            )
+            .await?;
+            let signature = String::from_utf8(signature)
+                .map_err(|error| format!("Portable update signature is not valid UTF-8: {error}"))?;
+            let archive = download_bounded_bytes(
+                &client,
+                &candidate.archive_url,
+                MAX_PORTABLE_ARCHIVE_BYTES,
+                Some(app),
+                cancellation,
+            )
+            .await?;
+            update_portable::verify_portable_archive(&archive, &signature, latest_version, std::env::consts::ARCH)?;
+            Ok::<Vec<u8>, String>(archive)
+        }
+        .await;
+
+        match result {
+            Ok(archive) => return Ok(archive),
+            Err(error) => {
+                if cancellation.is_canceled() || error.contains("canceled") {
+                    return Err(DOWNLOAD_CANCELED_ERROR.to_string());
+                }
+                println!("[DBX updater] portable update candidate failed: {error}");
+                failures.push(format!("{}: {error}", candidate.archive_url));
+            }
+        }
+    }
+
+    Err(format!("Failed to download a verified portable update. {}", failures.join("; ")))
+}
+
+fn portable_update_http_client() -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(15 * 60));
+    if let Some(proxy_url) = dbx_core::update::system_proxy_url() {
+        let proxy = reqwest::Proxy::all(&proxy_url).map_err(|error| format!("Invalid system proxy URL: {error}"))?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|error| format!("Failed to create portable update client: {error}"))
 }
 
 async fn download_bounded_bytes(
@@ -526,11 +642,16 @@ async fn wait_for_download_step<T>(
 }
 
 #[tauri::command]
-pub fn install_downloaded_update(state: tauri::State<'_, PendingUpdateState>) -> Result<(), String> {
+pub fn install_downloaded_update(app: AppHandle, state: tauri::State<'_, PendingUpdateState>) -> Result<(), String> {
     let ready = state.take_ready()?;
+    let portable = matches!(&ready, ReadyUpdate::Portable { .. });
     let install_result = match &ready {
         ReadyUpdate::Installer { update, bytes } => {
             update.install(bytes).map_err(|error| format!("Failed to install update: {error}"))
+        }
+        ReadyUpdate::Portable { archive, version } => {
+            update_portable::ensure_portable_version_is_newer(version, env!("CARGO_PKG_VERSION"))
+                .and_then(|_| update_portable::launch_portable_update_helper(archive, version))
         }
     };
     if let Err(error) = install_result {
@@ -538,7 +659,20 @@ pub fn install_downloaded_update(state: tauri::State<'_, PendingUpdateState>) ->
         return Err(error);
     }
     state.finish_install()?;
+    if portable {
+        schedule_portable_update_exit(app);
+    }
     Ok(())
+}
+
+fn schedule_portable_update_exit(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        if let Some(state) = app.try_state::<crate::CloseBehaviorState>() {
+            state.allow_next_exit();
+        }
+        app.exit(0);
+    });
 }
 
 #[cfg(test)]
@@ -593,6 +727,34 @@ mod tests {
             .rewrite_download_url("https://cnb.cool/dbxio.com/dbx/-/releases/download/v0.5.39/DBX_0.5.39_aarch64.dmg")
             .unwrap();
         assert_eq!(download_url, None);
+    }
+
+    #[test]
+    fn builds_signed_official_portable_asset_candidates() {
+        let candidates = UpdateDownloadSource::Official.portable_asset_candidates("0.5.64", "x86_64").unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0].archive_url,
+            format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_x64-portable.zip")
+        );
+        assert_eq!(
+            candidates[1].archive_url,
+            format!("{GITHUB_RELEASE_DOWNLOAD_PREFIX}v0.5.64/DBX_0.5.64_x64-portable.zip")
+        );
+        assert!(candidates.iter().all(|candidate| candidate.signature_url == format!("{}.sig", candidate.archive_url)));
+    }
+
+    #[test]
+    fn builds_cnb_portable_asset_candidate_with_r2_fallback() {
+        let candidates = UpdateDownloadSource::Cnb.portable_asset_candidates("v0.5.64", "aarch64").unwrap();
+        assert_eq!(
+            candidates[0].archive_url,
+            format!("{CNB_RELEASE_DOWNLOAD_PREFIX}v0.5.64/DBX_0.5.64_arm64-portable.zip")
+        );
+        assert_eq!(
+            candidates[1].archive_url,
+            format!("{R2_LATEST_RELEASE_DOWNLOAD_PREFIX}DBX_0.5.64_arm64-portable.zip")
+        );
     }
 
     #[test]
