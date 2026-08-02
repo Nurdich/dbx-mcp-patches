@@ -995,6 +995,7 @@ export default withEnglishFallback({
     copyColumnNamesTitle: "Copiar Nomes das Colunas ({count})",
     copyColumnNamesSeparator: "Separador de colunas",
     copyColumnNamesQuote: "Escapar nomes das colunas",
+    copyColumnNamesShowComment: "Mostrar por comentário",
     copyColumnNamesPreview: "Pré-visualização",
     copyAll: "Copiar Tudo (TSV)",
     selectionSum: "SUM: {value}",

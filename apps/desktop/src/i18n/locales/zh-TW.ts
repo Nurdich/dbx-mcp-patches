@@ -994,6 +994,7 @@ export default withEnglishFallback({
     copyColumnNamesTitle: "複製欄名（{count} 欄）",
     copyColumnNamesSeparator: "欄分隔符",
     copyColumnNamesQuote: "轉義欄名",
+    copyColumnNamesShowComment: "依注釋顯示",
     copyColumnNamesPreview: "預覽",
     copyAll: "複製全部 (TSV)",
     selectionSum: "SUM: {value}",

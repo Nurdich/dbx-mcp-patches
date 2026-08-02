@@ -1013,6 +1013,7 @@ export default withEnglishFallback({
     copyColumnNamesTitle: "列名をコピー（{count} 列）",
     copyColumnNamesSeparator: "列区切り文字",
     copyColumnNamesQuote: "列名を引用符で囲む",
+    copyColumnNamesShowComment: "コメントで表示",
     copyColumnNamesPreview: "プレビュー",
     copyAll: "すべてコピー (TSV)",
     selectionSum: "SUM: {value}",
