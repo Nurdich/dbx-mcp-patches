@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { afterEach, describe, expect, it } from "vitest";
 import { apiUrl, apiWebSocketUrl, dbxWebBasePath, webPath } from "@/lib/common/webPath";
 import { REMOTE_API_URL_KEY } from "@/lib/backend/remoteApiConfig";
