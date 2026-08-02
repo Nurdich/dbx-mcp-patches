@@ -44,9 +44,12 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(connectionDialogSource).toContain("max-height: calc(var(--dbx-viewport-height) - 2rem);");
   });
 
-  it("avoids full-window backdrop filters that can blank WebKit after a dialog closes", () => {
+  it("uses a lightweight theme-aware mask without full-window filters", () => {
     expect(dialogOverlaySource).not.toContain("backdrop-filter");
-    expect(dialogOverlaySource).toContain("bg-black/10");
+    expect(dialogOverlaySource).toContain("bg-black/25");
+    expect(dialogOverlaySource).toContain("dark:bg-background/70");
+    expect(globalsCss).not.toContain("dbx-dialog-backdrop");
+    expect(globalsCss).not.toContain("filter: blur(4px);");
   });
 
   it("keeps legacy tab triggers connected to the configured corner style", () => {

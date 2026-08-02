@@ -18,7 +18,7 @@ use crate::sql::{starts_with_executable_sql_keyword, starts_with_executable_sql_
 use crate::types::{
     ColumnInfo, CompletionAssistantCandidate, CompletionAssistantCandidateKind, CompletionAssistantMatchMode,
     CompletionAssistantObjectKind, CompletionAssistantRequest, CompletionAssistantResponse, DatabaseInfo,
-    ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectStatistics, QueryResult, TableInfo, TriggerInfo,
+    ForeignKeyInfo, IndexInfo, ObjectInfo, ObjectStatistics, QueryResult, SpatialColumnBuilder, TableInfo, TriggerInfo,
 };
 
 use super::file_validator::validate_file_path;
@@ -142,8 +142,10 @@ fn nonblank(value: String) -> Option<String> {
 }
 
 async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
-    match conn.query_first::<String, _>(sql).await {
-        Ok(Some(value)) => nonblank(value),
+    // MySQL reports nullable metadata such as TABLE_COLLATION as NULL for views.
+    // Reading it as String makes mysql_async panic during row conversion.
+    match conn.query_first::<Option<String>, _>(sql).await {
+        Ok(Some(value)) => value.and_then(nonblank),
         Ok(None) => None,
         Err(error) => {
             log::debug!("Failed to read optional MySQL database information with `{sql}`: {error}");
@@ -454,10 +456,8 @@ pub(crate) fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_j
             return row_get::<Vec<u8>, _>(row, idx)
                 .map(|bytes| {
                     if matches!(column.column_type(), ColumnType::MYSQL_TYPE_GEOMETRY) {
-                        // MySQL prefixes geometry WKB with a 4-byte SRID.
-                        // Strip it before passing to the WKB parser.
-                        let wkb = if bytes.len() >= 4 { &bytes[4..] } else { &bytes };
-                        super::wkb::wkb_to_wkt(wkb)
+                        decode_mysql_geometry(&bytes)
+                            .map(|geometry| geometry.wkt)
                             .map(serde_json::Value::String)
                             .unwrap_or_else(|| super::binary_value_to_json(&bytes))
                     } else {
@@ -500,6 +500,63 @@ pub(crate) fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_j
         .or_else(|| row_get::<bool, _>(row, idx).map(serde_json::Value::Bool))
         .or_else(|| row_get::<Vec<u8>, _>(row, idx).map(|bytes| mysql_bytes_to_json(bytes, column)))
         .unwrap_or(serde_json::Value::Null)
+}
+
+fn decode_mysql_geometry(bytes: &[u8]) -> Option<super::wkb::DecodedGeometry> {
+    if bytes.len() >= 5 && matches!(bytes[4], 0 | 1) {
+        let prefix: [u8; 4] = bytes[..4].try_into().ok()?;
+        if let Some(mut geometry) = super::wkb::decode_wkb_geometry(&bytes[4..]) {
+            if geometry.srid.is_none() {
+                let srid = u32::from_le_bytes(prefix);
+                geometry.srid = (srid != 0).then_some(srid);
+            }
+            return Some(geometry);
+        }
+    }
+    super::wkb::decode_wkb_geometry(bytes)
+}
+
+fn mysql_spatial_column_builder(columns: &[mysql_async::Column]) -> SpatialColumnBuilder {
+    SpatialColumnBuilder::new(
+        columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| (column.column_type() == ColumnType::MYSQL_TYPE_GEOMETRY).then_some(index)),
+    )
+}
+
+fn mysql_row_to_json_with_srids(
+    row: &mysql_async::Row,
+    spatial_columns: &mut SpatialColumnBuilder,
+) -> (Vec<serde_json::Value>, Vec<Option<u32>>) {
+    let mut srids = vec![None; row.len()];
+    let values = (0..row.len())
+        .map(|idx| {
+            let is_geometry = row
+                .columns_ref()
+                .get(idx)
+                .is_some_and(|column| column.column_type() == ColumnType::MYSQL_TYPE_GEOMETRY);
+            if !is_geometry {
+                return mysql_value_to_json(row, idx);
+            }
+            let Some(bytes) = row_get::<Vec<u8>, _>(row, idx) else {
+                spatial_columns.observe(idx, None);
+                return serde_json::Value::Null;
+            };
+            match decode_mysql_geometry(&bytes) {
+                Some(geometry) => {
+                    spatial_columns.observe(idx, geometry.srid);
+                    srids[idx] = geometry.srid;
+                    serde_json::Value::String(geometry.wkt)
+                }
+                None => {
+                    spatial_columns.observe(idx, None);
+                    super::binary_value_to_json(&bytes)
+                }
+            }
+        })
+        .collect();
+    (values, srids)
 }
 
 fn mysql_temporal_value_to_json(
@@ -725,6 +782,51 @@ async fn connect_pool_attempt(
     setup_mode: MySqlSetupMode,
     eof_mode: MySqlEofMode,
 ) -> Result<MySqlPool, String> {
+    let result = connect_pool_attempt_with_keepalive(
+        url,
+        ca_cert_path,
+        timeout,
+        max_connections,
+        idle_timeout_secs,
+        setup_database,
+        extra_setup_queries,
+        setup_mode,
+        eof_mode,
+        MySqlTcpKeepaliveMode::Enabled,
+    )
+    .await;
+    if result.as_ref().err().is_some_and(|error| mysql_error_should_retry_without_tcp_keepalive(error)) {
+        log::info!("MySQL connection returned EBADF; retrying with TCP keepalive disabled");
+        return connect_pool_attempt_with_keepalive(
+            url,
+            ca_cert_path,
+            timeout,
+            max_connections,
+            idle_timeout_secs,
+            setup_database,
+            extra_setup_queries,
+            setup_mode,
+            eof_mode,
+            MySqlTcpKeepaliveMode::Disabled,
+        )
+        .await;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_pool_attempt_with_keepalive(
+    url: &str,
+    ca_cert_path: Option<&str>,
+    timeout: Duration,
+    max_connections: usize,
+    idle_timeout_secs: Option<u64>,
+    setup_database: Option<&str>,
+    extra_setup_queries: &[String],
+    setup_mode: MySqlSetupMode,
+    eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
+) -> Result<MySqlPool, String> {
     let pool = create_pool(
         url,
         ca_cert_path,
@@ -734,6 +836,7 @@ async fn connect_pool_attempt(
         extra_setup_queries,
         setup_mode,
         eof_mode,
+        tcp_keepalive_mode,
     )?;
     verify_pool_connection_with_setup_fallback(
         pool,
@@ -746,6 +849,7 @@ async fn connect_pool_attempt(
         extra_setup_queries,
         setup_mode,
         eof_mode,
+        tcp_keepalive_mode,
     )
     .await
 }
@@ -768,9 +872,24 @@ enum MySqlEofMode {
     Legacy,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MySqlTcpKeepaliveMode {
+    Enabled,
+    Disabled,
+}
+
 impl MySqlEofMode {
     fn deprecate_eof(self) -> bool {
         self == Self::Deprecate
+    }
+}
+
+impl MySqlTcpKeepaliveMode {
+    fn duration(self) -> Option<Duration> {
+        match self {
+            Self::Enabled => Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))),
+            Self::Disabled => None,
+        }
     }
 }
 
@@ -785,6 +904,7 @@ impl MySqlSetupMode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn verify_pool_connection_with_setup_fallback(
     pool: MySqlPool,
     timeout: Duration,
@@ -796,6 +916,7 @@ async fn verify_pool_connection_with_setup_fallback(
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
     eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
     match verify_pool_connection(&pool, timeout).await {
         Ok(()) => Ok(pool),
@@ -815,6 +936,7 @@ async fn verify_pool_connection_with_setup_fallback(
                 extra_setup_queries,
                 fallback_mode,
                 eof_mode,
+                tcp_keepalive_mode,
             )?;
             verify_pool_connection(&fallback_pool, timeout).await.map(|_| fallback_pool)
         }
@@ -857,6 +979,7 @@ fn create_pool(
     extra_setup_queries: &[String],
     setup_mode: MySqlSetupMode,
     eof_mode: MySqlEofMode,
+    tcp_keepalive_mode: MySqlTcpKeepaliveMode,
 ) -> Result<MySqlPool, String> {
     let tls_url = mysql_tls_url(url)?;
     let local_infile_paths = mysql_local_infile_paths(&tls_url.url);
@@ -889,7 +1012,7 @@ fn create_pool(
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
-        .tcp_keepalive(Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS))))
+        .tcp_keepalive(tcp_keepalive_mode.duration())
         .deprecate_eof(eof_mode.deprecate_eof())
         .setup(setup_queries);
     if let Some(ssl_opts) = mysql_ssl_opts(base_ssl_opts, url, ca_cert_path, &tls_url.files)? {
@@ -1430,6 +1553,11 @@ fn mysql_error_should_retry_with_legacy_eof(error: &str) -> bool {
     error.to_ascii_lowercase().contains("packets out of sync")
 }
 
+fn mysql_error_should_retry_without_tcp_keepalive(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("bad file descriptor") && error.contains("os error 9")
+}
+
 fn mysql_error_should_retry_with_text_protocol(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     (lower.contains("1105") && lower.contains("hy000"))
@@ -1797,32 +1925,36 @@ pub async fn connect_bare_with_pool_limit_and_setup_database(
     result
 }
 
+const SHOW_DATABASES_SQL: &str = "SHOW DATABASES";
+const INFORMATION_SCHEMA_DATABASES_SQL: &str =
+    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME";
+const DATABASE_LIST_QUERY_PLAN: [(&str, bool); 2] =
+    [(SHOW_DATABASES_SQL, true), (INFORMATION_SCHEMA_DATABASES_SQL, false)];
+
 pub async fn list_databases(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = match conn.query_iter("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME").await
-    {
-        Ok(result) => result,
+    let [(primary_sql, primary_catalogless), (fallback_sql, fallback_catalogless)] = DATABASE_LIST_QUERY_PLAN;
+    match list_databases_with_query(pool, primary_sql, primary_catalogless).await {
+        Ok(databases) => Ok(databases),
         Err(err) => {
-            log::debug!("Falling back to SHOW DATABASES after information_schema.SCHEMATA failed: {err}");
-            return list_databases_show(pool).await;
+            log::debug!("Falling back to information_schema.SCHEMATA after SHOW DATABASES failed: {err}");
+            list_databases_with_query(pool, fallback_sql, fallback_catalogless).await
         }
-    };
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    let databases = database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), false);
-
-    if databases.is_empty() {
-        log::debug!("Falling back to SHOW DATABASES after information_schema.SCHEMATA returned no named databases");
-        return list_databases_show(pool).await;
     }
+}
 
-    Ok(databases)
+async fn list_databases_with_query(
+    pool: &MySqlPool,
+    sql: &str,
+    include_catalogless_when_blank: bool,
+) -> Result<Vec<DatabaseInfo>, String> {
+    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
+    let result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
+    Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), include_catalogless_when_blank))
 }
 
 pub async fn list_databases_show(pool: &MySqlPool) -> Result<Vec<DatabaseInfo>, String> {
-    let mut conn = get_conn_with_timeout(pool, super::connection_timeout()).await?;
-    let result = conn.query_iter("SHOW DATABASES").await.map_err(|e| e.to_string())?;
-    let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
-    Ok(database_infos_from_names(rows.iter().map(|row| get_str(row, 0)), true))
+    list_databases_with_query(pool, SHOW_DATABASES_SQL, true).await
 }
 
 pub(super) fn database_infos_from_names(
@@ -3002,15 +3134,18 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
 }
 
 fn columns_sql(database: &str, table: &str) -> String {
+    // Query only information_schema.COLUMNS and fetch TABLE_COLLATION separately via
+    // `table_collation_sql`. A LEFT JOIN onto information_schema.TABLES triggers a
+    // catastrophic plan on MySQL 5.7 (observed ~8s vs ~1ms without the join), because 5.7's
+    // TABLES metadata is materialized per-query with poor predicate pushdown. The separate
+    // lookup matches the `get_columns_show` fallback path and keeps results identical.
     format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
-         c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
-         c.CHARACTER_SET_NAME, c.COLLATION_NAME, t.TABLE_COLLATION \
-         FROM information_schema.COLUMNS c \
-         LEFT JOIN information_schema.TABLES t \
-           ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
-         WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
-         ORDER BY c.ORDINAL_POSITION",
+        "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, \
+         COLUMN_COMMENT, COLUMN_KEY, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH, \
+         CHARACTER_SET_NAME, COLLATION_NAME \
+         FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+         ORDER BY ORDINAL_POSITION",
         quote_value(database),
         quote_value(table),
     )
@@ -3175,8 +3310,14 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    let table_collation =
-        rows.iter().find_map(|row| get_opt_str(row, "TABLE_COLLATION").filter(|value| !value.trim().is_empty()));
+    // When database is empty the COLUMNS query returns no rows, so the
+    // function falls through to get_columns_show and this code path is
+    // never reached.  Skip the collation lookup to avoid a pointless query.
+    let table_collation = if database.trim().is_empty() {
+        None
+    } else {
+        query_first_nonblank_string(&mut conn, &table_collation_sql(database, table)).await
+    };
     let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
@@ -3525,6 +3666,8 @@ async fn execute_result_set_with_text_protocol_on_conn(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows: result.affected_rows(),
             execution_time_ms: start.elapsed().as_millis(),
@@ -3536,20 +3679,28 @@ async fn execute_result_set_with_text_protocol_on_conn(
     }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
     let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
+    let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
 
     if should_collect_text_result_set(sql, row_limit, max_rows) {
         let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
         let truncated = rows.len() > row_limit;
+        let mut spatial_values = Vec::new();
         let result_rows = rows
             .iter()
             .take(row_limit)
-            .map(|row| (0..row.len()).map(|i| mysql_value_to_json(row, i)).collect())
+            .map(|row| {
+                let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns);
+                spatial_values.push(srids);
+                values
+            })
             .collect();
 
         return Ok(QueryResult {
             columns,
             column_types,
             column_sortables: vec![],
+            spatial_columns: spatial_columns.finish(),
+            spatial_values,
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
@@ -3561,6 +3712,8 @@ async fn execute_result_set_with_text_protocol_on_conn(
     }
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
+    let mut truncated = false;
     let mut stream = result
         .stream::<mysql_async::Row>()
         .await
@@ -3569,22 +3722,21 @@ async fn execute_result_set_with_text_protocol_on_conn(
 
     while let Some(row) = stream.next().await {
         let row = row.map_err(|e| e.to_string())?;
-        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
-        result_rows.push(values);
-        if result_rows.len() > row_limit {
+        if result_rows.len() >= row_limit {
+            truncated = true;
             break;
         }
-    }
-
-    let truncated = result_rows.len() > row_limit;
-    if truncated {
-        result_rows.truncate(row_limit);
+        let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns);
+        result_rows.push(values);
+        spatial_values.push(srids);
     }
 
     Ok(QueryResult {
         columns,
         column_types,
         column_sortables: vec![],
+        spatial_columns: spatial_columns.finish(),
+        spatial_values,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -3593,6 +3745,91 @@ async fn execute_result_set_with_text_protocol_on_conn(
         has_more: false,
         elasticsearch_raw_body: None,
     })
+}
+
+async fn execute_result_sets_with_text_protocol_on_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    row_limit: usize,
+    max_rows: Option<usize>,
+    start: Instant,
+) -> Result<Vec<QueryResult>, String> {
+    let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    let mut results = Vec::new();
+
+    while advance_to_result_set_with_columns(&mut result).await? {
+        let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
+        let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
+        let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
+        let mut spatial_values = Vec::new();
+        let mut truncated = false;
+
+        let rows = if should_collect_text_result_set(sql, row_limit, max_rows) {
+            let rows: Vec<mysql_async::Row> = result.collect().await.map_err(|e| e.to_string())?;
+            truncated = rows.len() > row_limit;
+            rows.iter()
+                .take(row_limit)
+                .map(|row| {
+                    let (values, srids) = mysql_row_to_json_with_srids(row, &mut spatial_columns);
+                    spatial_values.push(srids);
+                    values
+                })
+                .collect()
+        } else {
+            let mut rows = Vec::new();
+            let mut stream = result
+                .stream::<mysql_async::Row>()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Empty result set stream".to_string())?;
+
+            while let Some(row) = stream.next().await {
+                let row = row.map_err(|e| e.to_string())?;
+                if rows.len() < row_limit {
+                    let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns);
+                    rows.push(values);
+                    spatial_values.push(srids);
+                } else {
+                    truncated = true;
+                }
+            }
+            rows
+        };
+
+        results.push(QueryResult {
+            columns,
+            column_types,
+            column_sortables: vec![],
+            spatial_columns: spatial_columns.finish(),
+            spatial_values,
+            rows,
+            affected_rows: 0,
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        });
+    }
+
+    if results.is_empty() {
+        results.push(QueryResult {
+            columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
+            rows: vec![],
+            affected_rows: result.affected_rows(),
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+        });
+    }
+
+    Ok(results)
 }
 
 async fn advance_to_result_set_with_columns(
@@ -3616,8 +3853,11 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     let mut result = conn.exec_iter(sql, ()).await.map_err(|e| e.to_string())?;
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
     let column_types: Vec<String> = result.columns_ref().iter().map(mysql_column_type_name).collect();
+    let mut spatial_columns = mysql_spatial_column_builder(result.columns_ref());
 
     let mut result_rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut spatial_values: Vec<Vec<Option<u32>>> = Vec::new();
+    let mut truncated = false;
     let mut stream = result
         .stream::<mysql_async::Row>()
         .await
@@ -3626,22 +3866,21 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
 
     while let Some(row) = stream.next().await {
         let row = row.map_err(|e| e.to_string())?;
-        let values: Vec<serde_json::Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
-        result_rows.push(values);
-        if result_rows.len() > row_limit {
+        if result_rows.len() >= row_limit {
+            truncated = true;
             break;
         }
-    }
-
-    let truncated = result_rows.len() > row_limit;
-    if truncated {
-        result_rows.truncate(row_limit);
+        let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns);
+        result_rows.push(values);
+        spatial_values.push(srids);
     }
 
     Ok(QueryResult {
         columns,
         column_types,
         column_sortables: vec![],
+        spatial_columns: spatial_columns.finish(),
+        spatial_values,
         rows: result_rows,
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
@@ -3901,6 +4140,8 @@ pub async fn execute_query_on_conn_with_max_rows(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -3909,6 +4150,22 @@ pub async fn execute_query_on_conn_with_max_rows(
             has_more: false,
             elasticsearch_raw_body: None,
         })
+    }
+}
+
+pub async fn execute_query_results_on_conn_with_max_rows(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    dialect: MySqlQueryDialect,
+) -> Result<Vec<QueryResult>, String> {
+    if is_result_set_query(sql, dialect) && (bare || prefers_text_protocol_query(sql, dialect)) {
+        let start = Instant::now();
+        execute_result_sets_with_text_protocol_on_conn(conn, sql, query_result_row_limit(max_rows), max_rows, start)
+            .await
+    } else {
+        execute_query_on_conn_with_max_rows(conn, sql, bare, max_rows, dialect).await.map(|result| vec![result])
     }
 }
 
@@ -4229,6 +4486,39 @@ mod tests {
             parent_schema: None,
             parent_name: None,
         }
+    }
+
+    #[test]
+    fn mysql_geometry_decoder_retains_srid_prefix() {
+        let mut raw = 3857_u32.to_le_bytes().to_vec();
+        raw.extend_from_slice(&[
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40,
+        ]);
+        let decoded = decode_mysql_geometry(&raw).unwrap();
+        assert_eq!(decoded.wkt, "POINT(1 2)");
+        assert_eq!(decoded.srid, Some(3857));
+    }
+
+    #[test]
+    fn mysql_geometry_decoder_accepts_unprefixed_wkb() {
+        let raw = [
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40,
+        ];
+        let decoded = decode_mysql_geometry(&raw).unwrap();
+        assert_eq!(decoded.wkt, "POINT(1 2)");
+        assert_eq!(decoded.srid, None);
+    }
+
+    #[test]
+    fn mysql_geometry_srid_zero_is_unknown() {
+        let mut raw = 0_u32.to_le_bytes().to_vec();
+        raw.extend_from_slice(&[
+            0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x40,
+        ]);
+        assert_eq!(decode_mysql_geometry(&raw).unwrap().srid, None);
     }
 
     #[test]
@@ -4820,6 +5110,17 @@ mod tests {
     }
 
     #[test]
+    fn mysql_database_listing_prefers_show_databases() {
+        assert_eq!(
+            DATABASE_LIST_QUERY_PLAN,
+            [
+                ("SHOW DATABASES", true),
+                ("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME", false),
+            ]
+        );
+    }
+
+    #[test]
     fn mysql_show_metadata_sql_supports_catalogless_services() {
         assert_eq!(show_tables_filtered_sql("", true, None, &[]), "SHOW FULL TABLES");
         assert_eq!(show_tables_filtered_sql("", false, None, &[]), "SHOW TABLES");
@@ -4914,15 +5215,25 @@ mod tests {
         let sql = columns_sql("app", "users");
 
         assert!(sql.contains("information_schema.COLUMNS"));
-        assert!(sql.contains("information_schema.TABLES"));
-        assert!(sql.contains("t.TABLE_COLLATION"));
+        // TABLE_COLLATION is fetched separately via `table_collation_sql`; the LEFT JOIN onto
+        // information_schema.TABLES is intentionally avoided to keep MySQL 5.7 fast.
+        assert!(!sql.contains("information_schema.TABLES"));
+        assert!(!sql.contains("TABLE_COLLATION"));
         assert!(!sql.contains("KEY_COLUMN_USAGE"));
         assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
-        assert!(sql.contains("c.COLUMN_KEY"));
-        assert!(sql.contains("c.DATA_TYPE"));
-        assert!(sql.contains("c.COLUMN_TYPE"));
+        assert!(sql.contains("COLUMN_KEY"));
+        assert!(sql.contains("DATA_TYPE"));
+        assert!(sql.contains("COLUMN_TYPE"));
         assert!(!sql.contains("COLLATE"));
         assert!(!sql.contains("AS ENUM_VALUES"));
+    }
+
+    #[test]
+    fn mysql_nullable_table_collation_uses_optional_string_conversion() {
+        let collation = mysql_async::from_value_opt::<Option<String>>(mysql_async::Value::NULL)
+            .expect("Option<String> must accept NULL MySQL metadata values");
+
+        assert_eq!(collation, None);
     }
 
     #[test]
@@ -5158,8 +5469,23 @@ mod tests {
     }
 
     #[test]
+    fn mysql_bad_file_descriptor_retries_without_tcp_keepalive() {
+        let error = "MySQL connection failed: Input/output error: Input/output error: Bad file descriptor (os error 9)";
+
+        assert!(mysql_error_should_retry_without_tcp_keepalive(error));
+        assert!(!mysql_error_should_retry_without_tcp_keepalive(
+            "MySQL connection failed: Connection reset by peer (os error 54)"
+        ));
+    }
+
+    #[test]
     fn mysql_tcp_keepalive_uses_milliseconds_not_seconds() {
         assert_eq!(MYSQL_TCP_KEEPALIVE_MS, 30_000);
+        assert_eq!(
+            MySqlTcpKeepaliveMode::Enabled.duration(),
+            Some(Duration::from_millis(u64::from(MYSQL_TCP_KEEPALIVE_MS)))
+        );
+        assert_eq!(MySqlTcpKeepaliveMode::Disabled.duration(), None);
     }
 
     #[test]

@@ -8,6 +8,7 @@ import type {
   DatabaseConnectionInfo,
   DatabaseInfo,
   DatabaseStorageInfo,
+  SqlServerCompletionContext,
   SchemaInfo,
   LinkedServerInfo,
   CatalogInfo,
@@ -237,6 +238,12 @@ export interface SnippetSyncConfig {
   provider: SnippetProvider;
   token?: string;
   snippetId?: string;
+  replaceLegacySnippet?: boolean;
+}
+
+export interface SnippetSyncSettings {
+  snippetId?: string;
+  legacyCleanupRequiredId?: string;
 }
 
 export interface SnippetSyncSummary {
@@ -245,6 +252,7 @@ export interface SnippetSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
+  legacyCleanupRequiredId?: string;
 }
 
 export interface SnippetDownloadResult {
@@ -423,6 +431,7 @@ export async function aiAgentStream(
   request: AiCompletionRequest,
   connectionId: string,
   database: string,
+  schema: string | undefined,
   dbType: string,
   onEvent: (event: AgentEvent) => void,
   mode?: string,
@@ -430,6 +439,7 @@ export async function aiAgentStream(
   confirmedWriteSql?: string,
   confirmedConnectionId?: string,
   confirmedDatabase?: string,
+  confirmedSchema?: string,
   _signal?: AbortSignal,
 ): Promise<string> {
   const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
@@ -444,12 +454,14 @@ export async function aiAgentStream(
       request,
       connectionId,
       database,
+      schema,
       dbType,
       mode,
       allowWriteSql,
       confirmedWriteSql,
       confirmedConnectionId,
       confirmedDatabase,
+      confirmedSchema,
     });
   } catch (e) {
     unlisten();
@@ -676,16 +688,30 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   return invoke("forget_snippet_saved_token", { config });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncSettings(provider: SnippetProvider): Promise<SnippetSyncSettings> {
+  return invoke("snippet_sync_settings", { provider });
+}
+
+export async function saveSnippetSyncId(provider: SnippetProvider, snippetId?: string): Promise<void> {
+  return invoke("save_snippet_sync_id", { provider, snippetId });
+}
+
+export async function retrySnippetLegacyCleanup(config: SnippetSyncConfig): Promise<SnippetSyncSettings> {
+  return invoke("retry_snippet_legacy_cleanup", { config });
+}
+
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
+    snippetPassphrase,
+    includeSecrets,
     secretsPassphrase,
   });
 }
 
-export async function snippetSyncDownload(config: SnippetSyncConfig, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
-  return invoke("snippet_sync_download", { config, secretsPassphrase });
+export async function snippetSyncDownload(config: SnippetSyncConfig, snippetPassphrase?: string, restoreSecrets = false, secretsPassphrase?: string): Promise<SnippetDownloadResult> {
+  return invoke("snippet_sync_download", { config, snippetPassphrase, restoreSecrets, secretsPassphrase });
 }
 
 export async function loadPinnedTreeNodeIds(): Promise<string[]> {
@@ -867,6 +893,10 @@ export async function listDatabases(connectionId: string): Promise<DatabaseInfo[
 
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return invoke("list_database_storage", { connectionId, databases });
+}
+
+export async function getSqlServerCompletionContext(connectionId: string, database: string): Promise<SqlServerCompletionContext> {
+  return invoke("get_sqlserver_completion_context", { connectionId, database });
 }
 
 export async function listDorisCatalogs(connectionId: string): Promise<CatalogInfo[]> {
@@ -1885,6 +1915,10 @@ export async function downloadUpdate(source: UpdateDownloadSource, latestVersion
   return invoke("download_update", { source, latestVersion });
 }
 
+export async function cancelUpdateDownload(): Promise<void> {
+  return invoke("cancel_update_download");
+}
+
 export async function installDownloadedUpdate(): Promise<void> {
   return invoke("install_downloaded_update");
 }
@@ -1949,6 +1983,11 @@ export interface RedisStreamEntry {
   fields: RedisStreamField[];
 }
 
+export interface RedisStreamPage {
+  entries: RedisStreamEntry[];
+  next_cursor?: string;
+}
+
 // Redis counters above Number.MAX_SAFE_INTEGER are transported as decimal strings.
 export type RedisStreamMetric = number | string;
 
@@ -2002,7 +2041,7 @@ export type RedisValueData =
       total: number;
       scan_cursor?: number;
     }
-  | { kind: "stream"; entries: RedisStreamEntry[] }
+  | { kind: "stream"; entries: RedisStreamEntry[]; total?: number; next_cursor?: string }
   | { kind: "unknown" };
 
 export interface RedisValue {
@@ -2083,6 +2122,14 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
 
 export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
   return invoke("redis_get_value", { connectionId, db, keyRaw });
+}
+
+export async function redisGetTtl(connectionId: string, db: number, keyRaw: string): Promise<number> {
+  return invoke("redis_get_ttl", { connectionId, db, keyRaw });
+}
+
+export async function redisGetStreamEntries(connectionId: string, db: number, keyRaw: string, cursor?: string): Promise<RedisStreamPage> {
+  return invoke("redis_get_stream_entries", { connectionId, db, keyRaw, cursor });
 }
 
 export async function redisGetStreamGroups(connectionId: string, db: number, keyRaw: string): Promise<RedisStreamGroup[]> {
@@ -2463,6 +2510,75 @@ export interface KvStatusResponse {
   metrics?: KvPrometheusMetrics | null;
 }
 
+export interface EtcdDefragMemberResult {
+  endpoint: string;
+  status: "succeeded" | "failed" | "not_executed";
+  durationMs?: number | null;
+  error?: string | null;
+}
+export interface EtcdDefragResponse {
+  members: EtcdDefragMemberResult[];
+}
+export interface EtcdWatchStartRequest {
+  key: string;
+  keyBytes?: KvValue | null;
+  scope: "key" | "prefix";
+  startRevision?: KvInt64 | null;
+  includePrevKv: boolean;
+}
+export interface EtcdWatchStartResponse {
+  watchId: string;
+  startedRevision: KvInt64;
+}
+export interface EtcdWatchPollResponse {
+  watchId: string;
+  batches: Array<{ revision: KvInt64; events: Array<{ eventType: "put" | "delete"; revision: KvInt64; key: string; keyBytes?: KvValue | null; value?: KvValue | null; previousValue?: KvValue | null; metadata?: KvKeyMetadata | null }> }>;
+  terminal?: { reason: string; message?: string; compactedRevision?: KvInt64 | null } | null;
+}
+export interface EtcdLeaseListResponse {
+  leases: Array<{ id: KvInt64; ttl: number; grantedTtl?: number }>;
+  partial: boolean;
+  nextContinuation?: string | null;
+}
+export interface EtcdLeaseDetail {
+  id: KvInt64;
+  ttl: number;
+  grantedTtl?: number;
+  keys: KvValue[];
+  truncated: boolean;
+}
+export interface EtcdAuthUserListResponse {
+  users: string[];
+}
+export interface EtcdAuthUserDetail {
+  user: string;
+  roles: string[];
+}
+export interface EtcdAuthPermission {
+  access: "read" | "write" | "readwrite";
+  key: KvValue;
+  rangeEnd: KvValue;
+  resource: "all" | "key" | "prefix";
+}
+export interface EtcdAuthRoleListResponse {
+  roles: string[];
+}
+export interface EtcdAuthRoleDetail {
+  role: string;
+  permissions: EtcdAuthPermission[];
+}
+export interface EtcdPreflightResponse {
+  token: string;
+  action: string;
+  confirmationText: string;
+  expiresAtMs: number;
+  clusterId?: KvInt64 | null;
+}
+export interface EtcdDangerousApproval {
+  preflightToken: string;
+  confirmationText: string;
+}
+
 export async function etcdListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null): Promise<KvListPrefixResponse> {
   return invoke("etcd_list_prefix", {
     connectionId,
@@ -2538,6 +2654,33 @@ export async function etcdHistory(
 }
 export async function etcdStatus(connectionId: string): Promise<KvStatusResponse> {
   return invoke("etcd_status", { connectionId });
+}
+export async function etcdPreflight(connectionId: string, action: string, params: Record<string, unknown>): Promise<EtcdPreflightResponse> {
+  return invoke("etcd_preflight", { connectionId, request: { action, params } });
+}
+export async function etcdCompact(connectionId: string, revision: KvInt64, approval: EtcdDangerousApproval): Promise<{ revision: KvInt64 }> {
+  return invoke("etcd_compact", { connectionId, revision, ...approval });
+}
+export async function etcdDefrag(connectionId: string, endpoints: string[], approval: EtcdDangerousApproval): Promise<EtcdDefragResponse> {
+  return invoke("etcd_defrag", { connectionId, endpoints, ...approval });
+}
+export async function etcdWatchStart(connectionId: string, request: EtcdWatchStartRequest): Promise<EtcdWatchStartResponse> {
+  return invoke("etcd_watch_start", { connectionId, request });
+}
+export async function etcdWatchPoll(connectionId: string, watchId: string): Promise<EtcdWatchPollResponse> {
+  return invoke("etcd_watch_poll", { connectionId, watchId });
+}
+export async function etcdWatchStop(connectionId: string, watchId: string): Promise<{ stopped: boolean }> {
+  return invoke("etcd_watch_stop", { connectionId, watchId });
+}
+export async function etcdLeaseList(connectionId: string, limit = 100, continuation?: string | null): Promise<EtcdLeaseListResponse> {
+  return invoke("etcd_lease_list", { connectionId, limit, continuation: continuation ?? null });
+}
+export async function etcdLeaseCall<T = unknown>(connectionId: string, operation: "get" | "grant" | "keepalive" | "revoke", params: Record<string, unknown>, approval?: EtcdDangerousApproval): Promise<T> {
+  return invoke("etcd_lease_call", { connectionId, operation, params, ...approval });
+}
+export async function etcdAuthCall<T = unknown>(connectionId: string, operation: string, params: Record<string, unknown>, approval?: EtcdDangerousApproval): Promise<T> {
+  return invoke("etcd_auth_call", { connectionId, operation, params, ...approval });
 }
 
 // --- ZooKeeper ---
@@ -2954,13 +3097,14 @@ export async function mongoDeleteDocument(connectionId: string, database: string
   return documentDeleteDocument(connectionId, database, collection, id, routing);
 }
 
-export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string): Promise<number> {
+export async function documentDeleteDocument(connectionId: string, database: string, collection: string, id: string, routing?: string, documentType?: string): Promise<number> {
   return invoke("document_delete_document", {
     connectionId,
     database,
     collection,
     id,
     routing,
+    documentType,
   });
 }
 
@@ -3129,6 +3273,8 @@ export interface SqlFileProgress {
   elapsedMs: number;
   statementSummary: string;
   error?: string | null;
+  fileIndex?: number;
+  fileName?: string;
 }
 
 export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> {
@@ -3161,9 +3307,11 @@ export interface TransferRequest {
   sourceConnectionId: string;
   sourceDatabase: string;
   sourceSchema: string;
+  sourceCatalog?: string;
   targetConnectionId: string;
   targetDatabase: string;
   targetSchema: string;
+  targetCatalog?: string;
   tables: string[];
   createTable: boolean;
   mode: TransferMode;
@@ -3421,6 +3569,7 @@ export interface TableExportRequest {
   connectionId: string;
   database: string;
   schema?: string;
+  identifierQuote?: string;
   tableName: string;
   filePath: string;
   format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";

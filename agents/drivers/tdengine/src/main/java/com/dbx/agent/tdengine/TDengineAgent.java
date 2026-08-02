@@ -1,6 +1,6 @@
 package com.dbx.agent.tdengine;
 
-import com.dbx.agent.BaseDatabaseAgent;
+import com.dbx.agent.AbstractJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.DatabaseInfo;
@@ -46,7 +46,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public final class TDengineAgent extends BaseDatabaseAgent {
+public final class TDengineAgent extends AbstractJdbcAgent {
     private static final long TABLE_CACHE_TTL_MILLIS = 10_000L;
     private static final DateTimeFormatter TDENGINE_TIMESTAMP_FORMAT =
         new DateTimeFormatterBuilder()
@@ -61,33 +61,69 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         Pattern.compile("(?i)^(binary|nchar|varchar|varbinary)\\((\\d+)\\)");
     private static final Pattern COMPOSITE_KEY_PATTERN =
         Pattern.compile("(?i)\\bCOMPOSITE\\s+KEY\\b");
+    private static final Pattern TDENGINE_VERSION_PATTERN =
+        Pattern.compile("^(\\d+)\\.(\\d+)\\.(\\d+)(?:\\.|$)");
 
-    private Connection connection;
     private final Object tableCacheLock = new Object();
     private String tableCacheSchema = "";
     private long tableCacheTimeMillis;
     private List<TableInfo> tableCache = Collections.emptyList();
+    private Connection restfulStateConnection;
+    private String restfulOriginalCatalog;
+    private String restfulOriginalDatabase;
+    private boolean restInformationSchemaPagingEnabled;
 
     @Override
-    public Connection getConnection() {
-        return connection;
+    protected String driverClass() {
+        return TDengineTransport.WEBSOCKET.driverClass();
     }
 
     @Override
-    public void connect(ConnectParams params) {
-        uncheckedVoid(() -> {
-            connection = TDengineConnectionFactory.open(params);
-            clearTableCache();
-        });
+    protected String buildJdbcUrl(ConnectParams params) {
+        String connectionString = params.getConnection_string() == null ? "" : params.getConnection_string().trim();
+        if (!connectionString.isBlank()) {
+            return TDengineJdbcUrl.sanitizeConnectionString(connectionString);
+        }
+        TDengineJdbcUrl.TransportPreference preference = TDengineJdbcUrl.transportPreference(params.getUrl_params());
+        TDengineTransport transport = preference == TDengineJdbcUrl.TransportPreference.REST
+            ? TDengineTransport.REST
+            : TDengineTransport.WEBSOCKET;
+        return TDengineJdbcUrl.from(params, transport);
     }
 
     @Override
-    public boolean testConnection(ConnectParams params) {
-        return unchecked(() -> {
-            try (Connection conn = TDengineConnectionFactory.open(params)) {
-                return conn.isValid(5);
-            }
-        });
+    protected void loadDriver(ConnectParams params) {
+    }
+
+    @Override
+    protected Connection openConnection(ConnectParams params) throws Exception {
+        return TDengineConnectionFactory.open(params);
+    }
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        clearTableCache();
+        clearRestfulState();
+        restInformationSchemaPagingEnabled = supportsRestInformationSchemaPaging(connection);
+    }
+
+    @Override
+    protected void beforePooledConnectionReturn(Connection connection) throws Exception {
+        if (restfulStateConnection != connection) {
+            return;
+        }
+        try {
+            restoreRestfulConnectionState(connection, restfulOriginalCatalog, restfulOriginalDatabase);
+        } finally {
+            clearRestfulState();
+        }
+    }
+
+    @Override
+    protected void afterDisconnect() {
+        clearTableCache();
+        clearRestfulState();
+        restInformationSchemaPagingEnabled = false;
     }
 
     @Override
@@ -123,7 +159,77 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         if (!normalized.tableTypeAllowed("TABLE")) {
             return Collections.emptyList();
         }
+        if (normalized.hasLimit() && !normalized.hasFilter()) {
+            if (restInformationSchemaPagingEnabled) {
+                try {
+                    return listTablesPageFromRestInformationSchema(schema, normalized);
+                } catch (RuntimeException ignored) {
+                }
+            }
+            return listTablesPageFromShow(schema, normalized);
+        }
         return normalized.filterTables(listTablesFromShow(schema));
+    }
+
+    private List<TableInfo> listTablesPageFromRestInformationSchema(
+        String schema,
+        MetadataListConstraints constraints
+    ) {
+        return unchecked(() -> {
+            int limit = constraints.getLimit();
+            int offset = constraints.getOffset() == null ? 0 : constraints.getOffset();
+            List<TableInfo> result = new ArrayList<>(limit);
+
+            TablePageScan stablePage = queryTablesPage(
+                "SHOW " + quoteQualifiedPrefix(schema) + "STABLES",
+                "STABLE",
+                false,
+                offset,
+                limit
+            );
+            result.addAll(stablePage.tables());
+            if (result.size() >= limit) {
+                return result;
+            }
+
+            int tableOffset = Math.max(0, offset - stablePage.scannedRows());
+            result.addAll(queryInformationSchemaTablePage(
+                schema,
+                tableOffset,
+                limit - result.size()
+            ));
+            return result;
+        });
+    }
+
+    private List<TableInfo> listTablesPageFromShow(String schema, MetadataListConstraints constraints) {
+        return unchecked(() -> {
+            int limit = constraints.getLimit();
+            int offset = constraints.getOffset() == null ? 0 : constraints.getOffset();
+            List<TableInfo> result = new ArrayList<>(limit);
+
+            TablePageScan stablePage = queryTablesPage(
+                "SHOW " + quoteQualifiedPrefix(schema) + "STABLES",
+                "STABLE",
+                false,
+                offset,
+                limit
+            );
+            result.addAll(stablePage.tables());
+            if (result.size() >= limit) {
+                return result;
+            }
+
+            int tableOffset = Math.max(0, offset - stablePage.scannedRows());
+            result.addAll(queryTablesPage(
+                "SHOW " + quoteQualifiedPrefix(schema) + "TABLES",
+                "TABLE",
+                true,
+                tableOffset,
+                limit - result.size()
+            ).tables());
+            return result;
+        });
     }
 
     private List<TableInfo> listTablesFromShow(String schema) {
@@ -133,9 +239,9 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         }
         return unchecked(() -> {
             List<TableInfo> result = new ArrayList<>();
-            // Connector/J 3.6.3 ignores Statement#setMaxRows. Read the SHOW
-            // results once and page locally from a short-lived cache instead of
-            // issuing the same full scan for every sidebar page.
+            // Connector/J 3.6.3 ignores Statement#setMaxRows. Filtered and
+            // unbounded callers still need the complete result, so cache that
+            // scan briefly instead of repeating it for adjacent requests.
             result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "STABLES", "STABLE", false));
             result.addAll(queryTables("SHOW " + quoteQualifiedPrefix(schema) + "TABLES", "TABLE", true));
 
@@ -215,7 +321,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            this::tdengineResultValue
+            this::resultValue
         );
         if (mayChangeMetadata(sql)) {
             clearTableCache();
@@ -231,7 +337,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
-            this::tdengineResultValue
+            this::resultValue
         );
     }
 
@@ -243,7 +349,7 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             prepareExecutionSchema(schema),
             this::setSchemaSQL,
             options,
-            this::tdengineResultValue
+            this::resultValue
         );
     }
 
@@ -271,11 +377,22 @@ public final class TDengineAgent extends BaseDatabaseAgent {
     }
 
     private String prepareExecutionSchema(String schema) {
-        return unchecked(() -> prepareExecutionSchema(requireConnected(), schema));
+        return unchecked(() -> {
+            Connection connection = requireConnected();
+            if (schema != null
+                && !schema.trim().isEmpty()
+                && unwrapConnection(connection, RestfulConnection.class) != null
+                && restfulStateConnection != connection) {
+                restfulStateConnection = connection;
+                restfulOriginalCatalog = connection.getCatalog();
+                restfulOriginalDatabase = connection.getClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME);
+            }
+            return prepareExecutionSchema(connection, schema);
+        });
     }
 
     static String prepareExecutionSchema(Connection connection, String schema) throws SQLException {
-        if (!(connection instanceof RestfulConnection) || schema == null || schema.trim().isEmpty()) {
+        if (unwrapConnection(connection, RestfulConnection.class) == null || schema == null || schema.trim().isEmpty()) {
             return schema;
         }
 
@@ -286,15 +403,13 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         return null;
     }
 
-    @Override
-    public void disconnect() {
-        uncheckedVoid(() -> {
-            if (connection != null) {
-                connection.close();
-            }
-            connection = null;
-            clearTableCache();
-        });
+    static void restoreRestfulConnectionState(Connection connection, String catalog, String database) throws SQLException {
+        connection.setCatalog(catalog);
+        if (database == null) {
+            connection.getClientInfo().remove(TSDBDriver.PROPERTY_KEY_DBNAME);
+        } else {
+            connection.setClientInfo(TSDBDriver.PROPERTY_KEY_DBNAME, database);
+        }
     }
 
     private List<TableInfo> queryTables(String sql, String tableType, boolean includesStableName) throws Exception {
@@ -302,18 +417,93 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         try (java.sql.Statement stmt = requireConnected().createStatement()) {
             try (ResultSet rs = stmt.executeQuery(sql)) {
                 while (rs.next()) {
-                    // SHOW TABLES returns the owning STABLE as its fourth column. It
-                    // is absent for ordinary tables and older servers, where this
-                    // best-effort read simply leaves the table at the root level.
-                    String parentName = includesStableName ? optionalString(rs, 4) : null;
-                    if (parentName != null && parentName.trim().isEmpty()) {
-                        parentName = null;
-                    }
-                    result.add(new TableInfo(rs.getString(1), tableType, null, null, parentName));
+                    result.add(readShowTable(rs, tableType, includesStableName));
                 }
             }
         }
         return result;
+    }
+
+    private TablePageScan queryTablesPage(
+        String sql,
+        String tableType,
+        boolean includesStableName,
+        int offset,
+        int limit
+    ) throws Exception {
+        List<TableInfo> result = new ArrayList<>(limit);
+        int scannedRows = 0;
+        try (java.sql.Statement stmt = requireConnected().createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (result.size() < limit && rs.next()) {
+                scannedRows += 1;
+                if (scannedRows <= offset) {
+                    continue;
+                }
+                result.add(readShowTable(rs, tableType, includesStableName));
+            }
+        }
+        return new TablePageScan(result, scannedRows);
+    }
+
+    private List<TableInfo> queryInformationSchemaTablePage(String database, int offset, int limit) throws Exception {
+        StringBuilder sql = new StringBuilder(
+            "SELECT table_name, stable_name FROM information_schema.ins_tables WHERE db_name = ? LIMIT "
+        ).append(limit);
+        if (offset > 0) {
+            sql.append(" OFFSET ").append(offset);
+        }
+
+        List<TableInfo> result = new ArrayList<>(limit);
+        try (java.sql.PreparedStatement stmt = requireConnected().prepareStatement(sql.toString())) {
+            stmt.setString(1, database);
+            try (ResultSet rs = stmt.executeQuery()) {
+                while (rs.next()) {
+                    String parentName = optionalString(rs, 2);
+                    if (parentName != null && parentName.trim().isEmpty()) {
+                        parentName = null;
+                    }
+                    result.add(new TableInfo(rs.getString(1), "TABLE", null, null, parentName));
+                }
+            }
+        }
+        return result;
+    }
+
+    private static TableInfo readShowTable(ResultSet rs, String tableType, boolean includesStableName) throws Exception {
+        // SHOW TABLES returns the owning STABLE as its fourth column. It
+        // is absent for ordinary tables and older servers, where this
+        // best-effort read simply leaves the table at the root level.
+        String parentName = includesStableName ? optionalString(rs, 4) : null;
+        if (parentName != null && parentName.trim().isEmpty()) {
+            parentName = null;
+        }
+        return new TableInfo(rs.getString(1), tableType, null, null, parentName);
+    }
+
+    private record TablePageScan(List<TableInfo> tables, int scannedRows) {
+    }
+
+    private static boolean supportsRestInformationSchemaPaging(Connection connection) {
+        if (unwrapConnection(connection, RestfulConnection.class) == null) {
+            return false;
+        }
+        try {
+            return supportsRestInformationSchemaPagingVersion(connection.getMetaData().getDatabaseProductVersion());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    static boolean supportsRestInformationSchemaPagingVersion(String version) {
+        Matcher matcher = TDENGINE_VERSION_PATTERN.matcher(version == null ? "" : version.trim());
+        if (!matcher.find()) {
+            return false;
+        }
+        int major = Integer.parseInt(matcher.group(1));
+        int minor = Integer.parseInt(matcher.group(2));
+        int patch = Integer.parseInt(matcher.group(3));
+        return major > 3 || (major == 3 && (minor > 3 || (minor == 3 && patch >= 8)));
     }
 
     private List<TableInfo> cachedTables(String schema) {
@@ -340,6 +530,12 @@ public final class TDengineAgent extends BaseDatabaseAgent {
             tableCacheTimeMillis = 0L;
             tableCache = Collections.emptyList();
         }
+    }
+
+    private void clearRestfulState() {
+        restfulStateConnection = null;
+        restfulOriginalCatalog = null;
+        restfulOriginalDatabase = null;
     }
 
     private static boolean cacheFresh(long cachedAtMillis) {
@@ -452,7 +648,8 @@ public final class TDengineAgent extends BaseDatabaseAgent {
         }
     }
 
-    private Object tdengineResultValue(ResultSet rs, int index, int sqlType) {
+    @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
             Object value = switch (sqlType) {
                 case Types.BIGINT -> rs.getLong(index);

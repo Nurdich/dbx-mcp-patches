@@ -61,12 +61,8 @@ pub fn with_env_defaults(mut args: ProxyProfileRefArgs) -> ProxyProfileRefArgs {
     if let Ok(names) = std::env::var("DBX_PROXY_PROFILE_NAMES") {
         let names = names.trim();
         if !names.is_empty() {
-            let list: Vec<String> = names
-                .split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
+            let list: Vec<String> =
+                names.split(',').map(str::trim).filter(|part| !part.is_empty()).map(ToOwned::to_owned).collect();
             if !list.is_empty() {
                 args.proxy_profile_names = Some(list);
             }
@@ -105,18 +101,12 @@ pub fn parse_proxy_ref_tokens(value: &str) -> Result<Vec<String>, String> {
 }
 
 pub fn list_proxy_profiles(profiles: &[TunnelProfile]) -> Vec<&TunnelProfile> {
-    profiles
-        .iter()
-        .filter(|profile| matches!(profile, TransportLayerConfig::Proxy(_)))
-        .collect()
+    profiles.iter().filter(|profile| matches!(profile, TransportLayerConfig::Proxy(_))).collect()
 }
 
 pub fn find_proxy_profiles_by_name<'a>(profiles: &'a [TunnelProfile], name: &str) -> Vec<&'a TunnelProfile> {
     let lower = name.trim().to_ascii_lowercase();
-    list_proxy_profiles(profiles)
-        .into_iter()
-        .filter(|profile| profile.name().eq_ignore_ascii_case(&lower))
-        .collect()
+    list_proxy_profiles(profiles).into_iter().filter(|profile| profile.name().eq_ignore_ascii_case(&lower)).collect()
 }
 
 pub fn resolve_proxy_profile_by_index<'a>(profiles: &'a [TunnelProfile], index: usize) -> Option<&'a TunnelProfile> {
@@ -181,9 +171,9 @@ fn resolve_one_proxy_token<'a>(profiles: &'a [TunnelProfile], token: &str) -> Re
         return Err("Empty proxy profile reference.".to_string());
     }
 
-    if let Some(match_by_id) = profiles.iter().find(|profile| {
-        matches!(profile, TransportLayerConfig::Proxy(_)) && profile.id() == token
-    }) {
+    if let Some(match_by_id) =
+        profiles.iter().find(|profile| matches!(profile, TransportLayerConfig::Proxy(_)) && profile.id() == token)
+    {
         return Ok(match_by_id);
     }
 
@@ -264,11 +254,8 @@ pub fn apply_proxy_profiles_failover(
     mut config: dbx_core::models::connection::ConnectionConfig,
     profiles: &[&ProxyTunnelConfig],
 ) -> dbx_core::models::connection::ConnectionConfig {
-    let kept: Vec<_> = config
-        .transport_layers
-        .into_iter()
-        .filter(|layer| !matches!(layer, TransportLayerConfig::Proxy(_)))
-        .collect();
+    let kept: Vec<_> =
+        config.transport_layers.into_iter().filter(|layer| !matches!(layer, TransportLayerConfig::Proxy(_))).collect();
     let mut layers = kept;
     for (index, profile) in profiles.iter().enumerate() {
         let mut layer = proxy_profile_reference_layer(profile, Uuid::new_v4().to_string());
@@ -314,8 +301,7 @@ pub fn format_proxy_list(profiles: &[TunnelProfile]) -> String {
     if proxies.is_empty() {
         return "No proxy tunnel profiles configured in DBX Settings > Tunnels.".to_string();
     }
-    let mut output =
-        String::from("| # | ID | Name | Endpoint | Enabled |\n| --- | --- | --- | --- | --- |");
+    let mut output = String::from("| # | ID | Name | Endpoint | Enabled |\n| --- | --- | --- | --- | --- |");
     for (idx, profile) in proxies.iter().enumerate() {
         let TransportLayerConfig::Proxy(proxy) = profile else {
             continue;

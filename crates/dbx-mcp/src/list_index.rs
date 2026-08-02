@@ -49,14 +49,10 @@ pub fn parse_list_index_range(value: &str) -> Result<Option<Vec<usize>>, ListInd
     };
 
     if start < 1 {
-        return Err(ListIndexRangeError {
-            message: format!("Range start must be >= 1. Got {start}."),
-        });
+        return Err(ListIndexRangeError { message: format!("Range start must be >= 1. Got {start}.") });
     }
     if start > end {
-        return Err(ListIndexRangeError {
-            message: format!("Invalid range: start ({start}) must be <= end ({end})."),
-        });
+        return Err(ListIndexRangeError { message: format!("Invalid range: start ({start}) must be <= end ({end}).") });
     }
 
     Ok(Some((start..=end).collect()))

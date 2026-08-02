@@ -43,6 +43,62 @@ class AbstractJdbcAgentTest {
 
         assertNull(agent.getConnection());
         assertEquals(1, tracking.closeCount);
+        assertEquals(1, agent.afterDisconnectCount);
+    }
+
+    @Test
+    void resolvesAndCachesGaussdbCompatibilityIdentifierQuotes() {
+        for (String mode : Arrays.asList("M", "B", "MYSQL")) {
+            TrackingConnection tracking = new TrackingConnection();
+            tracking.compatibilityMode = mode;
+            tracking.identifierQuote = "\"";
+            TestAgent agent = new TestAgent(tracking);
+
+            agent.connect(postgresCompatibleParams());
+
+            assertEquals("`", agent.getIdentifierQuote());
+            assertEquals("`", agent.getIdentifierQuote());
+            assertEquals(1, tracking.compatibilityQueryCount);
+        }
+
+        for (String mode : Arrays.asList("A", "PG", "ORA", "POSTGRESQL")) {
+            TrackingConnection tracking = new TrackingConnection();
+            tracking.compatibilityMode = mode;
+            tracking.identifierQuote = "`";
+            TestAgent agent = new TestAgent(tracking);
+
+            agent.connect(postgresCompatibleParams());
+
+            assertEquals("\"", agent.getIdentifierQuote());
+            assertEquals(1, tracking.compatibilityQueryCount);
+        }
+    }
+
+    @Test
+    void fallsBackToJdbcMetadataWhenCompatibilityQueryFails() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.compatibilityQueryFails = true;
+        tracking.identifierQuote = "`";
+        TestAgent agent = new TestAgent(tracking);
+
+        agent.connect(postgresCompatibleParams());
+
+        assertEquals("`", agent.getIdentifierQuote());
+        assertEquals(1, tracking.compatibilityQueryCount);
+    }
+
+    @Test
+    void skipsCompatibilityQueryForOtherJdbcFamilies() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.identifierQuote = "`";
+        TestAgent agent = new TestAgent(tracking);
+
+        ConnectParams params = new ConnectParams();
+        params.setConnection_string("jdbc:mysql://localhost/test");
+        agent.connect(params);
+
+        assertEquals("`", agent.getIdentifierQuote());
+        assertEquals(0, tracking.compatibilityQueryCount);
     }
 
     @Test
@@ -110,6 +166,18 @@ class AbstractJdbcAgentTest {
         assertEquals(1, tracking.openCount);
         assertEquals(1, tracking.isValidCount);
         assertEquals(1, tracking.closeCount);
+    }
+
+    @Test
+    void testConnectionCanSkipOpeningAPhysicalConnection() {
+        TrackingConnection tracking = new TrackingConnection();
+        TestAgent agent = new TestAgent(tracking);
+        agent.skipTestConnectionOpen = true;
+
+        assertFalse(agent.testConnection(new ConnectParams()));
+
+        assertEquals(0, tracking.openCount);
+        assertEquals(0, tracking.closeCount);
     }
 
     @Test
@@ -310,6 +378,8 @@ class AbstractJdbcAgentTest {
     private static class TestAgent extends AbstractJdbcAgent {
         private final TrackingConnection tracking;
         private int afterConnectCount;
+        private int afterDisconnectCount;
+        private boolean skipTestConnectionOpen;
 
         private TestAgent(TrackingConnection tracking) {
             this.tracking = tracking;
@@ -332,8 +402,18 @@ class AbstractJdbcAgentTest {
         }
 
         @Override
+        protected Connection openTestConnection(ConnectParams params) {
+            return skipTestConnectionOpen ? null : openConnection(params);
+        }
+
+        @Override
         protected void afterConnect(ConnectParams params, Connection connection) {
             afterConnectCount += 1;
+        }
+
+        @Override
+        protected void afterDisconnect() {
+            afterDisconnectCount += 1;
         }
 
         @Override

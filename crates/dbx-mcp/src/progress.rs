@@ -38,11 +38,7 @@ pub fn push_progress(options: ProgressOptions) -> ProgressGuard {
 pub fn mcp_progress_options() -> ProgressOptions {
     let quiet = env_truthy("DBX_MCP_QUIET");
     let verbose = env_truthy("DBX_MCP_VERBOSE");
-    ProgressOptions {
-        quiet,
-        verbose,
-        collector: Some(Arc::new(Mutex::new(Vec::new()))),
-    }
+    ProgressOptions { quiet, verbose, collector: Some(Arc::new(Mutex::new(Vec::new()))) }
 }
 
 pub fn cli_progress_options(quiet: bool, verbose: bool) -> ProgressOptions {
@@ -50,9 +46,9 @@ pub fn cli_progress_options(quiet: bool, verbose: bool) -> ProgressOptions {
 }
 
 fn env_truthy(name: &str) -> bool {
-    std::env::var(name).ok().is_some_and(|value| {
-        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
-    })
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
 pub fn connection_log(message: impl AsRef<str>, verbose_only: bool) {
@@ -95,10 +91,7 @@ pub fn describe_connection_target(config: &ConnectionConfig) -> String {
 }
 
 pub fn log_using_connection(config: &ConnectionConfig) {
-    connection_log(
-        format!("Using connection \"{}\" ({})", config.name, describe_connection_target(config)),
-        false,
-    );
+    connection_log(format!("Using connection \"{}\" ({})", config.name, describe_connection_target(config)), false);
     let proxy_layers: Vec<_> = config
         .transport_layers
         .iter()
@@ -124,10 +117,7 @@ pub fn log_using_connection(config: &ConnectionConfig) {
             })
             .collect();
         connection_log(
-            format!(
-                "Proxy failover candidates: {} (try next on failure, not multi-hop chained)",
-                labels.join(", ")
-            ),
+            format!("Proxy failover candidates: {} (try next on failure, not multi-hop chained)", labels.join(", ")),
             false,
         );
     }
@@ -141,11 +131,7 @@ pub fn log_using_connection(config: &ConnectionConfig) {
                     connection_log(
                         format!(
                             "Using saved proxy profile: {}",
-                            if proxy.name.is_empty() {
-                                &proxy.profile_id
-                            } else {
-                                &proxy.name
-                            }
+                            if proxy.name.is_empty() { &proxy.profile_id } else { &proxy.name }
                         ),
                         false,
                     );
@@ -178,11 +164,7 @@ pub fn log_using_connection(config: &ConnectionConfig) {
                         ssh.user,
                         ssh.host,
                         if ssh.port == 0 { 22 } else { ssh.port },
-                        if label.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" ({label})")
-                        }
+                        if label.is_empty() { String::new() } else { format!(" ({label})") }
                     ),
                     false,
                 );
@@ -193,11 +175,7 @@ pub fn log_using_connection(config: &ConnectionConfig) {
 }
 
 pub fn collector_text(options: &ProgressOptions) -> String {
-    options
-        .collector
-        .as_ref()
-        .and_then(|collector| collector.lock().ok().map(|logs| logs.join("")))
-        .unwrap_or_default()
+    options.collector.as_ref().and_then(|collector| collector.lock().ok().map(|logs| logs.join(""))).unwrap_or_default()
 }
 
 pub fn format_progress_section(progress: &str) -> String {

@@ -1,7 +1,6 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type * as TauriModule from "@/lib/backend/tauri";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { isRemoteApiConfigured } from "@/lib/backend/remoteApiConfig";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
@@ -13,16 +12,9 @@ type Backend = typeof TauriModule;
 
 let _backend: Backend | null = null;
 
-/** Clear cached backend so the next call re-resolves (e.g. after Remote API settings change). */
-export function resetBackend(): void {
-  _backend = null;
-}
-
 async function getBackend(): Promise<Backend> {
   if (_backend) return _backend;
-  // Remote API mode: local UI (including Tauri) talks to dbx-web over HTTP.
-  const useHttp = isRemoteApiConfigured() || !isTauriRuntime(globalThis);
-  _backend = useHttp ? await import("@/lib/backend/http") : await import("@/lib/backend/tauri");
+  _backend = isTauriRuntime(globalThis) ? await import("@/lib/backend/tauri") : await import("@/lib/backend/http");
   return _backend;
 }
 
@@ -146,6 +138,7 @@ export const syncSavedSqlDirectory = forward("syncSavedSqlDirectory");
 // Schema
 export const listDatabases = forward("listDatabases");
 export const listDatabaseStorage = forward("listDatabaseStorage");
+export const getSqlServerCompletionContext = forward("getSqlServerCompletionContext");
 export const listDorisCatalogs = forward("listDorisCatalogs");
 export const listDorisCatalogDatabases = forward("listDorisCatalogDatabases");
 export const listSqlServerLinkedServers = forward("listSqlServerLinkedServers");
@@ -309,6 +302,9 @@ export const snippetSyncTest = forward("snippetSyncTest");
 export const snippetTokenStatus = forward("snippetTokenStatus");
 export const saveSnippetSavedToken = forward("saveSnippetSavedToken");
 export const forgetSnippetSavedToken = forward("forgetSnippetSavedToken");
+export const snippetSyncSettings = forward("snippetSyncSettings");
+export const saveSnippetSyncId = forward("saveSnippetSyncId");
+export const retrySnippetLegacyCleanup = forward("retrySnippetLegacyCleanup");
 export const snippetSyncUpload = forward("snippetSyncUpload");
 export const snippetSyncDownload = forward("snippetSyncDownload");
 export const saveAiConversation = forward("saveAiConversation");
@@ -400,6 +396,8 @@ export const redisScanKeys = forward("redisScanKeys");
 export const redisScanKeysBatch = forward("redisScanKeysBatch");
 export const redisScanValues = forward("redisScanValues");
 export const redisGetValue = forward("redisGetValue");
+export const redisGetTtl = forward("redisGetTtl");
+export const redisGetStreamEntries = forward("redisGetStreamEntries");
 export const redisGetStreamGroups = forward("redisGetStreamGroups");
 export const redisGetStreamConsumers = forward("redisGetStreamConsumers");
 export const redisGetStreamPending = forward("redisGetStreamPending");
@@ -437,6 +435,15 @@ export const etcdDelete = forward("etcdDelete");
 export const etcdRename = forward("etcdRename");
 export const etcdHistory = forward("etcdHistory");
 export const etcdStatus = forward("etcdStatus");
+export const etcdPreflight = forward("etcdPreflight");
+export const etcdCompact = forward("etcdCompact");
+export const etcdDefrag = forward("etcdDefrag");
+export const etcdWatchStart = forward("etcdWatchStart");
+export const etcdWatchPoll = forward("etcdWatchPoll");
+export const etcdWatchStop = forward("etcdWatchStop");
+export const etcdLeaseList = forward("etcdLeaseList");
+export const etcdLeaseCall = forward("etcdLeaseCall");
+export const etcdAuthCall = forward("etcdAuthCall");
 
 // ZooKeeper
 export const zookeeperListPrefix = forward("zookeeperListPrefix");
@@ -589,6 +596,7 @@ export const checkForUpdates = forward("checkForUpdates");
 export const fetchChangelog = forward("fetchChangelog");
 export const getSystemProxyUrl = forward("getSystemProxyUrl");
 export const downloadUpdate = forward("downloadUpdate");
+export const cancelUpdateDownload = forward("cancelUpdateDownload");
 export const installDownloadedUpdate = forward("installDownloadedUpdate");
 export const getAppVersion = forward("getAppVersion");
 export const getAppSupportInfo = forward("getAppSupportInfo");
@@ -631,6 +639,7 @@ export type {
   WebDavDownloadResult,
   SnippetProvider,
   SnippetSyncConfig,
+  SnippetSyncSettings,
   SnippetSyncSummary,
   SnippetDownloadResult,
   SnippetTokenStatus,
@@ -648,6 +657,7 @@ export type {
   RedisStreamField,
   RedisStreamGroup,
   RedisStreamMetric,
+  RedisStreamPage,
   RedisStreamPendingEntry,
   RedisStreamPendingPage,
   RedisValue,
@@ -679,6 +689,20 @@ export type {
   KvStatusMember,
   KvPrometheusMetrics,
   KvStatusResponse,
+  EtcdDefragResponse,
+  EtcdDefragMemberResult,
+  EtcdWatchStartRequest,
+  EtcdWatchStartResponse,
+  EtcdWatchPollResponse,
+  EtcdLeaseListResponse,
+  EtcdLeaseDetail,
+  EtcdAuthUserListResponse,
+  EtcdAuthUserDetail,
+  EtcdAuthPermission,
+  EtcdAuthRoleListResponse,
+  EtcdAuthRoleDetail,
+  EtcdPreflightResponse,
+  EtcdDangerousApproval,
   DocumentQueryResult,
   MongoDocumentResult,
   HistoryEntry,

@@ -254,6 +254,7 @@ public final class JdbcExecutor {
             applySchema(conn, schema, setSchemaSql, resetSchemaSql);
 
             Statement stmt = conn.createStatement();
+            QuerySession createdSession = null;
             activeStatements.add(stmt);
             try {
                 applyQueryTimeout(stmt, options.getTimeoutSecs());
@@ -303,9 +304,13 @@ public final class JdbcExecutor {
                     Math.max(options.getMaxRows(), 1),
                     valueReader
                 );
+                createdSession = session;
                 targetSessions.put(sessionId, session);
                 return readSessionPage(targetSessions, session, options.getPageSize(), elapsed);
             } catch (Exception e) {
+                if (createdSession != null) {
+                    closeSession(targetSessions, createdSession.id);
+                }
                 activeStatements.remove(stmt);
                 try {
                     stmt.close();
@@ -354,6 +359,23 @@ public final class JdbcExecutor {
         // session-owned cursors as part of the same cancellation boundary.
         closeAllQuerySessions();
         closeAllTableReadSessions();
+    }
+
+    public boolean hasOpenSessions() {
+        return !sessions.isEmpty() || !tableReadSessions.isEmpty();
+    }
+
+    public boolean hasActiveStatements() {
+        return !activeStatements.isEmpty();
+    }
+
+    public int expireIdleResources() {
+        return expireIdleQuerySessions() + expireIdleTableReadSessions();
+    }
+
+    int expireIdleResources(long nowMillis, long idleTimeoutMillis) {
+        return expireIdleQuerySessions(nowMillis, idleTimeoutMillis)
+            + expireIdleTableReadSessions(nowMillis, idleTimeoutMillis);
     }
 
     public int expireIdleQuerySessions() {
@@ -433,8 +455,10 @@ public final class JdbcExecutor {
             case Types.BINARY:
             case Types.VARBINARY:
             case Types.LONGVARBINARY:
-            case Types.BLOB:
                 value = bytesToHex(rs.getBytes(index));
+                break;
+            case Types.BLOB:
+                value = blobResultValue(rs, index);
                 break;
             case Types.SQLXML:
                 value = sqlXmlToString(rs.getSQLXML(index));
@@ -452,8 +476,10 @@ public final class JdbcExecutor {
             case Types.BINARY:
             case Types.VARBINARY:
             case Types.LONGVARBINARY:
-            case Types.BLOB:
                 value = bytesToHex(rs.getBytes(index));
+                break;
+            case Types.BLOB:
+                value = blobResultValue(rs, index);
                 break;
             case Types.SQLXML:
                 value = sqlXmlToString(rs.getSQLXML(index));
@@ -463,6 +489,17 @@ public final class JdbcExecutor {
                 break;
         }
         return rs.wasNull() ? null : value;
+    }
+
+    private static Object blobResultValue(ResultSet rs, int index) throws SQLException {
+        Object value = rs.getObject(index);
+        if (value instanceof Blob || value instanceof byte[]) {
+            return normalizeResultValue(value);
+        }
+        if (value == null && rs.wasNull()) {
+            return null;
+        }
+        return bytesToHex(rs.getBytes(index));
     }
 
     public static Object normalizeResultValue(Object value) throws SQLException {
@@ -516,7 +553,12 @@ public final class JdbcExecutor {
             throw new IllegalArgumentException(missingMessage);
         }
         synchronized (session) {
-            return readSessionPage(targetSessions, session, pageSize, 0L);
+            try {
+                return readSessionPage(targetSessions, session, pageSize, 0L);
+            } catch (RuntimeException | Error error) {
+                closeSession(targetSessions, sessionId);
+                throw error;
+            }
         }
     }
 

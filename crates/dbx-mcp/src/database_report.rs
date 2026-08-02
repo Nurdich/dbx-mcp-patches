@@ -5,9 +5,9 @@ use dbx_core::types::QueryResult;
 
 use crate::backend::DbxBackend;
 use crate::database_stats::{
-    build_catalog_stats_sql, db_type_key, fetch_database_stats, format_stats_overview_table,
-    is_non_catalog_stats_type, resolve_catalog_stats_scope, unsupported_stats_overview_message,
-    CatalogStatsScope, DatabaseStatsError, DatabaseStatsOptions,
+    build_catalog_stats_sql, db_type_key, fetch_database_stats, format_stats_overview_table, is_non_catalog_stats_type,
+    resolve_catalog_stats_scope, unsupported_stats_overview_message, CatalogStatsScope, DatabaseStatsError,
+    DatabaseStatsOptions,
 };
 
 fn sql_literal(value: &str) -> String {
@@ -117,7 +117,8 @@ fn format_query_as_markdown(title: &str, result: &QueryResult) -> String {
         return format!("## {title}\n\n(none)\n");
     }
     let headers: Vec<&str> = result.columns.iter().map(String::as_str).collect();
-    let mut output = format!("## {title}\n\n| {} |\n| {} |", headers.join(" | "), vec!["---"; headers.len()].join(" | "));
+    let mut output =
+        format!("## {title}\n\n| {} |\n| {} |", headers.join(" | "), vec!["---"; headers.len()].join(" | "));
     for row in &result.rows {
         let cells: Vec<String> = result
             .columns

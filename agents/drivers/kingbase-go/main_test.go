@@ -48,8 +48,9 @@ type fakeRows struct {
 }
 
 type fallbackDriverState struct {
-	mu      sync.Mutex
-	queries []string
+	mu                sync.Mutex
+	queries           []string
+	rejectAttidentity bool
 }
 
 type fallbackDriver struct{}
@@ -203,17 +204,24 @@ func (connection *fallbackConn) QueryContext(_ context.Context, query string, _ 
 	}
 	if strings.Contains(query, "FROM information_schema.columns c") {
 		return &valueRows{
-			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
-			rows:    [][]driver.Value{{"id", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"id", "integer", "integer", "NO", nil, "primary key", int64(32), int64(0), nil}},
 		}, nil
+	}
+	if connection.state.rejectAttidentity && strings.Contains(query, "a.attidentity") {
+		return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column a.attidentity does not exist"}
 	}
 	if strings.Contains(query, "sys_get_expr(") {
 		return nil, &gokb.Error{Code: gokb.ErrorCode("42883"), Message: "function sys_get_expr(pg_node_tree, oid) does not exist"}
 	}
 	if strings.Contains(query, "pg_get_expr(") {
+		var identity driver.Value = "d"
+		if strings.Contains(query, "CAST(NULL AS varchar(1)) AS attidentity") {
+			identity = nil
+		}
 		return &valueRows{
 			columns: []string{"column_name", "data_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length", "attidentity"},
-			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, "d"}},
+			rows:    [][]driver.Value{{"id", "integer", false, nil, nil, int64(32), int64(0), nil, identity}},
 		}, nil
 	}
 	return nil, errors.New("unexpected query: " + query)
@@ -906,6 +914,51 @@ func TestColumnsFallbackToPgGetExprAndCacheChoice(t *testing.T) {
 	}
 }
 
+func TestColumnsFallbackWhenCatalogHasNoAttidentityAndCacheChoice(t *testing.T) {
+	registerExpressionFallbackDriver.Do(func() { sql.Register("kingbase-expression-fallback-test", fallbackDriver{}) })
+	state := &fallbackDriverState{rejectAttidentity: true}
+	expressionFallbackState.Store(state)
+	db, err := sql.Open("kingbase-expression-fallback-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	server := newServer()
+	server.db = db
+
+	for call := 0; call < 2; call++ {
+		columns, err := server.getColumns("public", "orders")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(columns) != 1 || columns[0].Extra != nil {
+			t.Fatalf("unexpected columns: %#v", columns)
+		}
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	var identityCalls, compatibleCalls, sysCalls, pgCalls int
+	for _, query := range state.queries {
+		if strings.Contains(query, "a.attidentity") {
+			identityCalls++
+		}
+		if strings.Contains(query, "CAST(NULL AS varchar(1)) AS attidentity") {
+			compatibleCalls++
+		}
+		if strings.Contains(query, "sys_get_expr(") {
+			sysCalls++
+		}
+		if strings.Contains(query, "pg_get_expr(") {
+			pgCalls++
+		}
+	}
+	if identityCalls != 1 || compatibleCalls != 3 || sysCalls != 2 || pgCalls != 2 {
+		t.Fatalf("fallback choices were not cached: identity=%d compatible=%d sys=%d pg=%d queries=%v", identityCalls, compatibleCalls, sysCalls, pgCalls, state.queries)
+	}
+}
+
 func TestKingbaseIdentityClausesAreExposedAndRendered(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1009,6 +1062,153 @@ func TestColumnDDLDefinitionPreservesCompatibilityExtras(t *testing.T) {
 	}
 	if extra := kingbaseIdentityClause(""); extra != nil {
 		t.Fatalf("non-identity column must not expose an extra clause: %#v", extra)
+	}
+}
+
+func TestColumnDDLDefinitionRestoresMySQLCompatibilityTypeModifiers(t *testing.T) {
+	length := 64
+	precision := 12
+	scale := 4
+	tests := []struct {
+		name   string
+		column columnInfo
+		want   string
+	}{
+		{name: "varchar length", column: columnInfo{Name: "label", DataType: "varchar", IsNullable: true, CharacterMaximumLength: &length}, want: `"label" varchar(64)`},
+		{name: "numeric precision and scale", column: columnInfo{Name: "amount", DataType: "numeric", IsNullable: true, NumericPrecision: &precision, NumericScale: &scale}, want: `"amount" numeric(12,4)`},
+		{name: "existing modifier", column: columnInfo{Name: "code", DataType: "VARCHAR(64)", IsNullable: true, CharacterMaximumLength: &length}, want: `"code" VARCHAR(64)`},
+		{name: "unsigned", column: columnInfo{Name: "count", DataType: "integer", FullDataType: "integer unsigned", IsNullable: true}, want: `"count" integer unsigned`},
+		{name: "enum values", column: columnInfo{Name: "status", DataType: "enum", FullDataType: "enum('new','done')", IsNullable: true}, want: `"status" enum('new','done')`},
+		{name: "datetime precision", column: columnInfo{Name: "created_at", DataType: "datetime", FullDataType: "datetime(6)", IsNullable: true}, want: `"created_at" datetime(6)`},
+		{name: "bit length", column: columnInfo{Name: "mask", DataType: "bit", FullDataType: "bit(8)", IsNullable: true}, want: `"mask" bit(8)`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := columnDDLDefinition(test.column); got != test.want {
+				t.Fatalf("unexpected column DDL: got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestInformationSchemaColumnsPreserveFullTypesInDDL(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if !strings.Contains(query, "c.column_type") || !strings.Contains(query, "THEN c.udt_name") {
+			return nil, errors.New("full column type was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows: [][]driver.Value{
+				{"count", "integer", "integer unsigned", "YES", nil, nil, int64(32), int64(0), nil},
+				{"status", "enum", "enum('new','done')", "YES", nil, nil, nil, nil, nil},
+				{"created_at", "datetime", "datetime(6)", "YES", nil, nil, nil, nil, nil},
+				{"mask", "bit", "bit(8)", "YES", nil, nil, nil, nil, nil},
+			},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	columns, err := server.informationSchemaColumns("public", "orders", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 4 || columns[0].DataType != "integer" || columns[0].FullDataType != "integer unsigned" {
+		t.Fatalf("unexpected metadata columns: %#v", columns)
+	}
+	ddl := renderTableDDL("public", "orders", columns, nil)
+	for _, expected := range []string{
+		`"count" integer unsigned`,
+		`"status" enum('new','done')`,
+		`"created_at" datetime(6)`,
+		`"mask" bit(8)`,
+	} {
+		if !strings.Contains(ddl, expected) {
+			t.Fatalf("table DDL missing %q:\n%s", expected, ddl)
+		}
+	}
+}
+
+func TestInformationSchemaColumnsResolveUserDefinedTypeWithoutColumnType(t *testing.T) {
+	state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+		if strings.Contains(query, "c.column_type") {
+			return nil, &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.column_type does not exist"}
+		}
+		if !strings.Contains(query, "THEN c.udt_name") {
+			return nil, errors.New("user-defined type name was not requested")
+		}
+		return &valueRows{
+			columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+			rows:    [][]driver.Value{{"created_at", "USER-DEFINED", "datetime", "YES", nil, nil, nil, nil, nil}},
+		}, nil
+	}}
+	server := newServer()
+	server.db = openMetadataDB(t, state)
+
+	columns, err := server.informationSchemaColumns("public", "orders", map[string]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(columns) != 1 || columns[0].FullDataType != "datetime" {
+		t.Fatalf("unexpected user-defined metadata columns: %#v", columns)
+	}
+	if ddl := renderTableDDL("public", "orders", columns, nil); !strings.Contains(ddl, `"created_at" datetime`) || strings.Contains(ddl, "USER-DEFINED") {
+		t.Fatalf("unexpected user-defined type DDL:\n%s", ddl)
+	}
+}
+
+func TestInformationSchemaColumnsFallsBackOnlyForMissingColumnType(t *testing.T) {
+	tests := []struct {
+		name         string
+		firstError   error
+		wantFallback bool
+	}{
+		{name: "missing column_type", firstError: &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.column_type does not exist"}, wantFallback: true},
+		{name: "different missing column", firstError: &gokb.Error{Code: gokb.ErrorCode("42703"), Message: "column c.other_column does not exist"}},
+		{name: "other metadata error", firstError: errors.New("metadata connection reset")},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &metadataDriverState{query: func(query string) (driver.Rows, error) {
+				if strings.Contains(query, "c.column_type") {
+					return nil, test.firstError
+				}
+				if !strings.Contains(query, "THEN c.udt_name") || !strings.Contains(query, "END AS column_type") {
+					return nil, errors.New("unexpected fallback query: " + query)
+				}
+				return &valueRows{
+					columns: []string{"column_name", "data_type", "column_type", "is_nullable", "column_default", "column_comment", "numeric_precision", "numeric_scale", "character_maximum_length"},
+					rows:    [][]driver.Value{{"label", "varchar", nil, "YES", nil, nil, nil, nil, int64(64)}},
+				}, nil
+			}}
+			server := newServer()
+			server.db = openMetadataDB(t, state)
+
+			columns, err := server.informationSchemaColumns("public", "orders", map[string]bool{})
+			if test.wantFallback {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(columns) != 1 || columnDDLDefinition(columns[0]) != `"label" varchar(64)` {
+					t.Fatalf("unexpected fallback columns: %#v", columns)
+				}
+			} else if !errors.Is(err, test.firstError) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			state.mu.Lock()
+			queries := append([]string(nil), state.queries...)
+			state.mu.Unlock()
+			wantQueries := 1
+			if test.wantFallback {
+				wantQueries = 2
+			}
+			if len(queries) != wantQueries {
+				t.Fatalf("unexpected query count: got %d, want %d: %v", len(queries), wantQueries, queries)
+			}
+		})
 	}
 }
 

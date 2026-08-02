@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   databaseAfterCatalogChange,
   databaseOptionsForConnection,
+  fetchCatalogNamespaceOptions,
   fetchNamespaceOptionsForConnection,
   fetchSqlFileTargetOptions,
   namespaceOptionsAreSchemas,
@@ -16,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   listDatabases: vi.fn(),
   listSchemas: vi.fn(),
+  redisListDatabases: vi.fn(),
+  mongoListDatabases: vi.fn(),
   listDorisCatalogs: vi.fn(),
   listDorisCatalogDatabases: vi.fn(),
 }));
@@ -23,6 +26,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/backend/api", () => ({
   listDatabases: mocks.listDatabases,
   listSchemas: mocks.listSchemas,
+  redisListDatabases: mocks.redisListDatabases,
+  mongoListDatabases: mocks.mongoListDatabases,
   listDorisCatalogs: mocks.listDorisCatalogs,
   listDorisCatalogDatabases: mocks.listDorisCatalogDatabases,
 }));
@@ -130,6 +135,19 @@ describe("namespace options", () => {
     ).toEqual(["analytics"]);
   });
 
+  it("preserves visible database filtering for catalog-scoped transfer options", async () => {
+    mocks.listDorisCatalogDatabases.mockResolvedValue([{ name: "app" }, { name: "analytics" }]);
+
+    await expect(
+      fetchCatalogNamespaceOptions("connection-1", "hive", {
+        db_type: "starrocks",
+        visible_databases: ["analytics"],
+      }),
+    ).resolves.toEqual(["analytics"]);
+
+    expect(mocks.listDorisCatalogDatabases).toHaveBeenCalledWith("connection-1", "hive");
+  });
+
   it("propagates metadata loading errors", async () => {
     const error = new Error("schema metadata failed");
     mocks.listSchemas.mockRejectedValue(error);
@@ -169,5 +187,35 @@ describe("namespace options", () => {
     expect(databaseOptions.value["connection-1"]).toEqual([]);
     expect(mocks.listDatabases).toHaveBeenCalledWith("connection-1");
     expect(mocks.listSchemas).not.toHaveBeenCalled();
+  });
+});
+
+describe("database options loader", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("uses the Redis database API", async () => {
+    mocks.getConfig.mockReturnValue({ db_type: "redis" });
+    mocks.redisListDatabases.mockResolvedValue([{ db: 0 }, { db: 1 }]);
+    const options = useDatabaseOptions();
+
+    await options.loadDatabaseOptions("connection-1");
+
+    expect(options.databaseOptions.value["connection-1"]).toEqual(["0", "1"]);
+    expect(mocks.redisListDatabases).toHaveBeenCalledWith("connection-1");
+    expect(mocks.listDatabases).not.toHaveBeenCalled();
+  });
+
+  it("uses the MongoDB database API", async () => {
+    mocks.getConfig.mockReturnValue({ db_type: "mongodb" });
+    mocks.mongoListDatabases.mockResolvedValue(["app", "analytics"]);
+    const options = useDatabaseOptions();
+
+    await options.loadDatabaseOptions("connection-1");
+
+    expect(options.databaseOptions.value["connection-1"]).toEqual(["app", "analytics"]);
+    expect(mocks.mongoListDatabases).toHaveBeenCalledWith("connection-1");
+    expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 });

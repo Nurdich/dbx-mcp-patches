@@ -9,13 +9,22 @@ use serde_json::Value;
 use crate::backend::DbxBackend;
 
 const MYSQL_STATS_TYPES: &[&str] = &["mysql", "doris", "starrocks", "manticoresearch"];
-const POSTGRES_STATS_TYPES: &[&str] = &[
-    "postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "dameng",
-];
+const POSTGRES_STATS_TYPES: &[&str] =
+    &["postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "dameng"];
 const SQLITE_STATS_TYPES: &[&str] = &["sqlite", "rqlite"];
 const NON_CATALOG_STATS_TYPES: &[&str] = &[
-    "elasticsearch", "etcd", "neo4j", "cassandra", "milvus", "qdrant", "weaviate", "chromadb", "zookeeper", "mq",
-    "kafka", "influxdb",
+    "elasticsearch",
+    "etcd",
+    "neo4j",
+    "cassandra",
+    "milvus",
+    "qdrant",
+    "weaviate",
+    "chromadb",
+    "zookeeper",
+    "mq",
+    "kafka",
+    "influxdb",
 ];
 
 #[derive(Debug, Clone, Default)]
@@ -187,9 +196,10 @@ fn parse_row_count(row: &HashMap<String, Value>) -> Option<f64> {
         if value.is_null() {
             continue;
         }
-        let n = value.as_f64().or_else(|| value.as_i64().map(|v| v as f64)).or_else(|| {
-            value.as_str().and_then(|s| s.parse().ok())
-        })?;
+        let n = value
+            .as_f64()
+            .or_else(|| value.as_i64().map(|v| v as f64))
+            .or_else(|| value.as_str().and_then(|s| s.parse().ok()))?;
         if n.is_finite() && n >= 0.0 {
             return Some(n);
         }
@@ -255,9 +265,8 @@ fn markdown_table(headers: &[&str], rows: &[Vec<String>]) -> String {
 
 pub fn format_stats_overview_table(result: &QueryResult) -> String {
     let sorted = sort_stats_rows(row_maps(result));
-    let has_database = sorted.iter().any(|row| {
-        row.get("database_name").is_some_and(|value| !format_cell(value).trim().is_empty())
-    });
+    let has_database =
+        sorted.iter().any(|row| row.get("database_name").is_some_and(|value| !format_cell(value).trim().is_empty()));
     let has_schema = !has_database
         && sorted.iter().any(|row| row.get("schema_name").is_some_and(|value| !format_cell(value).trim().is_empty()));
     let headers: &[&str] = if has_database {
@@ -304,7 +313,12 @@ fn unique_non_empty_field_count(rows: &[HashMap<String, Value>], field: &str) ->
     seen.len()
 }
 
-fn derive_catalog_summary(db_type: &str, scope: &CatalogStatsScope, stats: &QueryResult, config: &ConnectionConfig) -> String {
+fn derive_catalog_summary(
+    db_type: &str,
+    scope: &CatalogStatsScope,
+    stats: &QueryResult,
+    config: &ConnectionConfig,
+) -> String {
     let rows = row_maps(stats);
     let table_count = rows.len();
     if is_mysql(db_type) {
@@ -334,9 +348,10 @@ async fn fetch_redis_stats(
     config: &ConnectionConfig,
     options: &DatabaseStatsOptions,
 ) -> Result<String, DatabaseStatsError> {
-    let redis_db = options.redis_db.or_else(|| {
-        config.database.as_deref().and_then(|value| value.trim().parse().ok())
-    }).unwrap_or(0);
+    let redis_db = options
+        .redis_db
+        .or_else(|| config.database.as_deref().and_then(|value| value.trim().parse().ok()))
+        .unwrap_or(0);
     let info = backend
         .execute_redis_command(config, redis_db, "INFO", false)
         .await
@@ -407,7 +422,16 @@ pub async fn fetch_database_stats(
         let limit = tables.len().min(50);
         let mut rows = Vec::new();
         for table in tables.iter().take(limit) {
-            match backend.execute_query(config, &database, &format!("db.{}.stats()", table.name), None, options.timeout_ms.map(|ms| (ms + 999) / 1000)).await {
+            match backend
+                .execute_query(
+                    config,
+                    &database,
+                    &format!("db.{}.stats()", table.name),
+                    None,
+                    options.timeout_ms.map(|ms| (ms + 999) / 1000),
+                )
+                .await
+            {
                 Ok(result) => {
                     let map = row_maps(&result).into_iter().next().unwrap_or_default();
                     rows.push(vec![

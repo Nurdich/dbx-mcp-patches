@@ -17,10 +17,7 @@ fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
 }
 
 pub fn policy_allows_connection(policy: &McpGlobalPolicy, connection: &ConnectionConfig) -> bool {
-    policy
-        .allowed_connection_ids
-        .as_ref()
-        .is_none_or(|allowed| allowed.iter().any(|id| id == &connection.id))
+    policy.allowed_connection_ids.as_ref().is_none_or(|allowed| allowed.iter().any(|id| id == &connection.id))
 }
 
 fn filter_scoped(
@@ -42,14 +39,8 @@ pub async fn resolve_connections(
     connection_id: Option<&str>,
     connection_name: Option<&str>,
 ) -> Result<Vec<ConnectionConfig>, CallToolResult> {
-    let policy = backend
-        .load_mcp_global_policy()
-        .await
-        .map_err(|error| tool_error("MCP_POLICY_UNAVAILABLE", error))?;
-    let connections = backend
-        .load_connections()
-        .await
-        .map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
+    let policy = backend.load_mcp_global_policy().await.map_err(|error| tool_error("MCP_POLICY_UNAVAILABLE", error))?;
+    let connections = backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
     let scoped = filter_scoped(connections, scope, &policy);
 
     if let Some(id) = connection_id.map(str::trim).filter(|id| !id.is_empty()) {
@@ -91,8 +82,7 @@ pub async fn resolve_connections(
         return resolve_by_indexes(&scoped, &indexes);
     }
 
-    let matching: Vec<_> =
-        scoped.into_iter().filter(|connection| connection.name.eq_ignore_ascii_case(name)).collect();
+    let matching: Vec<_> = scoped.into_iter().filter(|connection| connection.name.eq_ignore_ascii_case(name)).collect();
     match matching.as_slice() {
         [] => Err(tool_error("CONNECTION_NOT_FOUND", format!("Connection \"{name}\" not found."))),
         [connection] => Ok(vec![connection.clone()]),
@@ -186,10 +176,7 @@ pub async fn apply_proxy_override_with_args(
         ));
     }
 
-    let profiles = backend
-        .load_tunnel_profiles()
-        .await
-        .map_err(|error| tool_error("PROXY_LOAD_ERROR", error))?;
+    let profiles = backend.load_tunnel_profiles().await.map_err(|error| tool_error("PROXY_LOAD_ERROR", error))?;
 
     let resolved = match resolve_proxy_profiles(&profiles, &args) {
         Ok(list) if !list.is_empty() => list,

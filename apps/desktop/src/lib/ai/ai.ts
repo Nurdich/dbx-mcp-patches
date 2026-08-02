@@ -80,6 +80,8 @@ export interface AiContext {
   connectionName: string;
   databaseType: DatabaseType;
   database: string;
+  /** Selected schema when it is distinct from the connection database (for example Dameng). */
+  schema?: string;
   currentSql: string;
   lastError?: string;
   lastResultPreview?: string;
@@ -98,9 +100,15 @@ export interface AiRequestInput {
   allowWriteSql?: boolean;
   /** When allowWriteSql is true, the specific write SQL the user confirmed. */
   confirmedWriteSql?: string;
-  /** Connection/database snapshot at confirmation time; verified at backend. */
+  /** Connection/database/schema snapshot at confirmation time; verified at backend. */
   confirmedConnectionId?: string;
   confirmedDatabase?: string;
+  confirmedSchema?: string;
+}
+
+export interface AiNamespaceSelection {
+  kind: "database" | "schema";
+  value: string;
 }
 
 export interface CustomPromptContext {
@@ -189,6 +197,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     },
     input.context.connectionId,
     input.context.database,
+    input.context.schema,
     input.context.databaseType,
     onEvent,
     input.mode || "ask",
@@ -196,6 +205,7 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.confirmedWriteSql,
     input.confirmedConnectionId,
     input.confirmedDatabase,
+    input.confirmedSchema,
   );
 }
 
@@ -264,6 +274,7 @@ export function buildSystemPrompt(action: AiAction, context: AiContext, mode: Ai
     `Database type: ${context.databaseType}`,
     `Connection: ${context.connectionName}`,
     `Database: ${context.database}`,
+    context.schema ? `Selected schema: ${context.schema}` : "",
     schemaCoverageLine(context, isZh),
     "",
     `Current SQL:\n${context.currentSql.trim() || "(empty)"}`,
@@ -435,7 +446,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
   const maxIndexesPerTable = options.maxIndexesPerTable ?? 10;
   const maxFksPerTable = options.maxFksPerTable ?? 10;
   const databaseType = aiDatabaseTypeForConnection(connection);
-  const database = aiDatabaseNamespace(tab, connection);
+  const { database, schema } = resolveAiDatabaseTarget(tab, connection);
   const tables: AiSchemaTable[] = [];
   const tableKeys = new Set<string>();
   let truncated = false;
@@ -551,6 +562,7 @@ export async function buildAiContext(tab: QueryTab, connection: ConnectionConfig
     connectionName: connection.name,
     databaseType,
     database,
+    schema,
     currentSql: currentCollectionName ?? tab.sql,
     lastError: extractLastError(tab.result),
     lastResultPreview: formatResultPreview(tab.result),
@@ -604,7 +616,8 @@ async function resolveMentionedTableSchema(tab: QueryTab, connection: Connection
 }
 
 async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig): Promise<string[]> {
-  const database = aiDatabaseNamespace(tab, connection);
+  const { database, schema } = resolveAiDatabaseTarget(tab, connection);
+  if (schema) return [schema];
   if (isSchemaAware(aiDatabaseTypeForConnection(connection))) {
     const schemas = await api.listSchemas(tab.connectionId, database);
     return prioritizeSchemas(schemas);
@@ -617,8 +630,37 @@ function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType
 }
 
 function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
+  return resolveAiDatabaseTarget(tab, connection).database;
+}
+
+export function resolveAiNamespaceSelection(tab: QueryTab, connection: ConnectionConfig): AiNamespaceSelection {
+  if (connection.db_type === "dameng") {
+    return { kind: "schema", value: tab.schema?.trim() || "" };
+  }
+  return { kind: "database", value: tab.database || "" };
+}
+
+export function resolveDefaultAiSchema(connection: ConnectionConfig, schemaOptions: string[]): string | undefined {
+  if (connection.db_type !== "dameng") return undefined;
+  const username = connection.username.trim().toLowerCase();
+  return schemaOptions.find((schema) => schema.trim().toLowerCase() === username) ?? schemaOptions[0];
+}
+
+/**
+ * Resolve the namespace used by an AI request without treating a Dameng schema
+ * selection as a connection database override. Dameng connections stay bound to
+ * their configured database while the query tab's selection scopes metadata and
+ * SQL execution through the schema parameter.
+ */
+export function resolveAiDatabaseTarget(tab: QueryTab, connection: ConnectionConfig): { database: string; schema?: string } {
   const database = tab.database || connection.database || "main";
-  return connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database;
+  if (connection.db_type === "dameng") {
+    return {
+      database,
+      schema: resolveAiNamespaceSelection(tab, connection).value || undefined,
+    };
+  }
+  return { database: connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database };
 }
 
 function prioritizeSchemas(schemas: string[]): string[] {
