@@ -44,18 +44,10 @@ struct SchemeProfile {
 
 fn scheme_profile(scheme: &str) -> Option<SchemeProfile> {
     Some(match scheme {
-        "mysql" => SchemeProfile {
-            db_type: DatabaseType::Mysql,
-            profile: "mysql",
-            label: "MySQL",
-            default_port: 3306,
-        },
-        "mariadb" => SchemeProfile {
-            db_type: DatabaseType::Mysql,
-            profile: "mariadb",
-            label: "MariaDB",
-            default_port: 3306,
-        },
+        "mysql" => SchemeProfile { db_type: DatabaseType::Mysql, profile: "mysql", label: "MySQL", default_port: 3306 },
+        "mariadb" => {
+            SchemeProfile { db_type: DatabaseType::Mysql, profile: "mariadb", label: "MariaDB", default_port: 3306 }
+        }
         "postgres" | "postgresql" => SchemeProfile {
             db_type: DatabaseType::Postgres,
             profile: "postgres",
@@ -68,30 +60,19 @@ fn scheme_profile(scheme: &str) -> Option<SchemeProfile> {
             label: "Redshift",
             default_port: 5439,
         },
-        "redis" | "rediss" => SchemeProfile {
-            db_type: DatabaseType::Redis,
-            profile: "redis",
-            label: "Redis",
-            default_port: 6379,
-        },
-        "etcd" => SchemeProfile {
-            db_type: DatabaseType::Etcd,
-            profile: "etcd",
-            label: "etcd",
-            default_port: 2379,
-        },
+        "redis" | "rediss" => {
+            SchemeProfile { db_type: DatabaseType::Redis, profile: "redis", label: "Redis", default_port: 6379 }
+        }
+        "etcd" => SchemeProfile { db_type: DatabaseType::Etcd, profile: "etcd", label: "etcd", default_port: 2379 },
         "zookeeper" => SchemeProfile {
             db_type: DatabaseType::ZooKeeper,
             profile: "zookeeper",
             label: "Apache ZooKeeper",
             default_port: 2181,
         },
-        "mongodb" | "mongodb+srv" => SchemeProfile {
-            db_type: DatabaseType::MongoDb,
-            profile: "mongodb",
-            label: "MongoDB",
-            default_port: 27017,
-        },
+        "mongodb" | "mongodb+srv" => {
+            SchemeProfile { db_type: DatabaseType::MongoDb, profile: "mongodb", label: "MongoDB", default_port: 27017 }
+        }
         "clickhouse" => SchemeProfile {
             db_type: DatabaseType::ClickHouse,
             profile: "clickhouse",
@@ -104,30 +85,21 @@ fn scheme_profile(scheme: &str) -> Option<SchemeProfile> {
             label: "SQL Server",
             default_port: 1433,
         },
-        "oracle" => SchemeProfile {
-            db_type: DatabaseType::Oracle,
-            profile: "oracle",
-            label: "Oracle",
-            default_port: 1521,
-        },
+        "oracle" => {
+            SchemeProfile { db_type: DatabaseType::Oracle, profile: "oracle", label: "Oracle", default_port: 1521 }
+        }
         "elasticsearch" => SchemeProfile {
             db_type: DatabaseType::Elasticsearch,
             profile: "elasticsearch",
             label: "Elasticsearch",
             default_port: 9200,
         },
-        "qdrant" => SchemeProfile {
-            db_type: DatabaseType::Qdrant,
-            profile: "qdrant",
-            label: "Qdrant",
-            default_port: 6333,
-        },
-        "milvus" => SchemeProfile {
-            db_type: DatabaseType::Milvus,
-            profile: "milvus",
-            label: "Milvus",
-            default_port: 19530,
-        },
+        "qdrant" => {
+            SchemeProfile { db_type: DatabaseType::Qdrant, profile: "qdrant", label: "Qdrant", default_port: 6333 }
+        }
+        "milvus" => {
+            SchemeProfile { db_type: DatabaseType::Milvus, profile: "milvus", label: "Milvus", default_port: 19530 }
+        }
         "weaviate" => SchemeProfile {
             db_type: DatabaseType::Weaviate,
             profile: "weaviate",
@@ -140,42 +112,23 @@ fn scheme_profile(scheme: &str) -> Option<SchemeProfile> {
             label: "ChromaDB",
             default_port: 8000,
         },
-        "dm" | "dameng" => SchemeProfile {
-            db_type: DatabaseType::Dameng,
-            profile: "dm",
-            label: "达梦 Dameng",
-            default_port: 5236,
-        },
+        "dm" | "dameng" => {
+            SchemeProfile { db_type: DatabaseType::Dameng, profile: "dm", label: "达梦 Dameng", default_port: 5236 }
+        }
         "kingbase" | "kingbase8" => SchemeProfile {
             db_type: DatabaseType::Kingbase,
             profile: "kingbase",
             label: "KingBase",
             default_port: 54321,
         },
-        "gaussdb" => SchemeProfile {
-            db_type: DatabaseType::Gaussdb,
-            profile: "gaussdb",
-            label: "GaussDB",
-            default_port: 5432,
-        },
-        "kwdb" => SchemeProfile {
-            db_type: DatabaseType::Kwdb,
-            profile: "kwdb",
-            label: "KWDB",
-            default_port: 26257,
-        },
-        "gbase" => SchemeProfile {
-            db_type: DatabaseType::Gbase,
-            profile: "gbase",
-            label: "GBase",
-            default_port: 5258,
-        },
-        "gbasedbt-sqli" => SchemeProfile {
-            db_type: DatabaseType::Gbase,
-            profile: "gbase8s",
-            label: "GBase 8s",
-            default_port: 9088,
-        },
+        "gaussdb" => {
+            SchemeProfile { db_type: DatabaseType::Gaussdb, profile: "gaussdb", label: "GaussDB", default_port: 5432 }
+        }
+        "kwdb" => SchemeProfile { db_type: DatabaseType::Kwdb, profile: "kwdb", label: "KWDB", default_port: 26257 },
+        "gbase" => SchemeProfile { db_type: DatabaseType::Gbase, profile: "gbase", label: "GBase", default_port: 5258 },
+        "gbasedbt-sqli" => {
+            SchemeProfile { db_type: DatabaseType::Gbase, profile: "gbase8s", label: "GBase 8s", default_port: 9088 }
+        }
         "informix-sqli" => SchemeProfile {
             db_type: DatabaseType::Informix,
             profile: "informix",
@@ -194,51 +147,30 @@ fn scheme_profile(scheme: &str) -> Option<SchemeProfile> {
             label: "openGauss",
             default_port: 5432,
         },
-        "questdb" => SchemeProfile {
-            db_type: DatabaseType::Questdb,
-            profile: "questdb",
-            label: "QuestDB",
-            default_port: 8812,
-        },
+        "questdb" => {
+            SchemeProfile { db_type: DatabaseType::Questdb, profile: "questdb", label: "QuestDB", default_port: 8812 }
+        }
         "tdengine" | "taos-ws" => SchemeProfile {
             db_type: DatabaseType::Tdengine,
             profile: "tdengine",
             label: "TDengine",
             default_port: 6041,
         },
-        "oscar" => SchemeProfile {
-            db_type: DatabaseType::Oscar,
-            profile: "oscar",
-            label: "神通 OSCAR",
-            default_port: 2003,
-        },
-        "xugu" => SchemeProfile {
-            db_type: DatabaseType::Xugu,
-            profile: "xugu",
-            label: "XuguDB",
-            default_port: 5138,
-        },
-        "iotdb" => SchemeProfile {
-            db_type: DatabaseType::Iotdb,
-            profile: "iotdb",
-            label: "Apache IoTDB",
-            default_port: 6667,
-        },
-        "iris" => SchemeProfile {
-            db_type: DatabaseType::Iris,
-            profile: "iris",
-            label: "IRIS",
-            default_port: 1972,
-        },
+        "oscar" => {
+            SchemeProfile { db_type: DatabaseType::Oscar, profile: "oscar", label: "神通 OSCAR", default_port: 2003 }
+        }
+        "xugu" => SchemeProfile { db_type: DatabaseType::Xugu, profile: "xugu", label: "XuguDB", default_port: 5138 },
+        "iotdb" => {
+            SchemeProfile { db_type: DatabaseType::Iotdb, profile: "iotdb", label: "Apache IoTDB", default_port: 6667 }
+        }
+        "iris" => SchemeProfile { db_type: DatabaseType::Iris, profile: "iris", label: "IRIS", default_port: 1972 },
         _ => return None,
     })
 }
 
 fn http_selected_profile(preferred: &str) -> Option<SchemeProfile> {
     match preferred {
-        "clickhouse" | "elasticsearch" | "qdrant" | "milvus" | "weaviate" | "chromadb" => {
-            scheme_profile(preferred)
-        }
+        "clickhouse" | "elasticsearch" | "qdrant" | "milvus" | "weaviate" | "chromadb" => scheme_profile(preferred),
         _ => None,
     }
 }
@@ -300,9 +232,7 @@ fn strip_connection_name_param(params: &str) -> String {
 fn url_params_require_tls(db_type: DatabaseType, params: &str) -> bool {
     match db_type {
         DatabaseType::Mysql => {
-            let require_ssl = query_param_value(params, "require_ssl")
-                .unwrap_or_default()
-                .to_ascii_lowercase();
+            let require_ssl = query_param_value(params, "require_ssl").unwrap_or_default().to_ascii_lowercase();
             if matches!(require_ssl.as_str(), "true" | "1" | "yes") {
                 return true;
             }
@@ -311,15 +241,10 @@ fn url_params_require_tls(db_type: DatabaseType, params: &str) -> bool {
                 .unwrap_or_default()
                 .to_ascii_lowercase()
                 .replace('-', "_");
-            matches!(
-                ssl_mode.as_str(),
-                "required" | "require" | "verify_ca" | "verify_identity"
-            )
+            matches!(ssl_mode.as_str(), "required" | "require" | "verify_ca" | "verify_identity")
         }
         DatabaseType::Postgres | DatabaseType::Redshift | DatabaseType::Kwdb => {
-            let ssl_mode = query_param_value(params, "sslmode")
-                .unwrap_or_default()
-                .to_ascii_lowercase();
+            let ssl_mode = query_param_value(params, "sslmode").unwrap_or_default().to_ascii_lowercase();
             matches!(ssl_mode.as_str(), "require" | "verify-ca" | "verify-full")
         }
         _ => false,
@@ -377,9 +302,8 @@ struct AuthorityParts {
 }
 
 fn split_url_parts(source: &str) -> Result<(String, AuthorityParts), String> {
-    let (scheme, rest) = source
-        .split_once("://")
-        .ok_or_else(|| "Invalid connection URL: missing scheme://".to_string())?;
+    let (scheme, rest) =
+        source.split_once("://").ok_or_else(|| "Invalid connection URL: missing scheme://".to_string())?;
     let scheme = scheme.to_ascii_lowercase();
 
     let (before_hash, fragment) = match rest.split_once('#') {
@@ -405,35 +329,17 @@ fn split_url_parts(source: &str) -> Result<(String, AuthorityParts), String> {
     };
 
     if hostport.trim().is_empty() {
-        return Err(
-            "Invalid connection URL: empty host (if the password contains '@', encode it as %40)"
-                .into(),
-        );
+        return Err("Invalid connection URL: empty host (if the password contains '@', encode it as %40)".into());
     }
 
     let (username, password) = parse_userinfo(userinfo);
     // Port default filled later by caller with profile default; use 0 as placeholder.
     let (host, port, port_explicit) = parse_host_port(hostport, 0);
     if host.trim().is_empty() {
-        return Err(
-            "Invalid connection URL: empty host (if the password contains '@', encode it as %40)"
-                .into(),
-        );
+        return Err("Invalid connection URL: empty host (if the password contains '@', encode it as %40)".into());
     }
 
-    Ok((
-        scheme,
-        AuthorityParts {
-            username,
-            password,
-            host,
-            port,
-            port_explicit,
-            path,
-            query,
-            fragment,
-        },
-    ))
+    Ok((scheme, AuthorityParts { username, password, host, port, port_explicit, path, query, fragment }))
 }
 
 fn normalize_mongo_connection_string(value: &str) -> String {
@@ -450,9 +356,7 @@ fn normalize_mongo_connection_string(value: &str) -> String {
         None => (userinfo, None),
     };
     let encoded_user = encode_mongo_userinfo_part(username);
-    let encoded_pass = password
-        .map(|p| format!(":{}", encode_mongo_userinfo_part(p)))
-        .unwrap_or_default();
+    let encoded_pass = password.map(|p| format!(":{}", encode_mongo_userinfo_part(p))).unwrap_or_default();
     // Replace only the userinfo segment after scheme://
     if let Some(at) = input.find('@') {
         format!("{prefix}{encoded_user}{encoded_pass}@{}", &input[at + 1..])
@@ -605,16 +509,10 @@ fn parse_jdbc_oracle_url(source: &str) -> Option<ParsedConnectionUrl> {
 
     if after_trim.starts_with('(') {
         let host = oracle_descriptor_value(source, "HOST")?;
-        let port = oracle_descriptor_value(source, "PORT")
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(profile.default_port);
+        let port = oracle_descriptor_value(source, "PORT").and_then(|p| p.parse().ok()).unwrap_or(profile.default_port);
         let service_name = oracle_descriptor_value(source, "SERVICE_NAME");
         let sid = oracle_descriptor_value(source, "SID");
-        let oracle_type = if sid.is_some() && service_name.is_none() {
-            "sid"
-        } else {
-            "service_name"
-        };
+        let oracle_type = if sid.is_some() && service_name.is_none() { "sid" } else { "service_name" };
         return Some(ParsedConnectionUrl {
             name: None,
             db_type: profile.db_type,
@@ -720,11 +618,7 @@ pub fn parse_connection_url_with_profile(
     }
 
     let is_jdbc = input.to_ascii_lowercase().starts_with("jdbc:");
-    let source = if is_jdbc {
-        input.get(5..).unwrap_or(input)
-    } else {
-        input
-    };
+    let source = if is_jdbc { input.get(5..).unwrap_or(input) } else { input };
 
     if let Some(parsed) = parse_mongo_url(source) {
         return Ok(parsed);
@@ -735,19 +629,12 @@ pub fn parse_connection_url_with_profile(
         Err(err) => return Err(with_userinfo_encoding_hint(source, err)),
     };
     let profile = if matches!(scheme.as_str(), "http" | "https") {
-        preferred_profile
-            .and_then(http_selected_profile)
-            .ok_or_else(|| {
-                format!(
-                    "Unsupported connection URL scheme: {scheme} (provide type/driver_profile for http/https)"
-                )
-            })?
+        preferred_profile.and_then(http_selected_profile).ok_or_else(|| {
+            format!("Unsupported connection URL scheme: {scheme} (provide type/driver_profile for http/https)")
+        })?
     } else {
         scheme_profile(&scheme).ok_or_else(|| {
-            with_userinfo_encoding_hint(
-                source,
-                format!("Unsupported connection URL scheme: {scheme}"),
-            )
+            with_userinfo_encoding_hint(source, format!("Unsupported connection URL scheme: {scheme}"))
         })?
     };
 
@@ -759,8 +646,7 @@ pub fn parse_connection_url_with_profile(
     let name = connection_name_param(&parts.query);
     let url_params_without_name = strip_connection_name_param(&parts.query);
     let normalized_fragment = decode_url_part(&parts.fragment).trim().to_ascii_lowercase();
-    let parsed_url_params = if profile.db_type == DatabaseType::Redis && normalized_fragment == "insecure"
-    {
+    let parsed_url_params = if profile.db_type == DatabaseType::Redis && normalized_fragment == "insecure" {
         if url_params_without_name.is_empty() {
             "insecure=true".to_string()
         } else {
@@ -791,16 +677,8 @@ pub fn parse_connection_url_with_profile(
     }
 
     if profile.db_type == DatabaseType::ZooKeeper {
-        let host_for_cs = if parts.host.contains(':') {
-            format!("[{}]", parts.host)
-        } else {
-            parts.host.clone()
-        };
-        let chroot = if parts.path.is_empty() || parts.path == "/" {
-            String::new()
-        } else {
-            parts.path.clone()
-        };
+        let host_for_cs = if parts.host.contains(':') { format!("[{}]", parts.host) } else { parts.host.clone() };
+        let chroot = if parts.path.is_empty() || parts.path == "/" { String::new() } else { parts.path.clone() };
         let connection_string = format!("{}:{}{}", host_for_cs, parts.port, chroot);
         return Ok(ParsedConnectionUrl {
             name,
@@ -847,9 +725,7 @@ pub fn parse_connection_url_with_profile(
 
 fn with_userinfo_encoding_hint(source: &str, err: String) -> String {
     if source.contains('@') && !err.contains("%40") {
-        format!(
-            "{err}. If the password contains '@' or other reserved characters, URL-encode them (e.g. '@' -> %40)."
-        )
+        format!("{err}. If the password contains '@' or other reserved characters, URL-encode them (e.g. '@' -> %40).")
     } else {
         err
     }
@@ -923,8 +799,7 @@ mod tests {
 
     #[test]
     fn parses_postgres_url_with_name_param() {
-        let parsed =
-            parse_connection_url("postgres://u:p@db.example:5433/mydb?sslmode=require&name=prod-pg").unwrap();
+        let parsed = parse_connection_url("postgres://u:p@db.example:5433/mydb?sslmode=require&name=prod-pg").unwrap();
         assert_eq!(parsed.db_type, DatabaseType::Postgres);
         assert_eq!(parsed.port, 5433);
         assert_eq!(parsed.name.as_deref(), Some("prod-pg"));
@@ -981,8 +856,7 @@ mod tests {
 
     #[test]
     fn parses_jdbc_sqlserver() {
-        let parsed =
-            parse_connection_url("jdbc:sqlserver://dbhost:1433;databaseName=app;user=sa;password=x").unwrap();
+        let parsed = parse_connection_url("jdbc:sqlserver://dbhost:1433;databaseName=app;user=sa;password=x").unwrap();
         assert_eq!(parsed.db_type, DatabaseType::SqlServer);
         assert_eq!(parsed.host, "dbhost");
         assert_eq!(parsed.database.as_deref(), Some("app"));

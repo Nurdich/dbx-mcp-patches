@@ -219,9 +219,7 @@ async fn run(argv: Vec<String>) -> Result<CliOutcome, (CliError, bool)> {
     }
     if flags.args[0] == "capabilities" {
         ensure_arg_count(&flags.args, 1, "dbx-cli capabilities").map_err(|error| (error, json_output))?;
-        return format_capabilities(flags.format)
-            .map(CliOutcome::Ok)
-            .map_err(|error| (error, json_output));
+        return format_capabilities(flags.format).map(CliOutcome::Ok).map_err(|error| (error, json_output));
     }
 
     let backend: Arc<dyn DbxBackend> = if let Ok(base_url) = env::var("DBX_WEB_URL") {
@@ -260,7 +258,8 @@ async fn run_with_backend(backend: Arc<dyn DbxBackend>, flags: Flags) -> Result<
     let args = &flags.args;
     if args.first().is_some_and(|arg| arg == "connections") && args.get(1).is_some_and(|arg| arg == "list") {
         ensure_arg_count(args, 2, "dbx-cli connections list")?;
-        return format_connections(&backend.load_connections().await.map_err(store_error)?, flags.format).map(CliOutcome::Ok);
+        return format_connections(&backend.load_connections().await.map_err(store_error)?, flags.format)
+            .map(CliOutcome::Ok);
     }
     if args.first().is_some_and(|arg| arg == "connections") && args.get(1).is_some_and(|arg| arg == "add") {
         return run_connections_add(backend.as_ref(), &flags).await;
@@ -272,10 +271,7 @@ async fn run_with_backend(backend: Arc<dyn DbxBackend>, flags: Flags) -> Result<
         ensure_arg_count(args, 3, "dbx-cli connections remove")?;
         let connection_ref = required(args.get(2), "Connection name or list index is required.")?;
         let connection = find_connection(backend.as_ref(), connection_ref).await?;
-        let removed = backend
-            .remove_connection_for_mcp(&connection.id)
-            .await
-            .map_err(store_error)?;
+        let removed = backend.remove_connection_for_mcp(&connection.id).await.map_err(store_error)?;
         if !removed {
             return Err(CliError::new(
                 "CONNECTION_NOT_FOUND",
@@ -367,9 +363,8 @@ async fn apply_cli_proxy_override(
     }
     let mut out = Vec::with_capacity(configs.len());
     for config in configs {
-        let config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, args.clone())
-            .await
-            .map_err(|error| {
+        let config =
+            dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, args.clone()).await.map_err(|error| {
                 CliError::new(
                     "PROXY_OVERRIDE_ERROR",
                     error
@@ -437,11 +432,7 @@ fn finish_batch_outcome<T>(
         parts.push(dbx_mcp::batch::batch_summary(total, ok_count, skipped, failures));
     }
     let joined = parts.join("\n\n");
-    let body = if joined.ends_with('\n') {
-        joined
-    } else {
-        format!("{joined}\n")
-    };
+    let body = if joined.ends_with('\n') { joined } else { format!("{joined}\n") };
     if failures > 0 {
         soft_fail(body)
     } else {
@@ -480,19 +471,11 @@ where
                 parts.push(format!("{heading}{value}"));
             }
             dbx_mcp::batch::BatchItem::Skipped { index, name, code, message } => {
-                let heading = if total > 1 {
-                    format!("## #{} {name}\n\n", index + 1)
-                } else {
-                    String::new()
-                };
+                let heading = if total > 1 { format!("## #{} {name}\n\n", index + 1) } else { String::new() };
                 parts.push(format!("{heading}Skipped [{code}]: {message}"));
             }
             dbx_mcp::batch::BatchItem::Err { index, name, code, message } => {
-                let heading = if total > 1 {
-                    format!("## #{} {name}\n\n", index + 1)
-                } else {
-                    String::new()
-                };
+                let heading = if total > 1 { format!("## #{} {name}\n\n", index + 1) } else { String::new() };
                 parts.push(format!("{heading}Error [{code}]: {message}"));
             }
         }
@@ -523,12 +506,8 @@ async fn run_stats_or_report(
         async move {
             let _guard = dbx_mcp::progress::push_progress(dbx_mcp::progress::cli_progress_options(quiet, verbose));
             dbx_mcp::progress::log_using_connection(&config);
-            let options = dbx_mcp::database_stats::DatabaseStatsOptions {
-                database,
-                schema,
-                redis_db: None,
-                timeout_ms,
-            };
+            let options =
+                dbx_mcp::database_stats::DatabaseStatsOptions { database, schema, redis_db: None, timeout_ms };
             let result = if report {
                 dbx_mcp::database_report::fetch_database_report(backend.as_ref(), &config, options).await
             } else {
@@ -553,10 +532,7 @@ async fn run_stats_or_report(
                 let config = &selected[*index];
                 let heading = dbx_mcp::batch::batch_heading(config, index + 1, total);
                 if report && !flags.no_save {
-                    let dir = flags
-                        .output
-                        .clone()
-                        .unwrap_or_else(dbx_mcp::database_report::default_reports_dir);
+                    let dir = flags.output.clone().unwrap_or_else(dbx_mcp::database_report::default_reports_dir);
                     std::fs::create_dir_all(&dir).map_err(|e| CliError::new("REPORT_SAVE_ERROR", e.to_string()))?;
                     let stamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -593,19 +569,11 @@ async fn run_stats_or_report(
                 parts.push(format!("{heading}{value}"));
             }
             dbx_mcp::batch::BatchItem::Skipped { index, name, code, message } => {
-                let heading = if total > 1 {
-                    format!("## #{} {name}\n\n", index + 1)
-                } else {
-                    String::new()
-                };
+                let heading = if total > 1 { format!("## #{} {name}\n\n", index + 1) } else { String::new() };
                 parts.push(format!("{heading}Skipped [{code}]: {message}"));
             }
             dbx_mcp::batch::BatchItem::Err { index, name, code, message } => {
-                let heading = if total > 1 {
-                    format!("## #{} {name}\n\n", index + 1)
-                } else {
-                    String::new()
-                };
+                let heading = if total > 1 { format!("## #{} {name}\n\n", index + 1) } else { String::new() };
                 parts.push(format!("{heading}Error [{code}]: {message}"));
             }
         }
@@ -733,8 +701,7 @@ async fn execute_query_one(
                 }
             });
         }
-        let mut result =
-            backend.execute_mongo_command(connection, &database, &command).await.map_err(command_error)?;
+        let mut result = backend.execute_mongo_command(connection, &database, &command).await.map_err(command_error)?;
         truncate_query_result(&mut result, max_rows);
         return format_query(&connection.name, &result, format);
     }
@@ -750,10 +717,8 @@ async fn execute_query_one(
         return Err(CliError::new("SQL_BLOCKED", "Writes and DDL are blocked for production databases."));
     }
     let timeout_secs = timeout_ms.map(|value| value.div_ceil(1000));
-    let result = backend
-        .execute_query(connection, &database, sql, max_rows, timeout_secs)
-        .await
-        .map_err(command_error)?;
+    let result =
+        backend.execute_query(connection, &database, sql, max_rows, timeout_secs).await.map_err(command_error)?;
     format_query(&connection.name, &result, format)
 }
 
@@ -901,10 +866,7 @@ async fn build_context_body(
     let selected = selected.into_iter().take(max_tables).collect::<Vec<_>>();
     let mut context_tables = Vec::new();
     for table in selected {
-        let columns = backend
-            .get_columns(connection, &database, schema, &table.name)
-            .await
-            .map_err(command_error)?;
+        let columns = backend.get_columns(connection, &database, schema, &table.name).await.map_err(command_error)?;
         context_tables.push(json!({ "name": table.name, "type": table.table_type, "columns": columns }));
     }
     let payload = json!({
@@ -936,20 +898,9 @@ async fn build_context_body(
                 "- {} {} {}{}{}\n",
                 column["name"].as_str().unwrap_or_default(),
                 column["data_type"].as_str().unwrap_or_default(),
-                if column["is_nullable"].as_bool().unwrap_or(false) {
-                    "NULL"
-                } else {
-                    "NOT NULL"
-                },
-                if column["is_primary_key"].as_bool().unwrap_or(false) {
-                    " PK"
-                } else {
-                    ""
-                },
-                column["comment"]
-                    .as_str()
-                    .map(|comment| format!(" -- {comment}"))
-                    .unwrap_or_default()
+                if column["is_nullable"].as_bool().unwrap_or(false) { "NULL" } else { "NOT NULL" },
+                if column["is_primary_key"].as_bool().unwrap_or(false) { " PK" } else { "" },
+                column["comment"].as_str().map(|comment| format!(" -- {comment}")).unwrap_or_default()
             ));
         }
     }
@@ -1024,11 +975,7 @@ async fn run_open(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutc
         parts.push(dbx_mcp::batch::batch_summary(total, ok_count, 0, fail_count));
     }
     let joined = parts.join("\n\n");
-    let body = if joined.ends_with('\n') {
-        joined
-    } else {
-        format!("{joined}\n")
-    };
+    let body = if joined.ends_with('\n') { joined } else { format!("{joined}\n") };
     if fail_count > 0 {
         soft_fail(body)
     } else {
@@ -1038,10 +985,7 @@ async fn run_open(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutc
 
 async fn run_redis(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOutcome, CliError> {
     if flags.args.len() < 3 {
-        return Err(CliError::new(
-            "INVALID_ARGUMENT",
-            "dbx-cli redis expects <connection|#|range> <command...>",
-        ));
+        return Err(CliError::new("INVALID_ARGUMENT", "dbx-cli redis expects <connection|#|range> <command...>"));
     }
     if flags.format == OutputFormat::Csv {
         return Err(CliError::new("INVALID_OPTION", "CSV format is not supported for dbx-cli redis."));
@@ -1070,10 +1014,7 @@ async fn run_redis(backend: Arc<dyn DbxBackend>, flags: &Flags) -> Result<CliOut
                 .and_then(|v| v.parse().ok())
                 .or_else(|| connection.database.as_deref().and_then(|v| v.parse().ok()))
                 .unwrap_or(0u32);
-            match backend
-                .execute_redis_command(&connection, db, &command, allow_dangerous)
-                .await
-            {
+            match backend.execute_redis_command(&connection, db, &command, allow_dangerous).await {
                 Ok(result) => {
                     if format == OutputFormat::Json {
                         Ok(serde_json::to_string_pretty(&json!({
@@ -1115,10 +1056,7 @@ async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<
         .filter(|v| !v.is_empty())
         .or_else(|| from_url.as_ref().and_then(|p| p.name.as_deref()))
         .ok_or_else(|| {
-            CliError::new(
-                "INVALID_ARGUMENT",
-                "--name is required (or put name=<label> in the connection URL query).",
-            )
+            CliError::new("INVALID_ARGUMENT", "--name is required (or put name=<label> in the connection URL query).")
         })?;
     let db_type = flags
         .db_type
@@ -1128,10 +1066,7 @@ async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<
         .map(ToOwned::to_owned)
         .or_else(|| from_url.as_ref().map(|p| database_type_wire_name(p.db_type)))
         .ok_or_else(|| {
-            CliError::new(
-                "INVALID_ARGUMENT",
-                "--type is required (or provide --url / --connection-url / --dsn).",
-            )
+            CliError::new("INVALID_ARGUMENT", "--type is required (or provide --url / --connection-url / --dsn).")
         })?;
     let host = flags
         .host
@@ -1141,10 +1076,7 @@ async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<
         .map(ToOwned::to_owned)
         .or_else(|| from_url.as_ref().map(|p| p.host.clone()))
         .ok_or_else(|| {
-            CliError::new(
-                "INVALID_ARGUMENT",
-                "--host is required (or provide --url / --connection-url / --dsn).",
-            )
+            CliError::new("INVALID_ARGUMENT", "--host is required (or provide --url / --connection-url / --dsn).")
         })?;
     let existing = backend.load_connections().await.map_err(store_error)?;
     if existing.iter().any(|c| c.name.eq_ignore_ascii_case(name)) {
@@ -1152,31 +1084,15 @@ async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<
     }
     let parsed =
         dbx_mcp::backend::parse_database_type(&db_type).map_err(|e| CliError::new("INVALID_CONNECTION_TYPE", e))?;
-    let port = flags
-        .port
-        .or_else(|| from_url.as_ref().map(|p| p.port))
-        .or_else(|| default_cli_port(&db_type))
-        .ok_or_else(|| {
-            CliError::new("INVALID_ARGUMENT", "Port is required for this database type (use --port).")
-        })?;
-    let username = flags
-        .username
-        .clone()
-        .or_else(|| from_url.as_ref().map(|p| p.username.clone()))
-        .unwrap_or_default();
-    let password = flags
-        .password
-        .clone()
-        .or_else(|| from_url.as_ref().map(|p| p.password.clone()))
-        .unwrap_or_default();
-    let database = flags
-        .database
-        .clone()
-        .or_else(|| from_url.as_ref().and_then(|p| p.database.clone()));
+    let port =
+        flags.port.or_else(|| from_url.as_ref().map(|p| p.port)).or_else(|| default_cli_port(&db_type)).ok_or_else(
+            || CliError::new("INVALID_ARGUMENT", "Port is required for this database type (use --port)."),
+        )?;
+    let username = flags.username.clone().or_else(|| from_url.as_ref().map(|p| p.username.clone())).unwrap_or_default();
+    let password = flags.password.clone().or_else(|| from_url.as_ref().map(|p| p.password.clone())).unwrap_or_default();
+    let database = flags.database.clone().or_else(|| from_url.as_ref().and_then(|p| p.database.clone()));
     let ssl = flags.ssl || from_url.as_ref().is_some_and(|p| p.ssl);
-    let driver_profile = flags.driver_profile.clone().or_else(|| {
-        from_url.as_ref().map(|p| p.driver_profile.clone())
-    });
+    let driver_profile = flags.driver_profile.clone().or_else(|| from_url.as_ref().map(|p| p.driver_profile.clone()));
     let mut config = dbx_mcp::backend::new_connection_config(
         uuid::Uuid::new_v4().to_string(),
         name.to_string(),
@@ -1193,14 +1109,10 @@ async fn run_connections_add(backend: &dyn DbxBackend, flags: &Flags) -> Result<
     apply_parsed_connection_url_extras(&mut config, from_url.as_ref());
 
     let profile_ref = dbx_mcp::tunnel_profiles::has_proxy_profile_ref(&cli_proxy_ref_args(flags));
-    let inline = flags.proxy
-        || flags.proxy_host.as_deref().is_some_and(|v| !v.trim().is_empty())
-        || flags.proxy_port.is_some();
+    let inline =
+        flags.proxy || flags.proxy_host.as_deref().is_some_and(|v| !v.trim().is_empty()) || flags.proxy_port.is_some();
     if profile_ref && inline {
-        return Err(CliError::new(
-            "PROXY_CONFLICT",
-            "Cannot mix saved proxy reference with inline proxy settings.",
-        ));
+        return Err(CliError::new("PROXY_CONFLICT", "Cannot mix saved proxy reference with inline proxy settings."));
     }
     if profile_ref {
         config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, cli_proxy_ref_args(flags))
@@ -1295,18 +1207,11 @@ struct ImportItemResult {
 
 async fn run_connections_import(backend: &dyn DbxBackend, flags: &Flags) -> Result<CliOutcome, CliError> {
     ensure_arg_count(&flags.args, 2, "dbx-cli connections import")?;
-    let path = flags
-        .file
-        .as_ref()
-        .ok_or_else(|| {
-            CliError::new(
-                "INVALID_ARGUMENT",
-                "--file <path.csv|path.txt|path.json> is required for connections import.",
-            )
-        })?;
-    let text = std::fs::read_to_string(path).map_err(|error| {
-        CliError::new("FILE_READ_ERROR", format!("Failed to read {}: {error}", path.display()))
+    let path = flags.file.as_ref().ok_or_else(|| {
+        CliError::new("INVALID_ARGUMENT", "--file <path.csv|path.txt|path.json> is required for connections import.")
     })?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| CliError::new("FILE_READ_ERROR", format!("Failed to read {}: {error}", path.display())))?;
     let items = load_import_items(path, &text, flags.import_format)?;
     if items.is_empty() {
         return Err(CliError::new("INVALID_ARGUMENT", "Import file contains no connections."));
@@ -1326,11 +1231,7 @@ async fn run_connections_import(backend: &dyn DbxBackend, flags: &Flags) -> Resu
             Err(error) => {
                 failed += 1;
                 results.push(ImportItemResult {
-                    name: item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("(invalid)")
-                        .to_string(),
+                    name: item.get("name").and_then(Value::as_str).unwrap_or("(invalid)").to_string(),
                     status: "failed",
                     id: None,
                     error: Some(format!("item #{ordinal}: {error}")),
@@ -1417,16 +1318,10 @@ async fn run_connections_import(backend: &dyn DbxBackend, flags: &Flags) -> Resu
     )];
     for result in &results {
         match result.status {
-            "added" => lines.push(format!(
-                "  + {} ({})",
-                result.name,
-                result.id.as_deref().unwrap_or("-")
-            )),
-            "skipped" => lines.push(format!(
-                "  ~ {} skipped: {}",
-                result.name,
-                result.error.as_deref().unwrap_or("exists")
-            )),
+            "added" => lines.push(format!("  + {} ({})", result.name, result.id.as_deref().unwrap_or("-"))),
+            "skipped" => {
+                lines.push(format!("  ~ {} skipped: {}", result.name, result.error.as_deref().unwrap_or("exists")))
+            }
             _ => lines.push(format!(
                 "  ! {} failed: {}",
                 result.name,
@@ -1442,11 +1337,7 @@ async fn run_connections_import(backend: &dyn DbxBackend, flags: &Flags) -> Resu
     }
 }
 
-fn detect_import_format(
-    path: &std::path::Path,
-    text: &str,
-    forced: Option<ImportFileFormat>,
-) -> ImportFileFormat {
+fn detect_import_format(path: &std::path::Path, text: &str, forced: Option<ImportFileFormat>) -> ImportFileFormat {
     if let Some(fmt) = forced {
         return fmt;
     }
@@ -1482,18 +1373,11 @@ fn load_import_items(
 }
 
 fn normalize_csv_import_header(header: &str) -> String {
-    let key = header
-        .trim()
-        .trim_start_matches('\u{feff}')
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_");
+    let key = header.trim().trim_start_matches('\u{feff}').to_ascii_lowercase().replace('-', "_").replace(' ', "_");
     match key.as_str() {
         "type" | "db_type" | "dbtype" => "type".to_string(),
         "connection_url" | "connectionurl" | "dsn" => "url".to_string(),
-        "proxy_profile_id" | "proxyprofileid" | "proxy_profiles" | "proxyprofiles" => {
-            "proxy_profile_id".to_string()
-        }
+        "proxy_profile_id" | "proxyprofileid" | "proxy_profiles" | "proxyprofiles" => "proxy_profile_id".to_string(),
         "proxy_profile_name" | "proxyprofilename" => "proxy_profile_name".to_string(),
         "proxy_url" | "proxyurl" => "proxy_url".to_string(),
         "proxy_type" | "proxytype" => "proxy_type".to_string(),
@@ -1514,15 +1398,9 @@ fn extract_import_items(root: &Value) -> Result<Vec<Value>, CliError> {
             if let Some(Value::Array(items)) = map.get("connections") {
                 return Ok(items.clone());
             }
-            Err(CliError::new(
-                "INVALID_JSON",
-                "Expected a JSON array, or an object with a \"connections\" array.",
-            ))
+            Err(CliError::new("INVALID_JSON", "Expected a JSON array, or an object with a \"connections\" array."))
         }
-        _ => Err(CliError::new(
-            "INVALID_JSON",
-            "Expected a JSON array, or an object with a \"connections\" array.",
-        )),
+        _ => Err(CliError::new("INVALID_JSON", "Expected a JSON array, or an object with a \"connections\" array.")),
     }
 }
 
@@ -1531,10 +1409,7 @@ fn extract_import_items_from_csv(text: &str) -> Result<Vec<Value>, CliError> {
     if text_is_url_per_line_list(text) {
         return extract_import_items_from_url_lines(text);
     }
-    let mut reader = csv::ReaderBuilder::new()
-        .flexible(true)
-        .trim(csv::Trim::All)
-        .from_reader(text.as_bytes());
+    let mut reader = csv::ReaderBuilder::new().flexible(true).trim(csv::Trim::All).from_reader(text.as_bytes());
     let headers = reader
         .headers()
         .map_err(|error| CliError::new("INVALID_CSV", format!("Failed to read CSV headers: {error}")))?
@@ -1553,9 +1428,8 @@ fn extract_import_items_from_csv(text: &str) -> Result<Vec<Value>, CliError> {
     }
     let mut items = Vec::new();
     for (index, record) in reader.records().enumerate() {
-        let record = record.map_err(|error| {
-            CliError::new("INVALID_CSV", format!("Invalid CSV row #{}: {error}", index + 2))
-        })?;
+        let record =
+            record.map_err(|error| CliError::new("INVALID_CSV", format!("Invalid CSV row #{}: {error}", index + 2)))?;
         let mut map = Map::new();
         for (col, header) in headers.iter().enumerate() {
             if header.is_empty() {
@@ -1612,10 +1486,7 @@ fn looks_like_connection_url(value: &str) -> bool {
     let Some((scheme, _)) = rest.split_once("://") else {
         return false;
     };
-    !scheme.is_empty()
-        && scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 fn text_is_url_per_line_list(text: &str) -> bool {
@@ -1754,10 +1625,7 @@ fn import_entry_name_key(entry: &ImportConnectionEntry) -> Option<String> {
     }
     let url = entry.url.as_deref().map(str::trim).filter(|v| !v.is_empty())?;
     let parsed = parse_connection_url(url).ok()?;
-    parsed
-        .name
-        .filter(|n| !n.trim().is_empty())
-        .map(|n| n.to_ascii_lowercase())
+    parsed.name.filter(|n| !n.trim().is_empty()).map(|n| n.to_ascii_lowercase())
 }
 
 fn database_type_wire_name(db_type: DatabaseType) -> String {
@@ -1807,12 +1675,7 @@ async fn build_import_connection(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| {
-            from_url
-                .as_ref()
-                .and_then(|p| p.name.clone())
-                .filter(|n| !n.trim().is_empty())
-        })
+        .or_else(|| from_url.as_ref().and_then(|p| p.name.clone()).filter(|n| !n.trim().is_empty()))
         .unwrap_or_else(|| {
             let host = entry
                 .host
@@ -1840,10 +1703,7 @@ async fn build_import_connection(
         .map(ToOwned::to_owned)
         .or_else(|| from_url.as_ref().map(|p| database_type_wire_name(p.db_type)))
         .ok_or_else(|| {
-            CliError::new(
-                "INVALID_ARGUMENT",
-                "type/db_type is required (or provide url / connection_url / dsn).",
-            )
+            CliError::new("INVALID_ARGUMENT", "type/db_type is required (or provide url / connection_url / dsn).")
         })?;
     let host = entry
         .host
@@ -1853,38 +1713,19 @@ async fn build_import_connection(
         .map(ToOwned::to_owned)
         .or_else(|| from_url.as_ref().map(|p| p.host.clone()))
         .ok_or_else(|| {
-            CliError::new(
-                "INVALID_ARGUMENT",
-                "host is required (or provide url / connection_url / dsn).",
-            )
+            CliError::new("INVALID_ARGUMENT", "host is required (or provide url / connection_url / dsn).")
         })?;
     let parsed =
         dbx_mcp::backend::parse_database_type(&db_type).map_err(|e| CliError::new("INVALID_CONNECTION_TYPE", e))?;
-    let port = entry
-        .port
-        .or_else(|| from_url.as_ref().map(|p| p.port))
-        .or_else(|| default_cli_port(&db_type))
-        .ok_or_else(|| {
-            CliError::new("INVALID_ARGUMENT", format!("Port is required for database type \"{db_type}\"."))
-        })?;
-    let username = entry
-        .username
-        .clone()
-        .or_else(|| from_url.as_ref().map(|p| p.username.clone()))
-        .unwrap_or_default();
-    let password = entry
-        .password
-        .clone()
-        .or_else(|| from_url.as_ref().map(|p| p.password.clone()))
-        .unwrap_or_default();
-    let database = entry
-        .database
-        .clone()
-        .or_else(|| from_url.as_ref().and_then(|p| p.database.clone()));
+    let port =
+        entry.port.or_else(|| from_url.as_ref().map(|p| p.port)).or_else(|| default_cli_port(&db_type)).ok_or_else(
+            || CliError::new("INVALID_ARGUMENT", format!("Port is required for database type \"{db_type}\".")),
+        )?;
+    let username = entry.username.clone().or_else(|| from_url.as_ref().map(|p| p.username.clone())).unwrap_or_default();
+    let password = entry.password.clone().or_else(|| from_url.as_ref().map(|p| p.password.clone())).unwrap_or_default();
+    let database = entry.database.clone().or_else(|| from_url.as_ref().and_then(|p| p.database.clone()));
     let ssl = entry.ssl || from_url.as_ref().is_some_and(|p| p.ssl);
-    let driver_profile = entry.driver_profile.clone().or_else(|| {
-        from_url.as_ref().map(|p| p.driver_profile.clone())
-    });
+    let driver_profile = entry.driver_profile.clone().or_else(|| from_url.as_ref().map(|p| p.driver_profile.clone()));
     let id = entry
         .id
         .as_deref()
@@ -1914,10 +1755,7 @@ async fn build_import_connection(
         || entry.proxy_port.is_some()
         || has_proxy_url;
     if (profile_id.is_some() || profile_name.is_some()) && inline {
-        return Err(CliError::new(
-            "PROXY_CONFLICT",
-            "Cannot mix saved proxy reference with inline proxy / proxy_url.",
-        ));
+        return Err(CliError::new("PROXY_CONFLICT", "Cannot mix saved proxy reference with inline proxy / proxy_url."));
     }
     if profile_id.is_some() || profile_name.is_some() {
         let args = dbx_mcp::tunnel_profiles::ProxyProfileRefArgs {
@@ -1926,22 +1764,20 @@ async fn build_import_connection(
             proxy_profile_ids: profile_id.map(|v| vec![v.to_string()]),
             proxy_profile_names: profile_name.map(|v| vec![v.to_string()]),
         };
-        config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, args)
-            .await
-            .map_err(|error| {
-                CliError::new(
-                    "PROXY_PROFILE_NOT_FOUND",
-                    error
-                        .content
-                        .first()
-                        .and_then(|block| block.as_text())
-                        .map(|text| text.text.clone())
-                        .unwrap_or_else(|| "Proxy profile not found".into()),
-                )
-            })?;
+        config = dbx_mcp::resolve::apply_proxy_override_with_args(backend, config, args).await.map_err(|error| {
+            CliError::new(
+                "PROXY_PROFILE_NOT_FOUND",
+                error
+                    .content
+                    .first()
+                    .and_then(|block| block.as_text())
+                    .map(|text| text.text.clone())
+                    .unwrap_or_else(|| "Proxy profile not found".into()),
+            )
+        })?;
     } else if has_proxy_url {
-        let parsed_proxy = parse_proxy_url(entry.proxy_url.as_deref().unwrap_or(""))
-            .map_err(|e| CliError::new("INVALID_PROXY", e))?;
+        let parsed_proxy =
+            parse_proxy_url(entry.proxy_url.as_deref().unwrap_or("")).map_err(|e| CliError::new("INVALID_PROXY", e))?;
         let layer = dbx_mcp::tunnel_profiles::inline_proxy_layer(&parsed_proxy)
             .map_err(|e| CliError::new("INVALID_PROXY", e))?;
         config.transport_layers.push(layer);
@@ -1987,9 +1823,7 @@ fn parse_proxy_url(raw: &str) -> Result<dbx_mcp::tunnel_profiles::InlineProxyArg
         None => (None, None),
     };
     let (host, port) = if let Some((host, port_str)) = hostport.rsplit_once(':') {
-        let port: u16 = port_str
-            .parse()
-            .map_err(|_| format!("Invalid proxy port in proxy_url: {port_str}"))?;
+        let port: u16 = port_str.parse().map_err(|_| format!("Invalid proxy port in proxy_url: {port_str}"))?;
         (host.to_string(), Some(port))
     } else {
         (hostport.to_string(), None)
@@ -2012,9 +1846,8 @@ async fn run_connections_update(backend: Arc<dyn DbxBackend>, flags: &Flags) -> 
     let connection_ref = &flags.args[2];
 
     let profile_ref = dbx_mcp::tunnel_profiles::has_proxy_profile_ref(&cli_proxy_ref_args(flags));
-    let inline = flags.proxy
-        || flags.proxy_host.as_deref().is_some_and(|v| !v.trim().is_empty())
-        || flags.proxy_port.is_some();
+    let inline =
+        flags.proxy || flags.proxy_host.as_deref().is_some_and(|v| !v.trim().is_empty()) || flags.proxy_port.is_some();
     let has_field_update = flags.name.is_some()
         || flags.db_type.is_some()
         || flags.host.is_some()
@@ -2031,10 +1864,7 @@ async fn run_connections_update(backend: Arc<dyn DbxBackend>, flags: &Flags) -> 
         ));
     }
     if profile_ref && inline {
-        return Err(CliError::new(
-            "PROXY_CONFLICT",
-            "Cannot mix saved proxy reference with inline proxy settings.",
-        ));
+        return Err(CliError::new("PROXY_CONFLICT", "Cannot mix saved proxy reference with inline proxy settings."));
     }
 
     let selected = select_connections(backend.as_ref(), connection_ref).await?;
@@ -2071,10 +1901,7 @@ async fn run_connections_update(backend: Arc<dyn DbxBackend>, flags: &Flags) -> 
         let mut json_rows = Vec::new();
         for item in &items {
             match item {
-                dbx_mcp::batch::BatchItem::Ok {
-                    value: (saved, selected_proxy),
-                    ..
-                } => {
+                dbx_mcp::batch::BatchItem::Ok { value: (saved, selected_proxy), .. } => {
                     json_rows.push(json!({
                         "id": saved.id,
                         "name": saved.name,
@@ -2108,26 +1935,18 @@ async fn run_connections_update(backend: Arc<dyn DbxBackend>, flags: &Flags) -> 
             }))
             .unwrap()
         };
-        return if failures > 0 {
-            soft_fail(format!("{body}\n"))
-        } else {
-            ok(format!("{body}\n"))
-        };
+        return if failures > 0 { soft_fail(format!("{body}\n")) } else { ok(format!("{body}\n")) };
     }
 
     let mut parts = Vec::new();
     for item in &items {
         match item {
-            dbx_mcp::batch::BatchItem::Ok {
-                index,
-                value: (saved, selected_proxy),
-            } => {
+            dbx_mcp::batch::BatchItem::Ok { index, value: (saved, selected_proxy) } => {
                 let ordinal = index + 1;
                 let line = match selected_proxy {
-                    Some(proxy) => format!(
-                        "Connection \"{}\" updated (id: {}); proxy set to \"{}\".",
-                        saved.name, saved.id, proxy
-                    ),
+                    Some(proxy) => {
+                        format!("Connection \"{}\" updated (id: {}); proxy set to \"{}\".", saved.name, saved.id, proxy)
+                    }
                     None => format!("Connection \"{}\" updated (id: {}).", saved.name, saved.id),
                 };
                 if total > 1 {
@@ -2149,16 +1968,10 @@ async fn run_connections_update(backend: Arc<dyn DbxBackend>, flags: &Flags) -> 
     }
 
     if total > 1 {
-        parts.push(format!(
-            "Batch complete: {ok_count} updated, {failures} failed / {total} total."
-        ));
+        parts.push(format!("Batch complete: {ok_count} updated, {failures} failed / {total} total."));
     }
     let joined = parts.join("\n\n");
-    let body = if joined.ends_with('\n') {
-        joined
-    } else {
-        format!("{joined}\n")
-    };
+    let body = if joined.ends_with('\n') { joined } else { format!("{joined}\n") };
     if failures > 0 {
         soft_fail(body)
     } else {
@@ -2212,22 +2025,19 @@ async fn update_one_connection(
     let mut selected_proxy: Option<String> = None;
     if profile_ref {
         config = apply_proxy_failover_pick_winner(backend, config, flags).await?;
-        selected_proxy = config
-            .transport_layers
-            .iter()
-            .find_map(|layer| match layer {
-                dbx_core::models::connection::TransportLayerConfig::Proxy(proxy) => {
-                    let label = if !proxy.name.trim().is_empty() {
-                        proxy.name.clone()
-                    } else if !proxy.profile_id.trim().is_empty() {
-                        proxy.profile_id.clone()
-                    } else {
-                        format!("{}:{}", proxy.host, proxy.port)
-                    };
-                    Some(label)
-                }
-                _ => None,
-            });
+        selected_proxy = config.transport_layers.iter().find_map(|layer| match layer {
+            dbx_core::models::connection::TransportLayerConfig::Proxy(proxy) => {
+                let label = if !proxy.name.trim().is_empty() {
+                    proxy.name.clone()
+                } else if !proxy.profile_id.trim().is_empty() {
+                    proxy.profile_id.clone()
+                } else {
+                    format!("{}:{}", proxy.host, proxy.port)
+                };
+                Some(label)
+            }
+            _ => None,
+        });
     } else if flags.proxy || inline {
         let layer = dbx_mcp::tunnel_profiles::inline_proxy_layer(&dbx_mcp::tunnel_profiles::InlineProxyArgs {
             proxy_enabled: Some(true),
@@ -2324,10 +2134,7 @@ async fn apply_proxy_failover_pick_winner(
     let mut proxy_configs = Vec::with_capacity(resolved.len());
     for profile in &resolved {
         let dbx_core::models::connection::TransportLayerConfig::Proxy(proxy) = profile else {
-            return Err(CliError::new(
-                "PROXY_PROFILE_NOT_FOUND",
-                "Selected tunnel profile is not a proxy profile.",
-            ));
+            return Err(CliError::new("PROXY_PROFILE_NOT_FOUND", "Selected tunnel profile is not a proxy profile."));
         };
         proxy_configs.push(proxy);
     }
@@ -2505,14 +2312,11 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             "--verbose" | "-v" => flags.verbose = true,
             "--parallel" | "-P" => {
                 let next = argv.get(index + 1);
-                if let Some(value) = next.filter(|value| !value.starts_with('-') && value.chars().all(|c| c.is_ascii_digit()))
+                if let Some(value) =
+                    next.filter(|value| !value.starts_with('-') && value.chars().all(|c| c.is_ascii_digit()))
                 {
                     let n = value.parse::<usize>().unwrap_or(0);
-                    flags.parallel = Some(if n == 0 {
-                        dbx_mcp::list_index::DEFAULT_PARALLEL_CONCURRENCY
-                    } else {
-                        n
-                    });
+                    flags.parallel = Some(if n == 0 { dbx_mcp::list_index::DEFAULT_PARALLEL_CONCURRENCY } else { n });
                     index += 1;
                 } else {
                     flags.parallel = Some(dbx_mcp::list_index::DEFAULT_PARALLEL_CONCURRENCY);
@@ -2573,14 +2377,10 @@ fn parse_flags(argv: &[String]) -> Result<Flags, CliError> {
             "--proxy-username" => flags.proxy_username = Some(option_value(argv, &mut index, "--proxy-username")?),
             "--proxy-password" => flags.proxy_password = Some(option_value(argv, &mut index, "--proxy-password")?),
             "--proxy-profile-id" | "--proxy-profiles" => {
-                flags
-                    .proxy_profile_ids
-                    .push(option_value(argv, &mut index, "--proxy-profile-id")?)
+                flags.proxy_profile_ids.push(option_value(argv, &mut index, "--proxy-profile-id")?)
             }
             "--proxy-profile-name" => {
-                flags
-                    .proxy_profile_names
-                    .push(option_value(argv, &mut index, "--proxy-profile-name")?)
+                flags.proxy_profile_names.push(option_value(argv, &mut index, "--proxy-profile-name")?)
             }
             value if value.starts_with('-') => {
                 return Err(CliError::new("UNKNOWN_OPTION", format!("Unknown option: {value}")))
@@ -3013,10 +2813,7 @@ mod tests {
 
     impl ImportBackend {
         fn empty() -> Self {
-            Self {
-                connections: std::sync::Mutex::new(Vec::new()),
-                test_calls: std::sync::Mutex::new(0),
-            }
+            Self { connections: std::sync::Mutex::new(Vec::new()), test_calls: std::sync::Mutex::new(0) }
         }
     }
 
@@ -3066,14 +2863,10 @@ mod tests {
 
     #[test]
     fn detects_db_auth_failures_for_proxy_failover_stop() {
-        assert!(is_auth_failure(
-            "ERROR 1045 (28000): Access denied for user 'root'@'1.2.3.4' (using password: YES)"
-        ));
+        assert!(is_auth_failure("ERROR 1045 (28000): Access denied for user 'root'@'1.2.3.4' (using password: YES)"));
         assert!(is_auth_failure("Access Denied for user 'app'@'%'"));
         assert!(is_auth_failure("auth user failed"));
-        assert!(is_auth_failure(
-            "fatal: password authentication failed for user \"postgres\""
-        ));
+        assert!(is_auth_failure("fatal: password authentication failed for user \"postgres\""));
         assert!(is_auth_failure("Login failed for user 'sa'."));
 
         // Proxy / transport failures must keep failover going.
@@ -3220,7 +3013,8 @@ mod tests {
             "--json",
         ]))
         .unwrap();
-        let inserted: Value = serde_json::from_str(&outcome_text(run_with_backend(Arc::clone(&backend), insert).await.unwrap())).unwrap();
+        let inserted: Value =
+            serde_json::from_str(&outcome_text(run_with_backend(Arc::clone(&backend), insert).await.unwrap())).unwrap();
         assert_eq!(inserted["row_count"], 2);
 
         let find = parse_flags(&args(&[
@@ -3230,7 +3024,8 @@ mod tests {
             "--json",
         ]))
         .unwrap();
-        let found: Value = serde_json::from_str(&outcome_text(run_with_backend(Arc::clone(&backend), find).await.unwrap())).unwrap();
+        let found: Value =
+            serde_json::from_str(&outcome_text(run_with_backend(Arc::clone(&backend), find).await.unwrap())).unwrap();
         assert_eq!(found["row_count"], 2);
         assert_eq!(found["rows"][0]["name"], "Ada");
         assert_eq!(found["rows"][1]["name"], "Grace");
@@ -3296,14 +3091,7 @@ mod tests {
         .unwrap();
 
         let backend = Arc::new(ImportBackend::empty());
-        let flags = parse_flags(&args(&[
-            "connections",
-            "import",
-            "--file",
-            path.to_str().unwrap(),
-            "--json",
-        ]))
-        .unwrap();
+        let flags = parse_flags(&args(&["connections", "import", "--file", path.to_str().unwrap(), "--json"])).unwrap();
         let output = outcome_text(run_with_backend(Arc::clone(&backend) as Arc<dyn DbxBackend>, flags).await.unwrap());
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["added"], 2);
@@ -3363,14 +3151,7 @@ mod tests {
         )
         .unwrap();
         let backend = Arc::new(ImportBackend::empty());
-        let flags = parse_flags(&args(&[
-            "connections",
-            "import",
-            "--file",
-            path.to_str().unwrap(),
-            "--json",
-        ]))
-        .unwrap();
+        let flags = parse_flags(&args(&["connections", "import", "--file", path.to_str().unwrap(), "--json"])).unwrap();
         let output = outcome_text(run_with_backend(Arc::clone(&backend) as Arc<dyn DbxBackend>, flags).await.unwrap());
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["added"], 2);
@@ -3397,25 +3178,10 @@ mod tests {
 
     #[test]
     fn parse_flags_accepts_connection_url_aliases() {
-        let flags = parse_flags(&args(&[
-            "connections",
-            "add",
-            "--name",
-            "x",
-            "--url",
-            "mysql://u:p@h:3306/db",
-        ]))
-        .unwrap();
+        let flags =
+            parse_flags(&args(&["connections", "add", "--name", "x", "--url", "mysql://u:p@h:3306/db"])).unwrap();
         assert_eq!(flags.connection_url.as_deref(), Some("mysql://u:p@h:3306/db"));
-        let flags = parse_flags(&args(&[
-            "connections",
-            "add",
-            "--dsn",
-            "postgres://u@h/db",
-            "--name",
-            "y",
-        ]))
-        .unwrap();
+        let flags = parse_flags(&args(&["connections", "add", "--dsn", "postgres://u@h/db", "--name", "y"])).unwrap();
         assert_eq!(flags.connection_url.as_deref(), Some("postgres://u@h/db"));
     }
 
@@ -3450,10 +3216,8 @@ mod tests {
 
     #[test]
     fn extract_import_items_from_csv_handles_quoted_commas_and_aliases() {
-        let csv = concat!(
-            "name,dsn,proxy_profiles\n",
-            "\"note,prod\",\"mysql://root:a,b@10.0.0.1:3306/app\",\"1,2\"\n",
-        );
+        let csv =
+            concat!("name,dsn,proxy_profiles\n", "\"note,prod\",\"mysql://root:a,b@10.0.0.1:3306/app\",\"1,2\"\n",);
         let items = extract_import_items_from_csv(csv).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "note,prod");
@@ -3472,26 +3236,11 @@ mod tests {
         let csv_path = std::path::Path::new("a.csv");
         let json_path = std::path::Path::new("a.json");
         let txt_path = std::path::Path::new("a.txt");
-        assert_eq!(
-            detect_import_format(csv_path, "name,url\nx,y\n", None),
-            ImportFileFormat::Csv
-        );
-        assert_eq!(
-            detect_import_format(json_path, "[]", None),
-            ImportFileFormat::Json
-        );
-        assert_eq!(
-            detect_import_format(txt_path, "[{ \"name\": \"a\" }]", None),
-            ImportFileFormat::Json
-        );
-        assert_eq!(
-            detect_import_format(txt_path, "name,url\na,mysql://h/db\n", None),
-            ImportFileFormat::Csv
-        );
-        assert_eq!(
-            detect_import_format(json_path, "[]", Some(ImportFileFormat::Csv)),
-            ImportFileFormat::Csv
-        );
+        assert_eq!(detect_import_format(csv_path, "name,url\nx,y\n", None), ImportFileFormat::Csv);
+        assert_eq!(detect_import_format(json_path, "[]", None), ImportFileFormat::Json);
+        assert_eq!(detect_import_format(txt_path, "[{ \"name\": \"a\" }]", None), ImportFileFormat::Json);
+        assert_eq!(detect_import_format(txt_path, "name,url\na,mysql://h/db\n", None), ImportFileFormat::Csv);
+        assert_eq!(detect_import_format(json_path, "[]", Some(ImportFileFormat::Csv)), ImportFileFormat::Csv);
         let flags = parse_flags(&args(&["connections", "import", "--file", "x.txt", "--format", "csv", "-j"])).unwrap();
         assert_eq!(flags.import_format, Some(ImportFileFormat::Csv));
         assert_eq!(flags.format, OutputFormat::Json);
@@ -3507,14 +3256,7 @@ mod tests {
         )
         .unwrap();
         let backend = Arc::new(ImportBackend::empty());
-        let flags = parse_flags(&args(&[
-            "connections",
-            "import",
-            "--file",
-            path.to_str().unwrap(),
-            "--json",
-        ]))
-        .unwrap();
+        let flags = parse_flags(&args(&["connections", "import", "--file", path.to_str().unwrap(), "--json"])).unwrap();
         let output = outcome_text(run_with_backend(Arc::clone(&backend) as Arc<dyn DbxBackend>, flags).await.unwrap());
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["added"], 1);
@@ -3534,11 +3276,7 @@ mod tests {
     async fn connections_import_format_csv_override_for_txt() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("connections.txt");
-        std::fs::write(
-            &path,
-            "name,url\nforced-csv,mysql://u:p@10.0.0.3:3306/app\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "name,url\nforced-csv,mysql://u:p@10.0.0.3:3306/app\n").unwrap();
         let backend = Arc::new(ImportBackend::empty());
         let flags = parse_flags(&args(&[
             "connections",
@@ -3568,14 +3306,7 @@ mod tests {
         )
         .unwrap();
         let backend = Arc::new(ImportBackend::empty());
-        let flags = parse_flags(&args(&[
-            "connections",
-            "import",
-            "--file",
-            path.to_str().unwrap(),
-            "--json",
-        ]))
-        .unwrap();
+        let flags = parse_flags(&args(&["connections", "import", "--file", path.to_str().unwrap(), "--json"])).unwrap();
         let output = outcome_text(run_with_backend(Arc::clone(&backend) as Arc<dyn DbxBackend>, flags).await.unwrap());
         let value: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["added"], 3);

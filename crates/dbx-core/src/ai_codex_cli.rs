@@ -1000,8 +1000,8 @@ mod tests {
     use super::{codex_process_env, codex_process_env_with_system_proxy, common_executable_dirs, merged_path_with_dir};
     #[cfg(windows)]
     use super::{
-        codex_process_env_with_system_proxy, direct_program_path, first_windows_program_path,
-        program_path_candidates, resolve_codex_command, windows_npm_codex_shim_command,
+        codex_process_env_with_system_proxy, direct_program_path, first_windows_program_path, program_path_candidates,
+        resolve_codex_command, windows_npm_codex_shim_command,
     };
     use crate::agent_events::AgentEvent;
     use crate::ai::{
