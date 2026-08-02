@@ -2392,6 +2392,23 @@ impl Storage {
         .await
     }
 
+    pub async fn update_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {
+        let config = config.canonicalized();
+        self.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            ensure_mcp_connection_change_allowed_in_tx(&tx, Some(&config.id))?;
+            let deleted =
+                tx.execute("DELETE FROM connections WHERE id = ?1", params![&config.id]).map_err(|e| e.to_string())?;
+            if deleted == 0 {
+                return Err(format!("Connection config not found: {}", config.id));
+            }
+            persist_connection_in_tx(&tx, &config)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(config)
+        })
+        .await
+    }
+
     pub async fn remove_connection_for_mcp(&self, connection_id: &str) -> Result<bool, String> {
         let connection_id = connection_id.to_string();
         self.with_conn(move |conn| {
@@ -4730,17 +4747,28 @@ mod tests {
             .unwrap();
         let error = storage.remove_connection_for_mcp(&removed.id).await.unwrap_err();
         assert!(error.starts_with("CONNECTION_OUT_OF_SCOPE:"));
+        let mut denied_update = removed.clone();
+        denied_update.host = "must-not-update".to_string();
+        let error = storage.update_connection_for_mcp(denied_update).await.unwrap_err();
+        assert!(error.starts_with("CONNECTION_OUT_OF_SCOPE:"));
 
         let mut concurrently_updated = removed.clone();
         concurrently_updated.host = "updated-by-web-ui".to_string();
         storage.save_connections(&[kept.clone(), concurrently_updated.clone()]).await.unwrap();
         let added = mq_connection("added", "added-token");
         storage.add_connection_for_mcp(added.clone()).await.unwrap();
+        let mut allowed_update = kept.clone();
+        allowed_update.host = "updated-by-mcp".to_string();
+        storage.update_connection_for_mcp(allowed_update).await.unwrap();
         let after_add = storage.load_connections().await.unwrap();
         assert_eq!(after_add.len(), 3);
         assert_eq!(
             after_add.iter().find(|config| config.id == concurrently_updated.id).map(|config| config.host.as_str()),
             Some("updated-by-web-ui")
+        );
+        assert_eq!(
+            after_add.iter().find(|config| config.id == kept.id).map(|config| config.host.as_str()),
+            Some("updated-by-mcp")
         );
 
         storage
