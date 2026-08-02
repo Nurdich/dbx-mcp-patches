@@ -4,7 +4,6 @@ pub mod descriptor;
 pub mod dialect_loader;
 pub mod dialect_types;
 pub mod dialect_yaml;
-pub mod hot_reload;
 mod identifiers;
 pub mod inference;
 mod table_select;
