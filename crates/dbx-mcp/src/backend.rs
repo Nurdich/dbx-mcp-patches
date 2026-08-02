@@ -379,9 +379,19 @@ impl DbxBackend for LocalBackend {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult {
+        let schema = arguments.get("schema").and_then(|value| value.as_str()).map(ToOwned::to_owned);
         let call =
             ToolCall { id: format!("mcp-{tool_name}"), name: tool_name.to_string(), arguments, provider_payload: None };
-        agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions).await
+        agent_tools::execute_tool(
+            &call,
+            &self.state,
+            &connection.id,
+            database,
+            schema.as_deref(),
+            &connection.db_type,
+            permissions,
+        )
+        .await
     }
 
     async fn execute_query(
@@ -891,9 +901,7 @@ impl DbxBackend for WebBackend {
     }
 
     async fn test_connection_config(&self, config: &ConnectionConfig) -> Result<(), String> {
-        self.request(reqwest::Method::POST, "/api/connection/test", Some(json!({ "config": config })))
-            .await
-            .map(|_| ())
+        self.request(reqwest::Method::POST, "/api/connection/test", Some(json!({ "config": config }))).await.map(|_| ())
     }
 
     async fn list_tables(
@@ -1411,6 +1419,8 @@ fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64)
         columns,
         column_types: Vec::new(),
         column_sortables: Vec::new(),
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows,
         affected_rows,
         execution_time_ms: 0,

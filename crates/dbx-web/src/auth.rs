@@ -210,7 +210,6 @@ pub fn session_token_from_headers(headers: &axum::http::HeaderMap) -> Option<Str
             return Some(token.to_string());
         }
     }
-
     let cookie_header = headers.get("cookie")?.to_str().ok()?;
     for pair in cookie_header.split(';') {
         let pair = pair.trim();

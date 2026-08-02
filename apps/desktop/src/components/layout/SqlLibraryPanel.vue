@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
@@ -18,6 +18,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
+import { savedSqlExecutionTargetFromTab, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import type { SavedSqlFile, SavedSqlFolder } from "@/types/database";
 
 const { t } = useI18n();
@@ -205,21 +206,9 @@ async function exportFolderContents(folder?: SavedSqlFolder) {
 }
 
 async function collectSqlFilesRecursively(dir: string): Promise<string[]> {
-  const { readDir } = await import("@tauri-apps/plugin-fs");
-  const { join } = await import("@tauri-apps/api/path");
+  const collectPaths = (entries: Awaited<ReturnType<typeof api.listSqlFilesInFolder>>): string[] => entries.flatMap((entry) => (entry.is_dir ? collectPaths(entry.children) : [entry.path]));
 
-  const results: string[] = [];
-  for (const entry of await readDir(dir)) {
-    const fullPath = await join(dir, entry.name);
-    if (entry.isDirectory) {
-      results.push(...(await collectSqlFilesRecursively(fullPath)));
-      continue;
-    }
-    if (!entry.isFile) continue;
-    if (!fullPath.toLowerCase().endsWith(".sql")) continue;
-    results.push(fullPath);
-  }
-  return results;
+  return collectPaths(await api.listSqlFilesInFolder(dir));
 }
 
 async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
@@ -456,7 +445,8 @@ async function openNewQueryInFolder(folder?: SavedSqlFolder) {
     database: "",
     sql: "",
   });
-  queryStore.openSavedSql(file);
+  const tabId = queryStore.openSavedSql(file);
+  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
 }
 
 // Batch selection state
@@ -468,6 +458,11 @@ const lastClickedItemIndex = ref<number | null>(null); // Unified index for both
 const activeItemId = ref<string | null>(null);
 const activeItemType = ref<"file" | "folder" | null>(null);
 const activeSavedSqlId = computed(() => queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId)?.savedSqlId ?? null);
+const hasCurrentSavedSqlExecutionTarget = computed(() => {
+  const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  const target = savedSqlExecutionTargetFromTab(activeTab);
+  return !!target && activeConnectionIds.value.has(target.connectionId);
+});
 
 watch(
   activeSavedSqlId,
@@ -676,12 +671,12 @@ async function moveFilesToFolder(fileIds: string[], folderId?: string) {
   toast(t("sqlLibrary.moveSuccess", { count: movableIds.length }), 2000);
 }
 
-async function openFile(file: SavedSqlFile) {
+async function openFile(file: SavedSqlFile, targetMode?: SavedSqlOpenTargetMode) {
   if (suppressNextRowClick.value) return;
   const loadedFile = await savedSqlStore.ensureFileContent(file.id);
   if (!loadedFile) return;
-  queryStore.openSavedSql(loadedFile);
-  connectionStore.activeConnectionId = loadedFile.connectionId;
+  const tabId = queryStore.openSavedSql(loadedFile, { targetMode });
+  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? loadedFile.connectionId;
   void savedSqlStore.recordFileUsage(loadedFile.id);
 }
 
@@ -884,6 +879,12 @@ const contextMenuItems = computed<CtxMenuItem[]>(() => {
   if ("sql" in target) {
     return [
       { label: t("savedSql.open"), action: () => openFile(target), icon: FileText },
+      {
+        label: t("sqlLibrary.openInCurrentDatabase"),
+        action: () => openFile(target, "current"),
+        icon: Play,
+        disabled: !hasCurrentSavedSqlExecutionTarget.value,
+      },
       { label: t("sqlLibrary.exportFile"), action: () => exportSingleFile(target), icon: Upload },
       { label: t("sqlLibrary.moveToFolder"), icon: FolderClosed, children: folderMoveMenuItems([target.id]) },
       { label: "", separator: true },

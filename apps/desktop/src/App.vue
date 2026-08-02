@@ -34,6 +34,7 @@ import { useVisibilityChange } from "@/composables/useVisibilityChange";
 import { useWebDavAutoUpload } from "@/composables/useWebDavAutoUpload";
 import { useScheduledDatabaseBackups } from "@/composables/useScheduledDatabaseBackups";
 import { shouldDrawDesktopWindowFrame } from "@/composables/useWindowControls";
+import { createOpenTabsRestorationBarrier, initializeDesktopOpenTabs, type OpenTabsRestorationBarrier } from "@/lib/app/openTabsStartup";
 import { useSaveSqlFolderSelection } from "@/composables/useSaveSqlFolderSelection";
 import "@/i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -53,7 +54,7 @@ import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
-import type { ConnectionConfig, ObjectSourceKind, QueryTab } from "@/types/database";
+import type { ConnectionConfig, ObjectSourceKind, QueryTab, SavedSqlFile } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import {
   isBrowserReloadShortcut,
@@ -91,6 +92,7 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
+import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
@@ -150,6 +152,7 @@ const {
   checkUpdates,
   openLatestRelease,
   downloadAndInstallUpdate,
+  cancelDownload,
   installDownloadedUpdate,
   restartApp,
 } = useAppUpdater({
@@ -340,7 +343,7 @@ function requestActiveEditorExecuteInNewResultTab() {
 
 const dialogs = useDialogSources();
 const { getDatabaseOptions } = useDatabaseOptions();
-const { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
+const { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, openObjectBrowserTableTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
 const { onExecuteSql, onReloadData, onPaginate, onSort } = useDataGridActions(activeTab);
 const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openTableTarget,
@@ -825,6 +828,18 @@ async function saveExternalSqlPath(tab: QueryTab, options: { closeAfterSave?: bo
   }
 }
 
+function savedSqlTargetForSave(tab: QueryTab, existing?: SavedSqlFile) {
+  return savedSqlDefaultTargetForWrite(
+    {
+      connectionId: tab.connectionId,
+      database: tab.database,
+      schema: tab.schema,
+      catalog: tab.catalog,
+    },
+    existing,
+  );
+}
+
 async function saveTabForCloseAll(tabId: string): Promise<boolean> {
   const tab = queryStore.tabs.find((t) => t.id === tabId);
   if (!tab) return true;
@@ -841,14 +856,15 @@ async function saveTabForCloseAll(tabId: string): Promise<boolean> {
   if (await saveExternalSqlPath(tab)) return !queryStore.isTabDirty(tab);
 
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
+  const target = savedSqlTargetForSave(tab, existing);
   try {
     const saved = await savedSqlStore.saveFile({
       id: existing?.id,
-      connectionId: tab.connectionId,
+      connectionId: target.connectionId,
       folderId: existing?.folderId,
       name: existing?.name || defaultSavedSqlName(tab.title),
-      database: tab.database,
-      schema: tab.schema,
+      database: target.database,
+      schema: target.schema,
       sql: tab.sql,
     });
     queryStore.linkSavedSql(tab.id, saved.id, saved.name);
@@ -907,13 +923,14 @@ async function handleSaveTab(tabId: string) {
   }
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
+    const target = savedSqlTargetForSave(tab, existing);
     const updated = await savedSqlStore.saveFile({
       id: existing.id,
-      connectionId: tab.connectionId,
+      connectionId: target.connectionId,
       folderId: existing.folderId,
       name: existing.name,
-      database: tab.database,
-      schema: tab.schema,
+      database: target.database,
+      schema: target.schema,
       sql: tab.sql,
     });
     queryStore.linkSavedSql(tab.id, updated.id, updated.name);
@@ -942,13 +959,14 @@ async function openSaveSqlDialog() {
   if (await saveExternalSqlPath(tab)) return;
   const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
   if (existing) {
+    const target = savedSqlTargetForSave(tab, existing);
     const updated = await savedSqlStore.saveFile({
       id: existing.id,
-      connectionId: tab.connectionId,
+      connectionId: target.connectionId,
       folderId: existing.folderId,
       name: existing.name,
-      database: tab.database,
-      schema: tab.schema,
+      database: target.database,
+      schema: target.schema,
       sql: tab.sql,
     });
     queryStore.linkSavedSql(tab.id, updated.id, updated.name);
@@ -1035,13 +1053,15 @@ async function confirmSaveSqlToLibrary() {
   const name = saveSqlName.value.trim();
   if (!tab || !tab.sql.trim() || !name) return;
   try {
+    const existing = tab.savedSqlId ? savedSqlStore.getFile(tab.savedSqlId) : undefined;
+    const target = savedSqlTargetForSave(tab, existing);
     const saved = await savedSqlStore.saveFile({
       id: tab.savedSqlId,
-      connectionId: tab.connectionId,
+      connectionId: target.connectionId,
       folderId: saveSqlFolderId.value === ROOT_SAVED_SQL_FOLDER ? undefined : saveSqlFolderId.value,
       name: defaultSavedSqlName(name),
-      database: tab.database,
-      schema: tab.schema,
+      database: target.database,
+      schema: target.schema,
       sql: tab.sql,
     });
     queryStore.linkSavedSql(tab.id, saved.id, saved.name);
@@ -1126,9 +1146,15 @@ function pasteClipboardAsSqlInCondition() {
   void contentAreaRef.value?.pasteClipboardAsSqlInCondition?.();
 }
 
+// Cold-start file arguments can arrive while persisted tabs are still being
+// restored. Keep external SQL tabs behind that phase only, so unrelated
+// initialization cannot permanently block files opened from the OS.
+let desktopOpenTabsRestorationBarrier: OpenTabsRestorationBarrier | null = null;
+
 async function openSqlFilePath(path: string) {
   if (!isTauriRuntime()) return;
   try {
+    await desktopOpenTabsRestorationBarrier?.settled;
     const content = await api.readExternalSqlFile(path);
     const connectionId = connectionStore.activeConnectionId || activeTab.value?.connectionId || connectionStore.connections[0]?.id || "";
     const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
@@ -1303,6 +1329,12 @@ async function newQuery() {
     databaseType: effectiveDatabaseTypeForConnection(conn),
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
+  if (initialSql) {
+    const prefilledTab = queryStore.tabs.find((t) => t.id === tabId);
+    if (prefilledTab) {
+      prefilledTab.editorSelection = { anchor: initialSql.length, head: initialSql.length };
+    }
+  }
   try {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {
@@ -1377,8 +1409,8 @@ async function openConnectionQuery(connectionId: string) {
 async function openSavedSqlFromWelcome(fileId: string) {
   const file = await savedSqlStore.ensureFileContent(fileId);
   if (!file) return;
-  queryStore.openSavedSql(file);
-  connectionStore.activeConnectionId = file.connectionId;
+  const tabId = queryStore.openSavedSql(file);
+  connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
   void savedSqlStore.recordFileUsage(file.id);
   toast(t("welcome.fileOpened", { name: file.name }), 2000);
 }
@@ -1432,6 +1464,10 @@ async function onClickTable(table: SqlObjectNavigationTarget) {
     showQueryEditorDdlDialog.value = true;
     return;
   }
+  if (settingsStore.editorSettings.clickTableNavigationTarget === "ddl") {
+    queryStore.openTableStructure(target.connectionId, target.database, target.schema, target.tableName, "ddl", undefined, target.catalog);
+    return;
+  }
   try {
     await openTableTarget(target, { tableInfoTab: "ddl" });
   } catch (e: any) {
@@ -1480,6 +1516,7 @@ async function onOpenObjectSource(table: SqlObjectNavigationTarget, initialEditi
 function onQueryEditorObjectSourceSaved() {
   const target = queryEditorObjectSourceTarget.value;
   if (!target) return;
+  connectionStore.invalidateMetadataCache(target.connectionId, target.database, target.schema, target.name);
   connectionStore.invalidateCompletionCache(target.connectionId, target.database);
   contentAreaRef.value?.refreshQueryEditorCompletionCache();
 }
@@ -1548,6 +1585,7 @@ function changeActiveSchema(schema: string | undefined) {
   const tab = activeTab.value;
   if (tab) queryStore.updateSchema(tab.id, schema);
 }
+
 function openGitHub() {
   openUrl("https://github.com/t8y2/dbx");
 }
@@ -1673,8 +1711,8 @@ async function handleQuickOpenSelect(item: any) {
   if (item.type === "sql_library_file" && item.sqlFileId) {
     const file = await savedSqlStore.ensureFileContent(item.sqlFileId);
     if (!file) return;
-    queryStore.openSavedSql(file);
-    connectionStore.activeConnectionId = file.connectionId;
+    const tabId = queryStore.openSavedSql(file);
+    connectionStore.activeConnectionId = queryStore.tabs.find((tab) => tab.id === tabId)?.connectionId ?? file.connectionId;
     void savedSqlStore.recordFileUsage(file.id);
     return;
   }
@@ -1705,7 +1743,7 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadZooKeeperRoot(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
-      } else if (config?.db_type === "elasticsearch") {
+      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
         await connectionStore.openElasticsearchConnectionTree(item.connectionId);
       } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(item.connectionId);
@@ -1730,7 +1768,7 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadZooKeeperRoot(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
-      } else if (config?.db_type === "elasticsearch") {
+      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
         await connectionStore.openElasticsearchConnectionTree(item.connectionId);
       } else if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
         await connectionStore.loadVectorCollections(item.connectionId);
@@ -1986,14 +2024,27 @@ function onLoginSuccess() {
 async function initApp() {
   const t0 = performance.now();
   console.log("[STARTUP] initApp begin");
-  await settingsStore.initAiConfigs();
-  try {
+  const restoreOpenTabs = async () => {
     await settingsStore.initEditorSettings();
     console.log(`[STARTUP]   settingsStore.initEditorSettings: ${(performance.now() - t0).toFixed(0)}ms`);
     await connectionStore.initFromDisk();
     console.log(`[STARTUP]   connectionStore.initFromDisk: ${(performance.now() - t0).toFixed(0)}ms`);
     await queryStore.initOpenTabs({ validConnectionIds: connectionStore.connections.map((connection) => connection.id) });
     console.log(`[STARTUP]   queryStore.initOpenTabs: ${(performance.now() - t0).toFixed(0)}ms`);
+  };
+
+  if (!desktopOpenTabsRestorationBarrier) await settingsStore.initAiConfigs();
+  try {
+    if (desktopOpenTabsRestorationBarrier) {
+      await initializeDesktopOpenTabs({
+        barrier: desktopOpenTabsRestorationBarrier,
+        initializeOptionalState: () => settingsStore.initAiConfigs(),
+        restoreOpenTabs,
+        onOptionalStateError: (error) => console.error("[STARTUP] settingsStore.initAiConfigs failed", error),
+      });
+    } else {
+      await restoreOpenTabs();
+    }
     await settingsStore.initDesktopSettings().catch(() => {});
 
     void promptTemplateStore.init();
@@ -2124,6 +2175,7 @@ onMounted(async () => {
       .catch(() => {});
     return;
   }
+  desktopOpenTabsRestorationBarrier = createOpenTabsRestorationBarrier();
   void initApp();
   setupFileDrop().catch(() => {});
   setTimeout(() => {
@@ -2326,7 +2378,7 @@ onUnmounted(() => {
                     @open-object-table="
                       (target) =>
                         activeTab &&
-                        openTableTarget({
+                        openObjectBrowserTableTarget({
                           connectionId: activeTab.connectionId,
                           database: activeTab.database,
                           schema: target.schema,
@@ -2474,6 +2526,7 @@ onUnmounted(() => {
           :active-task-count="activeUpdateTaskCount"
           @open-latest-release="openLatestRelease"
           @download-and-install="downloadAndInstallUpdate"
+          @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdate"
           @restart="restartApp"
         />
@@ -2566,6 +2619,7 @@ onUnmounted(() => {
         @saved="onQueryEditorObjectSourceSaved"
       />
     </TooltipProvider>
+    <div id="dbx-query-editor-tooltip-root" class="fixed left-0 top-0 z-[70] h-0 w-0 overflow-visible" />
   </div>
 </template>
 

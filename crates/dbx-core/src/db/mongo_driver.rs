@@ -637,11 +637,11 @@ pub async fn find_documents(
         _ => doc! {},
     };
 
-    let total_is_exact = !filter_doc.is_empty();
-    let total = if total_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    let count_is_exact = !filter_doc.is_empty();
+    let total_result = if count_is_exact {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
+        col.estimated_document_count().await.map_err(|e| e.to_string())
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -670,6 +670,7 @@ pub async fn find_documents(
         documents.push(bson_to_json(&Bson::Document(doc.clone())));
         extended_documents.push(Bson::Document(doc).into_canonical_extjson());
     }
+    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
 
     Ok(MongoDocumentResult {
         documents,
@@ -782,11 +783,11 @@ pub async fn find_documents_extended_json(
         _ => doc! {},
     };
 
-    let total_is_exact = !filter_doc.is_empty();
-    let total = if total_is_exact {
-        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())?
+    let count_is_exact = !filter_doc.is_empty();
+    let total_result = if count_is_exact {
+        col.count_documents(filter_doc.clone()).await.map_err(|e| e.to_string())
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())?
+        col.estimated_document_count().await.map_err(|e| e.to_string())
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -816,6 +817,7 @@ pub async fn find_documents_extended_json(
         documents.push(document);
         extended_documents.push(extended_document);
     }
+    let (total, total_is_exact) = resolve_mongo_find_total(total_result, count_is_exact, skip, documents.len());
 
     Ok(MongoDocumentResult {
         extended_documents: Some(extended_documents),
@@ -824,6 +826,27 @@ pub async fn find_documents_extended_json(
         total,
         total_is_exact,
     })
+}
+
+fn resolve_mongo_find_total(
+    total_result: Result<u64, String>,
+    count_is_exact: bool,
+    skip: u64,
+    document_count: usize,
+) -> (u64, bool) {
+    match total_result {
+        Ok(total) => (total, count_is_exact),
+        Err(error) => {
+            log::debug!(
+                "[mongo][find:count-fallback] count_mode={} skip={} documents={} error={}",
+                if count_is_exact { "exact" } else { "estimated" },
+                skip,
+                document_count,
+                error
+            );
+            (skip.saturating_add(u64::try_from(document_count).unwrap_or(u64::MAX)), false)
+        }
+    }
 }
 
 /// Run `db.collection.aggregate(pipeline, options)`.
@@ -1230,16 +1253,22 @@ pub async fn update_documents(
         serde_json::from_str(update_json).map_err(|e| format!("Invalid update JSON: {e}"))?;
     let filter = json_filter_to_document(&filter_value).map_err(|e| format!("Invalid filter: {e}"))?;
     let update = json_update_to_modifications(&update_value).map_err(|e| format!("Invalid update: {e}"))?;
-    let array_filters = parse_update_array_filters(options_json)?;
+    let ParsedMongoUpdateOptions { upsert, array_filters } = parse_update_options(options_json)?;
     let col = client.database(database).collection::<Document>(collection);
     let result = if many {
         let mut action = col.update_many(filter, update);
+        if let Some(upsert) = upsert {
+            action = action.upsert(upsert);
+        }
         if let Some(filters) = array_filters {
             action = action.array_filters(filters);
         }
         action.await.map_err(|e| e.to_string())?
     } else {
         let mut action = col.update_one(filter, update);
+        if let Some(upsert) = upsert {
+            action = action.upsert(upsert);
+        }
         if let Some(filters) = array_filters {
             action = action.array_filters(filters);
         }
@@ -1249,17 +1278,24 @@ pub async fn update_documents(
 }
 
 #[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct MongoUpdateOptions {
+    upsert: Option<bool>,
     array_filters: Option<Vec<serde_json::Value>>,
 }
 
-fn parse_update_array_filters(options_json: Option<&str>) -> Result<Option<Vec<Document>>, String> {
+#[derive(Debug, Default)]
+struct ParsedMongoUpdateOptions {
+    upsert: Option<bool>,
+    array_filters: Option<Vec<Document>>,
+}
+
+fn parse_update_options(options_json: Option<&str>) -> Result<ParsedMongoUpdateOptions, String> {
     let Some(raw) = options_json.filter(|value| !value.trim().is_empty()) else {
-        return Ok(None);
+        return Ok(ParsedMongoUpdateOptions::default());
     };
     let options: MongoUpdateOptions = serde_json::from_str(raw).map_err(|e| format!("Invalid update options: {e}"))?;
-    options
+    let array_filters = options
         .array_filters
         .map(|filters| {
             filters
@@ -1268,7 +1304,8 @@ fn parse_update_array_filters(options_json: Option<&str>) -> Result<Option<Vec<D
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| format!("Invalid arrayFilters: {e}"))
         })
-        .transpose()
+        .transpose()?;
+    Ok(ParsedMongoUpdateOptions { upsert: options.upsert, array_filters })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1903,6 +1940,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mongo_find_count_failure_returns_loaded_lower_bound() {
+        let error = "invalid type: floating point `2053278871.0`, expected u64".to_string();
+
+        assert_eq!(resolve_mongo_find_total(Err(error), false, 100, 25), (125, false));
+    }
+
+    #[test]
+    fn mongo_find_count_success_preserves_count_semantics() {
+        assert_eq!(resolve_mongo_find_total(Ok(250), true, 100, 25), (250, true));
+        assert_eq!(resolve_mongo_find_total(Ok(250), false, 100, 25), (250, false));
+    }
+
+    #[test]
     fn parse_aggregate_options_document_keeps_official_fields() {
         let doc = parse_aggregate_options_document(Some(
             r#"{
@@ -2021,20 +2071,13 @@ mod tests {
     }
 
     #[test]
-    fn update_options_parse_array_filters() {
-        let filters = parse_update_array_filters(Some(r#"{"arrayFilters":[{"item.id":322678},{"item.active":true}]}"#))
-            .unwrap()
-            .unwrap();
+    fn update_options_parse_upsert_and_array_filters() {
+        let options =
+            parse_update_options(Some(r#"{"upsert":true,"arrayFilters":[{"item.id":322678},{"item.active":true}]}"#))
+                .unwrap();
 
-        assert_eq!(filters, vec![doc! { "item.id": 322678_i64 }, doc! { "item.active": true }]);
-    }
-
-    #[test]
-    fn update_options_reject_unsupported_fields() {
-        let error = parse_update_array_filters(Some(r#"{"upsert":true}"#)).unwrap_err();
-
-        assert!(error.starts_with("Invalid update options:"));
-        assert!(error.contains("unknown field `upsert`"));
+        assert_eq!(options.upsert, Some(true));
+        assert_eq!(options.array_filters.unwrap(), vec![doc! { "item.id": 322678_i64 }, doc! { "item.active": true }]);
     }
 
     #[test]

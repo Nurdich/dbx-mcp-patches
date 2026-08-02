@@ -347,6 +347,7 @@ async fn main() {
         // Schema
         .route("/schema/databases", get(routes::schema::list_databases))
         .route("/schema/database-storage", post(routes::schema::list_database_storage))
+        .route("/schema/sqlserver/completion-context", get(routes::schema::get_sqlserver_completion_context))
         .route("/schema/doris/catalogs", get(routes::schema::list_doris_catalogs))
         .route("/schema/doris/catalog-databases", get(routes::schema::list_doris_catalog_databases))
         .route("/schema/sqlserver/linked-servers", get(routes::schema::list_sqlserver_linked_servers))
@@ -496,6 +497,8 @@ async fn main() {
         .route("/redis/scan-keys-batch", post(routes::redis::scan_keys_batch))
         .route("/redis/scan-values", post(routes::redis::scan_values))
         .route("/redis/get-value", post(routes::redis::get_value))
+        .route("/redis/get-ttl", post(routes::redis::get_ttl))
+        .route("/redis/get-stream-entries", post(routes::redis::get_stream_entries))
         .route("/redis/get-stream-groups", post(routes::redis::get_stream_groups))
         .route("/redis/get-stream-consumers", post(routes::redis::get_stream_consumers))
         .route("/redis/get-stream-pending", post(routes::redis::get_stream_pending))
@@ -532,6 +535,15 @@ async fn main() {
         .route("/etcd/rename", post(routes::etcd::rename))
         .route("/etcd/history", post(routes::etcd::history))
         .route("/etcd/status", post(routes::etcd::status))
+        .route("/etcd/preflight", post(routes::etcd::preflight))
+        .route("/etcd/compact", post(routes::etcd::compact))
+        .route("/etcd/defrag", post(routes::etcd::defrag))
+        .route("/etcd/watch/start", post(routes::etcd::watch_start))
+        .route("/etcd/watch/poll", post(routes::etcd::watch_poll))
+        .route("/etcd/watch/stop", post(routes::etcd::watch_stop))
+        .route("/etcd/lease/list", post(routes::etcd::lease_list))
+        .route("/etcd/lease/call", post(routes::etcd::lease_call))
+        .route("/etcd/auth/call", post(routes::etcd::auth_call))
         // ZooKeeper
         .route("/zookeeper/list-prefix", post(routes::zookeeper::list_prefix))
         .route("/zookeeper/get", post(routes::zookeeper::get))
@@ -748,6 +760,9 @@ async fn main() {
         .route("/cloud-sync/snippet/token-status", post(routes::cloud_sync::snippet_token_status))
         .route("/cloud-sync/snippet/save-token", post(routes::cloud_sync::save_snippet_saved_token))
         .route("/cloud-sync/snippet/forget-token", post(routes::cloud_sync::forget_snippet_saved_token))
+        .route("/cloud-sync/snippet/settings", post(routes::cloud_sync::snippet_sync_settings))
+        .route("/cloud-sync/snippet/save-id", post(routes::cloud_sync::save_snippet_sync_id))
+        .route("/cloud-sync/snippet/retry-legacy-cleanup", post(routes::cloud_sync::retry_snippet_legacy_cleanup))
         .route("/cloud-sync/snippet/upload", post(routes::cloud_sync::snippet_sync_upload))
         .route("/cloud-sync/snippet/download", post(routes::cloud_sync::snippet_sync_download));
 

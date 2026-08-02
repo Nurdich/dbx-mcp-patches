@@ -110,11 +110,15 @@ pub struct AddConnectionRequest {
     #[serde(default)]
     pub ssl: bool,
     pub driver_profile: Option<String>,
-    #[schemars(description = "ID of a saved proxy tunnel profile, list index (#), comma list (1,2,3), or range (#1-#3). Multiple values form a failover group (try next on failure), not a multi-hop chain.")]
+    #[schemars(
+        description = "ID of a saved proxy tunnel profile, list index (#), comma list (1,2,3), or range (#1-#3). Multiple values form a failover group (try next on failure), not a multi-hop chain."
+    )]
     pub proxy_profile_id: Option<String>,
     #[schemars(description = "Name of a saved proxy tunnel profile, or list index (#) from dbx_list_proxies")]
     pub proxy_profile_name: Option<String>,
-    #[schemars(description = "Ordered failover list of proxy profile IDs / list indexes. Same as repeating proxy_profile_id; first success wins.")]
+    #[schemars(
+        description = "Ordered failover list of proxy profile IDs / list indexes. Same as repeating proxy_profile_id; first success wins."
+    )]
     pub proxy_profile_ids: Option<Vec<String>>,
     #[schemars(description = "Ordered failover list of proxy profile names. Do not mix with proxy_profile_id(s).")]
     pub proxy_profile_names: Option<Vec<String>>,
@@ -233,6 +237,7 @@ pub struct McpScope {
     pub connection_ids: Vec<String>,
     pub connection_name: Option<String>,
     pub database: Option<String>,
+    pub schema: Option<String>,
 }
 
 struct ResolvedConnection {
@@ -252,11 +257,12 @@ impl McpScope {
             connection_ids,
             connection_name: non_empty_env("DBX_MCP_SCOPE_CONNECTION_NAME"),
             database: non_empty_env("DBX_MCP_SCOPE_DATABASE"),
+            schema: non_empty_env("DBX_MCP_SCOPE_SCHEMA"),
         }
     }
 
     fn enabled(&self) -> bool {
-        self.connection_scope_enabled() || self.database.is_some()
+        self.connection_scope_enabled() || self.database.is_some() || self.schema.is_some()
     }
 
     pub(crate) fn connection_scope_enabled(&self) -> bool {
@@ -325,8 +331,15 @@ impl DbxMcpServer {
         description = "List tables and views for a database connection. Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn list_tables(&self, Parameters(request): Parameters<ListTablesRequest>) -> CallToolResult {
-        let configs = match self.resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default()).await {
+        let configs = match self
+            .resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default())
+            .await
+        {
             Ok(configs) => configs,
+            Err(error) => return error,
+        };
+        let schema = match self.resolve_schema(request.schema.clone()) {
+            Ok(schema) => schema,
             Err(error) => return error,
         };
         let progress = crate::progress::mcp_progress_options();
@@ -345,11 +358,7 @@ impl DbxMcpServer {
                     continue;
                 }
             };
-            match self
-                .backend
-                .list_tables(&connection, &database, &request.schema.clone().unwrap_or_default())
-                .await
-            {
+            match self.backend.list_tables(&connection, &database, &schema).await {
                 Ok(tables) if tables.is_empty() => parts.push(format!("{heading}No tables found.")),
                 Ok(tables) => {
                     let body = tables
@@ -375,14 +384,20 @@ impl DbxMcpServer {
         finish_batch_parts(parts, total, 0, failures, &progress)
     }
 
-
     #[tool(
         name = "dbx_describe_table",
         description = "Get column definitions for a table. Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn describe_table(&self, Parameters(request): Parameters<DescribeTableRequest>) -> CallToolResult {
-        let configs = match self.resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default()).await {
+        let configs = match self
+            .resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default())
+            .await
+        {
             Ok(configs) => configs,
+            Err(error) => return error,
+        };
+        let schema = match self.resolve_schema(request.schema.clone()) {
+            Ok(schema) => schema,
             Err(error) => return error,
         };
         let progress = crate::progress::mcp_progress_options();
@@ -401,11 +416,7 @@ impl DbxMcpServer {
                     continue;
                 }
             };
-            match self
-                .backend
-                .get_columns(&connection, &database, &request.schema.clone().unwrap_or_default(), &request.table)
-                .await
-            {
+            match self.backend.get_columns(&connection, &database, &schema, &request.table).await {
                 Ok(columns) if columns.is_empty() => parts.push(format!("{heading}No columns found.")),
                 Ok(columns) => parts.push(format!("{heading}{}", format_columns(&columns))),
                 Err(error) => {
@@ -416,7 +427,6 @@ impl DbxMcpServer {
         }
         finish_batch_parts(parts, total, 0, failures, &progress)
     }
-
 
     #[tool(
         name = "dbx_execute_query",
@@ -451,9 +461,7 @@ impl DbxMcpServer {
                 None => {
                     return tool_error(
                         "SESSION_NOT_FOUND",
-                        format!(
-                            "Session \"{session_id}\" not found or expired. Open a new one with dbx_open_session."
-                        ),
+                        format!("Session \"{session_id}\" not found or expired. Open a new one with dbx_open_session."),
                     )
                 }
             };
@@ -485,11 +493,15 @@ impl DbxMcpServer {
             // which a USE statement could otherwise escape.
             let allow_database_switch = self.scope.database.is_none();
             let permissions =
-                match validate_sql_policy(connection, &resolved.policy, &database, &request.sql, allow_database_switch) {
+                match validate_sql_policy(connection, &resolved.policy, &database, &request.sql, allow_database_switch)
+                {
                     Ok(permissions) => permissions,
                     Err(error) => return error,
                 };
             let mut arguments = json!({ "sql": request.sql, "limit": 100 });
+            if let Some(schema) = self.scope.schema.as_deref() {
+                arguments["schema"] = json!(schema);
+            }
             arguments["client_session_id"] = json!(session.client_session_id);
             let result =
                 self.backend.execute_agent_tool(connection, &database, "execute_query", arguments, permissions).await;
@@ -590,7 +602,6 @@ impl DbxMcpServer {
         }
     }
 
-
     #[tool(name = "dbx_execute_redis_command", description = "Execute a Redis command on a Redis connection")]
     async fn execute_redis_command(
         &self,
@@ -665,7 +676,10 @@ impl DbxMcpServer {
         description = "Get compact table and column context for writing SQL. Accepts connection ranges (e.g. 1-15); runs sequentially."
     )]
     async fn get_schema_context(&self, Parameters(request): Parameters<SchemaContextRequest>) -> CallToolResult {
-        let configs = match self.resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default()).await {
+        let configs = match self
+            .resolve_batch_configs(&request.selector, crate::tunnel_profiles::ProxyProfileRefArgs::default())
+            .await
+        {
             Ok(configs) => configs,
             Err(error) => return error,
         };
@@ -687,7 +701,6 @@ impl DbxMcpServer {
         }
         finish_batch_parts(parts, total, 0, failures, &progress)
     }
-
 
     #[tool(name = "dbx_add_connection", description = "Add a new database connection to DBX")]
     async fn add_connection(&self, Parameters(request): Parameters<AddConnectionRequest>) -> CallToolResult {
@@ -845,6 +858,10 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
         match self
             .backend
             .bridge_request(
@@ -854,7 +871,7 @@ impl DbxMcpServer {
                     "connection_name": connection.name,
                     "table": request.table,
                     "database": database,
-                    "schema": request.schema,
+                    "schema": schema,
                 }),
             )
             .await
@@ -969,7 +986,6 @@ impl DbxMcpServer {
 }
 
 impl DbxMcpServer {
-
     async fn load_scoped_connections(&self) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, String> {
         let policy = self.backend.load_mcp_global_policy().await?;
         let connections = self.backend.load_connections().await?;
@@ -1034,8 +1050,6 @@ impl DbxMcpServer {
         finish_batch_parts(parts, total, skipped, failures, &progress)
     }
 
-
-
     async fn resolve_batch_configs(
         &self,
         selector: &ConnectionSelector,
@@ -1098,7 +1112,7 @@ impl DbxMcpServer {
         request: &SchemaContextRequest,
     ) -> Result<String, CallToolResult> {
         let database = self.resolve_database(request.database.clone(), connection)?;
-        let schema = request.schema.clone().unwrap_or_default();
+        let schema = self.resolve_schema(request.schema.clone())?;
         let max_tables = request.max_tables.unwrap_or(8).clamp(1, 20);
         let available = self
             .backend
@@ -1156,6 +1170,25 @@ impl DbxMcpServer {
         Ok(requested.or_else(|| connection.database.clone()).unwrap_or_default())
     }
 
+    /// Resolve the schema for scoped CLI agents. A selected schema is a hard
+    /// bound, matching the existing database scope behavior.
+    #[allow(clippy::result_large_err)]
+    fn resolve_schema(&self, requested: Option<String>) -> Result<String, CallToolResult> {
+        let requested = requested.map(|schema| schema.trim().to_string()).filter(|schema| !schema.is_empty());
+        if let Some(scoped) = self.scope.schema.as_deref() {
+            if let Some(requested) = requested.as_deref() {
+                if requested != scoped {
+                    return Err(tool_error(
+                        "SCHEMA_OUT_OF_SCOPE",
+                        format!("Schema \"{requested}\" is outside the scoped schema \"{scoped}\"."),
+                    ));
+                }
+            }
+            return Ok(scoped.to_string());
+        }
+        Ok(requested.unwrap_or_default())
+    }
+
     // CallToolResult is the rmcp wire response type; keeping it unboxed avoids conversions at every tool boundary.
     #[allow(clippy::result_large_err)]
     fn resolve_redis_database(
@@ -1184,11 +1217,14 @@ impl DbxMcpServer {
     }
 
     async fn resolve_connection(&self, selector: &ConnectionSelector) -> Result<ResolvedConnection, CallToolResult> {
-        let looks_like_index = |value: &str| {
-            matches!(crate::list_index::parse_list_index_range(value), Ok(Some(_)))
-        };
+        let looks_like_index = |value: &str| matches!(crate::list_index::parse_list_index_range(value), Ok(Some(_)));
         if selector.connection_id.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_some_and(looks_like_index)
-            || selector.connection_name.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_some_and(looks_like_index)
+            || selector
+                .connection_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_some_and(looks_like_index)
         {
             let policy = self.load_policy().await?;
             let connection = crate::resolve::resolve_single_connection(
@@ -1276,7 +1312,6 @@ impl ServerHandler for DbxMcpServer {
     }
 }
 
-
 fn call_tool_message(result: &CallToolResult) -> String {
     result
         .content
@@ -1294,12 +1329,7 @@ fn finish_batch_parts(
     progress: &crate::progress::ProgressOptions,
 ) -> CallToolResult {
     if total > 1 {
-        parts.push(crate::batch::batch_summary(
-            total,
-            total.saturating_sub(skipped + failures),
-            skipped,
-            failures,
-        ));
+        parts.push(crate::batch::batch_summary(total, total.saturating_sub(skipped + failures), skipped, failures));
     }
     let progress_text = crate::progress::format_progress_section(&crate::progress::collector_text(progress));
     let body = format!("{progress_text}{}", parts.join("\n\n"));
@@ -1536,7 +1566,6 @@ fn format_connections(connections: &[ConnectionSummary]) -> String {
     }
     output
 }
-
 
 fn format_columns(columns: &[dbx_core::db::ColumnInfo]) -> String {
     let rows = columns
@@ -1801,6 +1830,7 @@ mod tests {
             connection_ids: vec!["first".to_string()],
             connection_name: Some("scope-name".to_string()),
             database: None,
+            schema: None,
         };
 
         assert!(scope.matches(&first));
@@ -1825,6 +1855,26 @@ mod tests {
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
+    }
+
+    #[test]
+    fn schema_scope_is_a_hard_bound() {
+        let dameng = connection("dameng-1", "Dameng", "dameng", "APPDB");
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(FakeBackend::default()),
+            McpScope {
+                database: Some("APPDB".to_string()),
+                schema: Some("REPORTING".to_string()),
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(server.resolve_database(None, &dameng).unwrap(), "APPDB");
+        assert_eq!(server.resolve_schema(None).unwrap(), "REPORTING");
+        assert_eq!(server.resolve_schema(Some("REPORTING".to_string())).unwrap(), "REPORTING");
+        let error = server.resolve_schema(Some("APP_USER".to_string())).unwrap_err();
+        assert!(result_text(&error).contains("SCHEMA_OUT_OF_SCOPE"));
     }
 
     #[test]

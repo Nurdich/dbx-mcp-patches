@@ -8,6 +8,7 @@ import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
+import { useSidebarDataOpenRuntime } from "@/composables/useSidebarDataOpenRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -253,6 +254,33 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
 export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value: boolean }; showDatabaseSearchDialog: { value: boolean }; showDiagramDialog: { value: boolean } }) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
+  const settingsStore = useSettingsStore();
+  const { openData } = useSidebarDataOpenRuntime();
+
+  async function openObjectBrowserTableTarget(target: NavigationTarget) {
+    if (!settingsStore.editorSettings.reuseDataTab) {
+      await openTableTarget(target);
+      return;
+    }
+    connectionStore.activeConnectionId = target.connectionId;
+    const normalizedTableType = target.tableType?.trim().toUpperCase().replaceAll(" ", "_");
+    const nodeType = normalizedTableType === "VIEW" ? "view" : normalizedTableType === "MATERIALIZED_VIEW" ? "materialized_view" : "table";
+    await openData(
+      {
+        id: uuid(),
+        label: target.tableName,
+        type: nodeType,
+        connectionId: target.connectionId,
+        database: target.database,
+        schema: target.schema,
+        catalog: target.catalog,
+        tableType: target.tableType,
+      },
+      undefined,
+      "default",
+      { reuseScope: "same-table" },
+    );
+  }
 
   async function openLineageTarget(target: NavigationTarget) {
     dialogs.showFieldLineageDialog.value = false;
@@ -286,7 +314,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     // 其它 loadTableMetadata 消费者最长 30 秒拿到旧列。不带 schema/catalog
     // 维度（宁可多废，schema 形态在各消费点可能不同）
     invalidateTableMetadataCache({ connectionId: context.connectionId, database: context.database, tableName: context.tableName });
-    const matchingDataTabs = queryStore.tabs.filter((tab) => tab.mode === "data" && tab.connectionId === context.connectionId && tab.database === context.database && tab.tableMeta?.tableName === context.tableName && (tab.tableMeta.schema || "") === (context.schema || ""));
+    const matchingDataTabs = queryStore.tabs.filter((tab) => tab.mode === "data" && tab.connectionId === context.connectionId && tab.database === context.database && tab.tableMeta?.tableName === context.tableName && (tab.schema || tab.tableMeta.schema || "") === (context.schema || ""));
     // 同一 catalog 只强制加载一次，结果分发给全部匹配 tab
     const loadedByCatalog = new Map<string, { columns: ColumnInfo[]; primaryKeys: string[] }>();
     for (const tab of matchingDataTabs) {
@@ -295,8 +323,9 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
         // 捕获不可变目标身份：await 期间 tab 可能被导航复用改指其他表，
         // 共享缓存结果落地前仍必须复核，不能解除新目标的 pending
         const capturedMeta = tab.tableMeta!;
-        const capturedTarget = { connectionId: tab.connectionId, database: tab.database, schema: capturedMeta.schema, catalog: capturedMeta.catalog, tableName: capturedMeta.tableName };
-        const metadataSchema = metadataSchemaForConnection(connection, tab.database, capturedMeta.schema);
+        const capturedSchema = tab.schema || capturedMeta.schema;
+        const capturedTarget = { connectionId: tab.connectionId, database: tab.database, schema: capturedSchema, catalog: capturedMeta.catalog, tableName: capturedMeta.tableName };
+        const metadataSchema = metadataSchemaForConnection(connection, tab.database, capturedSchema);
         // 分组含 tableType：主键计算依赖它，不同 tableType 不能共享加载结果
         const catalogKey = `${capturedMeta.catalog ?? ""}\u0000${capturedMeta.tableType ?? ""}`;
         let metadata = loadedByCatalog.get(catalogKey);
@@ -320,6 +349,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
         if (!canApplyDataTabMetadata(currentTab, capturedTarget)) continue;
         queryStore.setTableMeta(tab.id, {
           ...capturedMeta,
+          schema: capturedSchema,
           columns: metadata.columns,
           primaryKeys: metadata.primaryKeys,
         });
@@ -330,5 +360,5 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
     }
   }
 
-  return { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, onStructureEditorSaved, openTableTarget };
+  return { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, openObjectBrowserTableTarget, onStructureEditorSaved, openTableTarget };
 }

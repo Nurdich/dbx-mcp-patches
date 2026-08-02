@@ -2,7 +2,7 @@
 import { computed, ref, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Table2, Braces, X, Columns3, Check, Search, Wrench, Filter } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -11,13 +11,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DataGrid from "@/components/grid/DataGrid.vue";
+import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
+import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { documentViewerFontStyle } from "@/lib/document/documentViewerFontStyle";
 import { clampDocumentPage, documentPageRequestLimit, resetElasticsearchDocumentTotals, resolveElasticsearchDocumentTotals } from "@/lib/document/elasticsearchDocumentTotals";
-import { canGoNextDocumentPage, resolveDocumentQueryTotals } from "@/lib/document/documentQueryTotals";
+import { canGoNextDocumentPage, isSameDocumentQueryTotalCountRequest, resolveDocumentQueryTotals, type DocumentQueryTotalCountRequest } from "@/lib/document/documentQueryTotals";
 import {
   arrayObjectAncestorPathForDocumentField,
   buildDocumentFilterCondition,
@@ -43,6 +45,7 @@ import {
   type DocumentFieldPathNode,
   type DocumentFilterMode,
   type DocumentFilterRule,
+  type DocumentStoreKind,
   type ElasticsearchBoolClause,
   type ElasticsearchQueryType,
 } from "@/lib/app/documentStoreProvider";
@@ -63,6 +66,8 @@ import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/com
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentDisplayValue, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { findDocumentTextMatches, renderDocumentJsonHtml } from "@/lib/document/documentJsonSearch";
+import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
 import { useSettingsStore } from "@/stores/settingsStore";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
@@ -116,6 +121,7 @@ const sortInput = ref("");
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
+const viewOptionsOpen = ref(false);
 const mongoUpdateTarget = computed(() => (props.databaseType === "mongodb" && mongoCopyDocumentsAvailable.value ? { collection: props.collection, idColumn: "_id" as const } : undefined));
 const documentViewerRef = ref<HTMLElement>();
 const documentSearchInputRef = ref<HTMLInputElement>();
@@ -124,8 +130,11 @@ const documentSearchQuery = ref("");
 const documentSearchMatchIndex = ref(0);
 const documentSearchHasNavigated = ref(false);
 const documentViewerSearchActive = ref(false);
-const columnVisibilitySearch = ref("");
-const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
+
+function openDataGridExtractorConfiguration() {
+  viewOptionsOpen.value = false;
+  void nextTick(() => dataGridRef.value?.openExtractorConfiguration());
+}
 const tableSearchSplitContainerRef = ref<HTMLDivElement>();
 const tableFindPaneWidth = ref<number | null>(null);
 const isResizingTableSearchSplit = ref(false);
@@ -136,7 +145,34 @@ let elasticsearchExactTotal: number | undefined;
 let elasticsearchPaginationLowerBound: number | undefined;
 let elasticsearchCountExecutionId = "";
 let elasticsearchCountGeneration = 0;
+type LoadedDocumentQueryTotalCountRequest = DocumentQueryTotalCountRequest & { storeKind: DocumentStoreKind };
+let loadedDocumentQueryTotalCountRequest: LoadedDocumentQueryTotalCountRequest | undefined;
+let documentRequestGeneration = 0;
 const documentStoreProvider = computed(() => documentStoreProviderFor(props.databaseType));
+const documentColumnLayoutScopeKey = computed(() =>
+  documentDataGridColumnLayoutScopeKey({
+    databaseType: props.databaseType ?? "mongodb",
+    connectionId: props.connectionId,
+    database: props.database,
+    collection: props.collection,
+  }),
+);
+const legacyDocumentColumnVisibilityScopeKey = computed(() =>
+  documentGridColumnVisibilityScopeKey({
+    databaseType: props.databaseType,
+    connectionId: props.connectionId,
+    database: props.database,
+    collection: props.collection,
+  }),
+);
+
+watch(
+  [legacyDocumentColumnVisibilityScopeKey, documentColumnLayoutScopeKey],
+  ([legacyScopeKey, layoutScopeKey]) => {
+    migrateDocumentGridColumnVisibilityToLayout(legacyScopeKey, layoutScopeKey);
+  },
+  { immediate: true },
+);
 
 const pageTotal = computed(() => paginationTotal.value);
 const documentPageCount = computed(() => (pageTotal.value === undefined ? undefined : Math.max(1, Math.ceil(pageTotal.value / pageSize.value))));
@@ -215,7 +251,10 @@ const deleteDetails = computed(() => {
   if (pending.kind === "document") {
     const id = documents.value[pending.index]?._id ?? "";
     const displayId = mongoDocumentIdForGrid(id);
-    if (props.databaseType === "elasticsearch") return `Elasticsearch index: ${props.collection}\nDocument _id: ${String(displayId)}`;
+    if (props.databaseType === "elasticsearch" || props.databaseType === "easysearch") {
+      const product = props.databaseType === "easysearch" ? "Easysearch" : "Elasticsearch";
+      return `${product} index: ${props.collection}\nDocument _id: ${String(displayId)}`;
+    }
     return t("dangerDialog.mongoDocumentDetails", { collection: props.collection, id: String(displayId) });
   }
   return t("dangerDialog.mongoFieldDetails", { field: pending.name || t("mongo.field") });
@@ -555,16 +594,21 @@ function documentRoutingFromDocument(doc: JsonRecord | undefined): string | unde
   return normalizeDocumentStoreRouting(doc?._routing);
 }
 
+function documentTypeFromDocument(doc: JsonRecord | undefined): string | undefined {
+  const documentType = doc?._type;
+  return typeof documentType === "string" && documentType.trim() ? documentType.trim() : undefined;
+}
+
 function documentRoutingFromGridRow(row: MongoInputValue[] | undefined, columns: string[]): string | undefined {
   const routingColIdx = columns.indexOf("_routing");
   return routingColIdx >= 0 ? normalizeDocumentStoreRouting(row?.[routingColIdx]) : undefined;
 }
 
-function documentStoreWriteApis() {
+function documentStoreWriteApis(documentType?: string) {
   return {
     insert: (docJson: string, routing?: string) => api.documentInsertDocument(props.connectionId, props.database, props.collection, docJson, routing),
     update: (id: string, docJson: string, routing?: string) => api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, docJson, routing),
-    delete: (id: string, routing?: string) => api.documentDeleteDocument(props.connectionId, props.database, props.collection, id, routing),
+    delete: (id: string, routing?: string) => api.documentDeleteDocument(props.connectionId, props.database, props.collection, id, routing, documentType),
   };
 }
 
@@ -609,8 +653,9 @@ async function gridSave(changes: DocumentGridChanges) {
     if (id == null) continue;
     const document = documents.value[rowIdx];
     const routing = isEs ? documentRoutingFromDocument(document) : undefined;
+    const documentType = isEs ? documentTypeFromDocument(document) : undefined;
     const documentId = isEs ? id : (document?._id ?? id);
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isEs ? String(documentId) : serializeMongoDocumentId(documentId), routing);
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, isEs ? String(documentId) : serializeMongoDocumentId(documentId), routing, documentType);
   }
 
   for (const newRow of changes.newRows) {
@@ -737,6 +782,13 @@ function elasticsearchCountFilterKey(filter: string | undefined): string {
   return JSON.stringify([props.connectionId, props.database, props.collection, filter ?? ""]);
 }
 
+function isCurrentDocumentQueryTotalCountRequest(request: LoadedDocumentQueryTotalCountRequest): boolean {
+  if (request.generation !== documentRequestGeneration || request.connectionId !== props.connectionId || request.database !== props.database || request.collection !== props.collection || request.storeKind !== documentStoreProvider.value.kind) {
+    return false;
+  }
+  return loadedDocumentQueryTotalCountRequest !== undefined && isSameDocumentQueryTotalCountRequest(request, loadedDocumentQueryTotalCountRequest) && request.storeKind === loadedDocumentQueryTotalCountRequest.storeKind;
+}
+
 function cancelElasticsearchCount() {
   elasticsearchCountGeneration++;
   const executionId = elasticsearchCountExecutionId;
@@ -755,13 +807,12 @@ function resetElasticsearchTotals(options: { preservePaginationTotal?: boolean }
   totalIsExact.value = nextTotals.totalIsExact;
 }
 
-function clampPageToPaginationTotal(): boolean {
+function clampPageToPaginationTotal(): number | undefined {
   const cap = paginationTotal.value;
-  if (cap === undefined) return false;
+  if (cap === undefined) return undefined;
   const nextPage = clampDocumentPage(page.value, pageSize.value, cap);
-  if (page.value === nextPage) return false;
-  page.value = nextPage;
-  return true;
+  if (page.value === nextPage) return undefined;
+  return nextPage;
 }
 
 function startElasticsearchExactCount(filter: string | undefined) {
@@ -782,7 +833,8 @@ function startElasticsearchExactCount(filter: string | undefined) {
       total.value = totals.total;
       totalIsExact.value = totals.totalIsExact;
       paginationTotal.value = totals.paginationTotal;
-      if (clampPageToPaginationTotal()) void load();
+      const clampedPage = clampPageToPaginationTotal();
+      if (clampedPage !== undefined) void load({ page: clampedPage });
     })
     .catch(() => {
       // The lower-bound result remains truthful when a background count fails.
@@ -827,27 +879,35 @@ function applyElasticsearchSearchTotal(searchTotal: number, isExact: boolean, fi
   startElasticsearchExactCount(filter);
 }
 
-async function load() {
+async function load(options: { page?: number } = {}) {
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
+  const requestGeneration = ++documentRequestGeneration;
   const executionId = uuid();
   loading.value = true;
   documentLoadExecutionId.value = executionId;
   documentLoadCancelling.value = false;
   startDocumentLoadingTimer();
   error.value = "";
+  const requestPage = options.page ?? page.value;
   const previousSelectedIdx = selectedIdx.value;
   const previousSelectedId = previousSelectedIdx === null ? null : documentIdentity(documents.value[previousSelectedIdx]);
   try {
+    const connectionId = props.connectionId;
+    const database = props.database;
+    const collection = props.collection;
+    const storeKind = documentStoreProvider.value.kind;
     const filter = currentDocumentFilter();
-    if (documentStoreProvider.value.kind === "elasticsearch" && elasticsearchCountKey !== null && elasticsearchCountKey !== elasticsearchCountFilterKey(filter)) {
+    const countRequest: LoadedDocumentQueryTotalCountRequest = { connectionId, database, collection, filter, generation: requestGeneration, storeKind };
+    if (storeKind === "elasticsearch" && elasticsearchCountKey !== null && elasticsearchCountKey !== elasticsearchCountFilterKey(filter)) {
       resetElasticsearchTotals();
     }
     const sort = currentDocumentSortJson(sortInput.value);
-    const skip = page.value * pageSize.value;
-    const result = await api.documentFindDocuments(props.connectionId, props.database, props.collection, skip, documentRequestLimit.value, filter, undefined, sort, executionId);
+    const skip = requestPage * pageSize.value;
+    const result = await api.documentFindDocuments(connectionId, database, collection, skip, documentRequestLimit.value, filter, undefined, sort, executionId);
     if (documentLoadExecutionId.value !== executionId) return;
+    if (connectionId !== props.connectionId || database !== props.database || collection !== props.collection || storeKind !== documentStoreProvider.value.kind) return;
     const nextDocuments =
-      documentStoreProvider.value.kind === "elasticsearch" && result.raw_documents?.length === result.documents.length
+      storeKind === "elasticsearch" && result.raw_documents?.length === result.documents.length
         ? result.raw_documents.map((raw, index) => {
             try {
               return asRecord(parseJsonPreservingLargeNumbers(raw));
@@ -858,9 +918,12 @@ async function load() {
         : result.documents.map(asRecord);
     const hasTypePreservingCopyDocuments = result.extended_documents?.length === nextDocuments.length;
     const nextCopyDocuments = hasTypePreservingCopyDocuments ? result.extended_documents!.map(asRecord) : nextDocuments;
+    // Commit page + rows together so stale rows never briefly show last-page indexes.
+    if (options.page !== undefined) page.value = options.page;
     documents.value = nextDocuments;
     copyDocuments.value = nextCopyDocuments;
     mongoCopyDocumentsAvailable.value = hasTypePreservingCopyDocuments;
+    loadedDocumentQueryTotalCountRequest = countRequest;
     if (nextDocuments.length > 0) {
       const keySet = new Set<string>();
       keySet.add("_id");
@@ -871,11 +934,15 @@ async function load() {
       }
       lastGridColumns.value = [...keySet];
     }
-    if (documentStoreProvider.value.kind === "elasticsearch") {
+    if (storeKind === "elasticsearch") {
       applyElasticsearchSearchTotal(result.total, result.total_is_exact !== false, filter);
     } else {
       cancelElasticsearchCount();
-      const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false);
+      const totals = resolveDocumentQueryTotals(result.total, result.total_is_exact !== false, {
+        page: requestPage,
+        pageSize: pageSize.value,
+        rowCount: nextDocuments.length,
+      });
       total.value = totals.total;
       totalIsExact.value = totals.totalIsExact;
       paginationTotal.value = totals.paginationTotal;
@@ -891,6 +958,34 @@ async function load() {
       stopDocumentLoadingTimer();
     }
   }
+}
+
+async function countExactDocumentTotal(): Promise<number | undefined> {
+  const request = loadedDocumentQueryTotalCountRequest;
+  if (!request || !isCurrentDocumentQueryTotalCountRequest(request)) return undefined;
+  if (request.storeKind === "elasticsearch") {
+    const exactCount = await api.elasticsearchCountDocuments(request.connectionId, request.collection, request.filter);
+    if (!isCurrentDocumentQueryTotalCountRequest(request)) return undefined;
+    if (!Number.isFinite(exactCount) || exactCount < 0) {
+      throw new Error("invalid count");
+    }
+    elasticsearchExactTotal = exactCount;
+    const totals = resolveElasticsearchDocumentTotals(elasticsearchPaginationLowerBound ?? exactCount, false, exactCount);
+    total.value = totals.total;
+    totalIsExact.value = totals.totalIsExact;
+    paginationTotal.value = totals.paginationTotal;
+    return exactCount;
+  }
+  const exactCount = await api.mongoCountDocuments(request.connectionId, request.database, request.collection, request.filter, "accurate");
+  if (!isCurrentDocumentQueryTotalCountRequest(request)) return undefined;
+  if (!Number.isFinite(exactCount) || exactCount < 0) {
+    throw new Error("invalid count");
+  }
+  const totals = resolveDocumentQueryTotals(exactCount, true);
+  total.value = totals.total;
+  totalIsExact.value = totals.totalIsExact;
+  paginationTotal.value = totals.paginationTotal;
+  return exactCount;
 }
 
 async function refreshDocuments() {
@@ -924,8 +1019,8 @@ function paginate(offset: number, limit: number) {
   const normalizedLimit = normalizeResultPageSize(limit, pageSize.value);
   pageSize.value = normalizedLimit;
   const requestedPage = Math.floor(Math.max(0, offset) / normalizedLimit);
-  page.value = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
-  void load();
+  const nextPage = clampDocumentPage(requestedPage, normalizedLimit, paginationTotal.value);
+  void load({ page: nextPage });
 }
 
 function onSort(column: string, _columnIndex: number, direction: "asc" | "desc" | null) {
@@ -1247,10 +1342,10 @@ async function saveDoc() {
     const doc = buildDocumentFromEditor();
     if (!doc) return;
 
-    const apis = documentStoreWriteApis();
     const kind = documentStoreProvider.value.kind;
 
     if (isNew.value) {
+      const apis = documentStoreWriteApis();
       const explicitId = kind === "elasticsearch" ? documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch")) : null;
       await insertDocumentStoreDocumentCore({
         kind,
@@ -1273,6 +1368,7 @@ async function saveDoc() {
         return;
       }
       const currentRouting = documentRoutingFromDocument(current);
+      const apis = documentStoreWriteApis(kind === "elasticsearch" ? documentTypeFromDocument(current) : undefined);
       const write = resolveWriteIdentityFromEditor(doc, currentId, currentRouting);
       if (!write) {
         error.value = t("mongo.jsonIdRequired");
@@ -1311,7 +1407,7 @@ async function applyDeleteDoc(idx: number) {
   if (!id) return;
   error.value = "";
   try {
-    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), documentRoutingFromDocument(doc));
+    await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), documentRoutingFromDocument(doc), documentStoreProvider.value.kind === "elasticsearch" ? documentTypeFromDocument(doc) : undefined);
     if (selectedIdx.value === idx) {
       selectedIdx.value = null;
       editJson.value = "";
@@ -1440,6 +1536,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   if (documentLoadExecutionId.value) void api.cancelQuery(documentLoadExecutionId.value);
+  documentRequestGeneration++;
+  loadedDocumentQueryTotalCountRequest = undefined;
   cancelElasticsearchCount();
   stopDocumentLoadingTimer();
   endTableSearchSplitResize();
@@ -1521,54 +1619,9 @@ defineExpose({ focusSearch });
 
       <div class="flex-1" />
 
-      <Popover v-if="viewMode === 'table' && gridResult.columns.length">
-        <PopoverTrigger as-child>
-          <Button variant="ghost" size="sm" class="h-5 shrink-0 gap-1 px-1.5 text-xs text-foreground hover:bg-accent" :class="{ 'bg-accent text-foreground': (dataGridRef?.hiddenColumnCount ?? 0) > 0 }" :title="t('grid.columnVisibility')" :aria-label="t('grid.columnVisibility')">
-            <Columns3 class="h-3.5 w-3.5" />
-            {{ t("grid.columnVisibility") }}
-            <span v-if="(dataGridRef?.hiddenColumnCount ?? 0) > 0" class="tabular-nums"> {{ dataGridRef?.visibleColumnCount }}/{{ dataGridRef?.displayableColumnCount }} </span>
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent align="end" class="w-64 max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl" @click.stop @keydown.stop>
-          <div class="border-b bg-muted/40 px-2 py-1.5">
-            <div class="flex items-center justify-between gap-2">
-              <div class="text-xs font-semibold">{{ t("grid.columnVisibility") }}</div>
-              <div class="text-[10px] text-muted-foreground tabular-nums">{{ dataGridRef?.visibleColumnCount ?? 0 }}/{{ dataGridRef?.displayableColumnCount ?? 0 }}</div>
-            </div>
-          </div>
-          <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
-            <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-            <input v-model="columnVisibilitySearch" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-6 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('grid.searchColumns')" />
-          </div>
-          <div class="max-h-72 overflow-auto py-0.5">
-            <button v-for="option in columnVisibilityOptions" :key="`${option.index}:${option.column}`" type="button" class="grid w-full grid-cols-[1.5rem_minmax(0,1fr)] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="dataGridRef?.toggleColumnVisibility(option.index)">
-              <span class="flex h-4 w-4 items-center justify-center rounded border" :class="dataGridRef?.isColumnVisible(option.index) ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background text-transparent'">
-                <Check class="h-3 w-3 stroke-[3]" />
-              </span>
-              <span class="truncate font-mono text-xs" :title="option.column">{{ option.column }}</span>
-            </button>
-            <div v-if="columnVisibilityOptions.length === 0" class="px-2 py-6 text-center text-xs text-muted-foreground">
-              {{ t("grid.noSearchResults") }}
-            </div>
-          </div>
-          <div class="flex flex-col gap-1 border-t bg-muted/30 px-2 py-1.5">
-            <span class="text-[11px] leading-4 text-muted-foreground">{{ t("grid.columnVisibilityHint") }}</span>
-            <div class="flex items-center justify-end gap-1">
-              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="(dataGridRef?.displayableColumnCount ?? 0) <= 1" @click="dataGridRef?.invertColumnVisibility()">
-                {{ t("grid.invertColumnVisibility") }}
-              </Button>
-              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="!dataGridRef?.hasCustomColumnOrder" @click="dataGridRef?.resetColumnOrder()">
-                {{ t("grid.resetColumnOrder") }}
-              </Button>
-              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" :disabled="(dataGridRef?.hiddenColumnCount ?? 0) === 0" @click="dataGridRef?.showAllColumns()">
-                {{ t("grid.showAllColumns") }}
-              </Button>
-            </div>
-          </div>
-        </PopoverContent>
-      </Popover>
+      <DataGridColumnLayoutPopover v-if="viewMode === 'table' && gridResult.columns.length" :grid="dataGridRef" />
 
-      <Popover v-if="viewMode === 'table' && gridResult.columns.length">
+      <Popover v-if="viewMode === 'table' && gridResult.columns.length" v-model:open="viewOptionsOpen">
         <PopoverTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :class="{ 'bg-accent text-foreground': dataGridRef?.nullColumnsHidden }" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
             <Wrench class="h-4 w-4" />
@@ -1585,6 +1638,13 @@ defineExpose({ focusSearch });
               <span v-if="(dataGridRef?.allNullColumnCount ?? 0) > 0" class="text-muted-foreground tabular-nums"> ({{ dataGridRef?.allNullColumnCount }}) </span>
             </span>
           </label>
+          <DataGridCopyFormatControl
+            :current-label="dataGridRef?.defaultCopyExtractorLabel ?? '-'"
+            :current-value="dataGridRef?.defaultCopyExtractor ?? ''"
+            :items="dataGridRef?.copyExtractorMenuItems ?? []"
+            @select="dataGridRef?.setDefaultCopyExtractor($event)"
+            @configure="openDataGridExtractorConfiguration"
+          />
         </PopoverContent>
       </Popover>
     </div>
@@ -1605,6 +1665,9 @@ defineExpose({ focusSearch });
       ref="dataGridRef"
       class="flex-1 min-h-0"
       :result="gridResult"
+      :connection-id="props.connectionId"
+      :database="props.database"
+      :column-layout-scope-key="documentColumnLayoutScopeKey"
       context="results"
       :database-type="props.databaseType"
       :mongo-update-target="mongoUpdateTarget"
@@ -1616,7 +1679,9 @@ defineExpose({ focusSearch });
       :page-limit="pageSize"
       :total-row-count="total"
       :total-row-count-is-exact="totalIsExact"
+      :inexact-total-row-count-mode="documentStoreProvider.kind === 'mongodb' ? 'estimated' : 'at-least'"
       :pagination-total-row-count="pageTotal"
+      :count-total-rows="countExactDocumentTotal"
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
